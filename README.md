@@ -36,6 +36,15 @@ With a token, lookups of other IPs use IPinfo Lite: unlimited requests, country 
 Without one, the Worker falls back to IPinfo's public endpoint, which has city-level data
 but is limited to about 1,000 requests a day and that limit is shared, so expect errors under load.
 
+**Attribution.** IPinfo's free data (Lite and the public endpoint, CC BY-SA 4.0) has one condition: credit
+IPinfo with a link wherever the data is shown. Every page the Worker renders (home, `/<ip>`, `/AS<n>`,
+`/dns/...`, `/whois/...`, the tool pages and 404s) shares the footer in `public/index.html`, which ends with
+`IP address data powered by IPinfo`, linked to https://ipinfo.io: IPinfo's own suggested wording. The footer
+stays on screen under the terminal, so it covers terminal results too. Text answers, `/help`, `/api`, the
+OpenAPI file and `llms.txt` carry the same line, and one-value answers carry it in an `x-attribution` header
+(see "The command line (curl-first)" below). Keep the credit on Core too: lookups fall back to Lite
+whenever the Core budget runs out, and one-value answers and the DNS "hosted by" row always use Lite.
+
 ### City-level lookups: IPinfo Core (paid)
 
 IPinfo Core adds city, region, coordinates, time zone and a connection type (mobile network,
