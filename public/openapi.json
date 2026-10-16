@@ -12,7 +12,7 @@
     { "name": "you", "description": "Your own address, from Cloudflare's edge (request.cf). No third-party lookup." },
     { "name": "port", "description": "Is a TCP port open on your own address? The server connects to the address the request comes from, never any other." },
     { "name": "lookup", "description": "Any public IP address or network." },
-    { "name": "tools", "description": "DNS, email security (mail), registry records (whois) and the subnet calculator." },
+    { "name": "tools", "description": "DNS, email security (mail), registry records (whois), the subnet calculator and shared leak test results." },
     { "name": "docs", "description": "Help and machine-readable descriptions." }
   ],
   "paths": {
@@ -234,6 +234,21 @@
         }
       }
     },
+    "/leaktest/r/{code}": {
+      "get": {
+        "tags": ["tools"], "operationId": "leakResult", "summary": "A leak test result someone shared: the grade, whether a VPN was on, and which checks passed, leaked or weren't tested",
+        "description": "The link `share` gives after the leak test (`leaktest` in the browser terminal, or https://ipterm.net/leaktest). Its code is made in that browser (public/leakgrade.js): version 1, the grade letter, then two Crockford base32 characters holding whether a VPN was detected and each graded check's flag. It holds nothing else, no IP address, provider, location or DNS resolver, so the answer is decoded from the code alone: nothing is looked up, tested or stored, and it doesn't count toward the rate limit. A code whose grade doesn't match its checks is not valid. Command-line clients get JSON (`?format=text` for aligned lines); browsers get a noindex page with a \"run yours\" link, which never runs the test by itself. Cached for a day.",
+        "parameters": [
+          { "name": "code", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^1[abcdfABCDF][0-9a-hjkmnp-tv-zA-HJKMNP-TV-Z]{2}$" }, "example": "1bjp",
+            "description": "The result code, in either case. 1bjp is a B on a VPN, with only the time zone leaking." },
+          { "$ref": "#/components/parameters/format" }
+        ],
+        "responses": {
+          "200": { "description": "The result.", "headers": { "Cache-Control": { "schema": { "type": "string" }, "example": "public, max-age=86400" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LeakResult" } }, "text/plain": { "schema": { "type": "string" }, "example": "grade        B\nvpn          a VPN was on\nDNS          no leak\nWebRTC       no leak\nIPv6 / IPv4  no leak\ntime zone    leaked\n" }, "text/html": { "schema": { "type": "string" } } } },
+          "404": { "description": "Not a leak test result code. Browsers get a 404 page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } }, "text/html": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
     "/api/lookup": {
       "get": {
         "tags": ["lookup"], "operationId": "apiLookup", "summary": "IP details as JSON, always (no ip: yourself)",
@@ -297,6 +312,19 @@
     },
     "schemas": {
       "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } },
+      "LeakResult": {
+        "type": "object", "required": ["code", "grade", "vpn", "checks"],
+        "properties": {
+          "code": { "type": "string", "description": "The code, in lower case", "example": "1bjp" },
+          "grade": { "type": "string", "enum": ["A", "B", "C", "D", "F"], "description": "A: no leaks; B: only the time zone leaks; C: DNS leaks, but neither WebRTC nor IPv6; D: WebRTC or IPv6 leaks (one of the two), and DNS doesn't; F: WebRTC or IPv6 and DNS, or WebRTC and IPv6. Only leaks past a VPN count" },
+          "vpn": { "type": "string", "enum": ["a VPN was on", "no VPN detected", "couldn't tell whether a VPN was on"] },
+          "checks": {
+            "type": "object", "required": ["dns", "webrtc", "ipv6", "tz"], "description": "Each graded check: DNS, WebRTC, the other IP version (IPv6 or IPv4) and the time zone",
+            "properties": { "dns": { "$ref": "#/components/schemas/LeakCheck" }, "webrtc": { "$ref": "#/components/schemas/LeakCheck" }, "ipv6": { "$ref": "#/components/schemas/LeakCheck" }, "tz": { "$ref": "#/components/schemas/LeakCheck" } }
+          }
+        }
+      },
+      "LeakCheck": { "type": "string", "enum": ["no leak", "leaked", "not tested"] },
       "PortCheck": {
         "type": "object", "required": ["port", "protocol", "state", "summary"],
         "properties": {

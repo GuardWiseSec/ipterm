@@ -52,8 +52,8 @@
 //                           largest networks in tiers (src/asn-sitemap.js, built by tools/build_asn_sitemap.mjs)
 //   GET /status             for the owner: today's and this hour's IPinfo Core and proxycheck.io budget use.
 //                           Needs the STATUS_KEY secret (x-status-key header or ?key=); without it, a 404
-//   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /mail/..., /whois/..., /cidr/..., /route/... and their
-//                           /api/ forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
+//   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /mail/..., /whois/..., /cidr/..., /route/..., /leaktest/r/...
+//                           and their /api/ forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
 //   /openapi.json, /llms.txt, /opensearch.xml  static files describing the API and the search (served without
 //                           running the Worker)
 //   anything else: a static file if one exists, a domain-shaped path (/example.com) redirects to its
@@ -746,9 +746,6 @@ const CLOUDFLARE_RANGES = ['173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/2
 // which includes the forms that embed an IPv4 address (::/96, 64:ff9b::/96). Inside 2000::/3 it also
 // refuses these: the IETF blocks (Teredo and others), 6to4 (which embeds IPv4) and documentation.
 const PORT_V6_RESERVED = ['2001::/23', '2002::/16', '3fff::/20'];
-// Providers that usually share IPv4 addresses between customers (carrier-grade NAT), so no port forward
-// can work. Mobile networks in general do; these are the common home-internet cases.
-const CGNAT_ASNS = { 14593: 'Starlink', 21928: 'T-Mobile', 22394: 'Verizon Wireless', 6167: 'Verizon Wireless', 20057: 'AT&T Mobility' };
 
 // Fetches from the page itself say so (Sec-Fetch-Site), and that always wins when it is sent. Browsers
 // without Sec-Fetch-* send no Origin on a same-origin GET, so the terminal also sends X-Ipterm (port or
@@ -860,7 +857,7 @@ function portNotes(io, d, state, svc, asn) {
     : `To open it: the program must be running and listening on port ${n}, the device's firewall must allow it, and the router must forward TCP port ${n} to the device's local IP address (give the device a fixed local IP so the forward keeps working).`);
   if (svc && svc.tips) notes.push(`${svc.name}: ${svc.tips}`);
   if (!v6) {
-    const isp = CGNAT_ASNS[asn];
+    const isp = PORTS.cgnat(asn);              // a provider known for carrier-grade NAT (public/ports.js)
     notes.push((isp ? `${isp} usually shares IPv4 addresses between customers (carrier-grade NAT), which would explain this. ` : '') +
       `If your router's internet (WAN) address isn't ${d.ip}, or is between 100.64.0.0 and 100.127.255.255, your provider uses carrier-grade NAT: the router has no public address of its own, so no port forward can reach it. Ask your provider for a public IPv4 address, or use IPv6 or a tunnel such as Tailscale or Cloudflare Tunnel.`);
   }
@@ -1285,6 +1282,10 @@ function helpBody(h, env = {}) {
     block('PORT CHECK (YOUR OWN ADDRESS ONLY, 10 A MINUTE)', [
       [`curl -4 ${h}/port/22`, 'is TCP port 22 open on your IP?'],
       ['-4 tests your IPv4 address, where router port forwards apply.'],
+    ]),
+    block('LEAK TEST RESULTS (THE LINK share GIVES AFTER leaktest)', [
+      [`curl ${h}/leaktest/r/1bjp`, 'the grade, VPN on or not, each check'],
+      ['The code holds nothing else: no IP address, provider or place.'],
     ]),
     block('TEXT INSTEAD OF JSON', [
       ['Add ?format=text to any lookup for aligned lines, like the web terminal.'],

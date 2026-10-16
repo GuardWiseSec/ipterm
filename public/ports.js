@@ -109,6 +109,11 @@
   // Ports ipterm can't check at all, and why: the Worker refuses them before connecting, and their pages
   // and the terminal say so instead of offering a check.
   const UNTESTABLE = { 25: "Cloudflare, which runs ipterm, doesn't allow connections to port 25 (email), to stop spam." };
+  // Providers that usually share IPv4 addresses between customers (carrier-grade NAT), so no port forward
+  // can work, by AS number. Mobile networks in general do; these are the common home-internet cases. The
+  // Worker names yours in the notes under a result that isn't open, and the page hides the names in a
+  // port result's Markdown, since they say who your provider is.
+  const CGNAT = { 14593: 'Starlink', 21928: 'T-Mobile', 22394: 'Verizon Wireless', 6167: 'Verizon Wireless', 20057: 'AT&T Mobility' };
   const BY = new Map(LIST.map(([port, name, proto, use, tips, risk]) => [port, { port, name, proto, use, tips, risk: risk || null }]));
   const PROTO = { tcp: 'TCP', udp: 'UDP (this check can only test TCP)', 'tcp+udp': 'TCP and UDP (the check tests TCP)' };
   const valid = n => Number.isInteger(n) && n >= 1 && n <= 65535;
@@ -118,6 +123,9 @@
     protoText: p => PROTO[p] || 'TCP',
     // why ipterm can't check port n (one sentence), or null when it can
     untestable: n => UNTESTABLE[Number(n)] || null,
+    // the carrier-grade NAT provider on AS number asn, or null; and all their names
+    cgnat: asn => (Object.hasOwn(CGNAT, asn) ? CGNAT[asn] : null),
+    cgnatNames: () => [...new Set(Object.values(CGNAT))],
     // "22", " 022 " -> 22; anything else (ranges, lists, words) -> null
     parse: s => { const t = String(s == null ? '' : s).trim(); const n = /^\d{1,5}$/.test(t) ? Number(t) : NaN; return valid(n) ? n : null; },
   };

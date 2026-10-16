@@ -321,7 +321,7 @@ The map's location is Cloudflare's guess for the address, usually the provider's
 an `x-attribution` response header instead (it is in `/help`, `/api`, the OpenAPI file and `llms.txt` too).
 
 **Aligned text instead of JSON:** add `?format=text` to `/`, `/json`, `/<ip>`, `/AS<number>`, `/dns/...`,
-`/mail/...`, `/whois/...`, `/cidr/...`, `/route/...` (and their `/api/...` forms) for key/value lines like the terminal draws.
+`/mail/...`, `/whois/...`, `/cidr/...`, `/route/...`, `/leaktest/r/...` (and their `/api/...` forms) for key/value lines like the terminal draws.
 Browsers get the text too. Results that include IPinfo data end with `IP address data powered by IPinfo
 (https://ipinfo.io)`, as IPinfo's free-data terms ask. JSON stays the default for command-line clients,
 and `curl ipterm.net` still prints the bare address. Shells such as zsh treat `?` as a wildcard, so the
@@ -373,11 +373,32 @@ one (`shareBar()` and `current` in `public/app.js`).
   whoami or a port check the link is the page itself (`/`, `/port/<n>`), which shows each visitor their own result,
   so the share sheet says "check yours". After leaktest it is the grade's link (`/leaktest/r/<code>`, with the text
   "my ipterm leak test grade: X"; see "Shared results"), or `/leaktest` with "check yours" when the run has no
-  grade. Their Markdown replaces the visitor's addresses with `[hidden]` (for leaktest also the DNS resolvers' and,
-  after a compare, the previous run's, whose lines the compare prints) and leaves out the rows that
-  are the address in another form or point at it (`SELF_DROP`: hostname, the other IP version, postal code,
-  coordinates, decimal, hex, binary, reverse-DNS zone). `copy` still copies your own IP after whoami: it goes to
-  your own clipboard, not to anyone else.
+  grade. `copy` still copies your own IP after whoami: it goes to your own clipboard, not to anyone else.
+- Their Markdown (`[md]`, whose label says "your address, provider and location left out") keeps the findings
+  but nothing that identifies or places the visitor:
+  - Rows that only hold such values are left out: for whoami and a port check (`SELF_DROP`), those that are the
+    address in another form or point at it (hostname, the other IP version, postal code, coordinates, decimal,
+    hex, binary, reverse-DNS zone, expanded, /64 prefix) and those that only name the provider or place the
+    visitor (network, domain, connection, location, continent, local time, edge); for leaktest (`LEAK_DROP`),
+    the browser-language line.
+  - Inside sentences, the visitor's addresses read `[hidden]` (`hide`: for leaktest also its WebRTC and DNS
+    resolver addresses), and so do the names and places in `terms`, from the result's own data
+    (`placeTerms()`): the provider and network names and AS numbers (the ISP, the VPN and its operator from
+    proxycheck.io, the other IP version's network, the DNS resolvers' operators), city, region, postal code,
+    country and country code, the IP's and the device's time zones, the browser language and its country (only
+    a language that names one, like `en-US`: a bare `no` or `it` places no one, and would hide ordinary words),
+    and the Cloudflare data center. A port check's terms are the carrier-grade NAT providers its notes can name
+    (`CGNAT` in `public/ports.js`). Each term matches as a whole word in any case, the longest first, but a
+    code (two or three capitals: a country or data center) only in capitals, since in lower case it's an
+    ordinary word (`in`, `it`, `us`, `man`). `UTC` and Cloudflare's `T1` for Tor are left alone. Addresses go
+    first, so a number among the terms (a 4-digit postal code) can't match inside one and leave the rest
+    showing; a term's own addresses are hidden the same way, so "Cloudflare (1.1.1.1)" still goes whole. Hidden
+    parts next to each other read as one: "near [hidden]".
+  - After a compare, the previous run's addresses and terms are hidden too (each run keeps its own `hide` and
+    `terms`), and the compare's rows show only each run's status ("sites see  [INFO]  →  [OK]",
+    "WebRTC  [LEAK]  →  [OK]"): either run's summary and the verdict ("· fixed", "· confirmed leak: …") stay
+    on screen (marked `.yours`).
+  - Results about other addresses (lookup 8.8.8.8, whois, dig, asn, mail, cidr, route) are copied whole.
 
 **History and keys.** The commands a visitor runs (typed or clicked, never their results) are kept in their browser's
 local storage under `ipterm-history`, the newest 200, so Up, Down and `history` work after a reload. A page's own
@@ -599,7 +620,9 @@ address, and grades the leaks A to F. Each line is marked OK, LEAK or INFO:
   (which can name the VPN service). Two services are named outright: **Cloudflare WARP**, when
   Cloudflare's edge says the request came through it (`warp=on` or `warp=plus` in `/cdn-cgi/trace`, which
   the page reads itself), and **Tor**, when the address is on the Tor Project's exit list (see "Tor exits"
-  below) or Cloudflare gives it the country code `T1`. Both count as a VPN. Without any of these, this line
+  below) or Cloudflare gives it the country code `T1`, or when proxycheck.io knows it as Tor (then this line
+  says "a known Tor address"). Both count as a VPN, and the header tag (`warp on`, `tor`), the verdict and the
+  tally ("no leaks past Tor"), and the compare all name the same one. Without any of these, this line
   says it wasn't checked. An unflagged address on a home or mobile provider's network (IPinfo type "isp",
   a mobile network, or proxycheck.io's "Residential" / "Wireless") is reported plainly as "no VPN", since
   commercial VPN servers run in data centers. Any other unflagged address stays hedged. An
@@ -675,7 +698,9 @@ with unchanged lines folded into one row (a leak that's still there is always sh
 VPN and one without, the run without it shows what a leak would give away, so "a leak if you use a VPN"
 becomes a verdict: "confirmed leak: it's the address you have without the VPN" (WebRTC), "it's your
 network without the VPN" (IPv6), "the same resolvers as without the VPN" (DNS), or "not a leak with the VPN
-on". With the VPN in the same state both times it says "fixed", "still leaks" or "new leak".
+on". With the VPN in the same state both times it says "fixed", "still leaks" or "new leak". `copy md` gives
+each compare row as the two statuses only, OK, LEAK or INFO ("sites see  [INFO]  →  [OK]"): each run's summary
+(its addresses, networks and time zones) and the verdict stay on screen (see "Share, copy and copy md").
 
 #### Shared results (/leaktest/r/<code>)
 
@@ -694,7 +719,9 @@ rejects a code whose letter doesn't match its checks (a 404 page).
   by `node tools/build_og_leak.mjs` with headless Chrome or Edge (set `CHROME` if it isn't found); commit
   the PNGs after changing it.
 - Result pages are `noindex` (meta tag and `X-Robots-Tag`), cached for a day like static pages, and not
-  in the sitemap. Command-line clients get the decoded result as JSON (`?format=text` for lines).
+  in the sitemap. Command-line clients get the decoded result as JSON, `{code, grade, vpn, checks: {dns,
+  webrtc, ipv6, tz}}` (`?format=text` for lines), and a bad code as a 404 with `{error}`: `LeakResult` in
+  `public/openapi.json`, a line in `public/llms.txt` and in `/help`.
 - A run that can't be graded has no code: `share` then copies `/leaktest` and says why.
 
 #### Tor exits
@@ -759,9 +786,9 @@ and `port` on its own lists the common ports.
 Results that aren't open list what has to be true for a port to be open (a program listening, the
 device firewall, the router's forward), the port's own advice, and how to spot carrier-grade NAT: the
 router's WAN address isn't the one websites see, or is in 100.64.0.0/10. On networks that usually use
-carrier-grade NAT (Starlink, T-Mobile, Verizon Wireless, AT&T Mobility: `CGNAT_ASNS` in `src/worker.js`)
-the provider is named. Only TCP can be tested; for UDP services (WireGuard, Valheim, Minecraft Bedrock)
-the result says so. No sponsored line follows any port result.
+carrier-grade NAT (Starlink, T-Mobile, Verizon Wireless, AT&T Mobility: `CGNAT` in `public/ports.js`, shared
+with the page, which hides these names in a port result's Markdown) the provider is named. Only TCP can be
+tested; for UDP services (WireGuard, Valheim, Minecraft Bedrock) the result says so. No sponsored line follows any port result.
 
 **Guards** (`portRoute()` in `src/worker.js`):
 

@@ -686,7 +686,7 @@
     const head = el('div', 'head');
     head.append(el('span', 'hip', isSelf ? 'whoami' : ipText), el('span', 'tag', 'IPv' + p.v), el('span', 'tag ' + (cls === 'public' ? 'pub' : 'priv'), cls));
     if (d && d.source) head.append(el('span', 'tag', SRC[d.source] || d.source));
-    const res = isSelf ? { cmd: 'whoami', value: ipText, what: 'your IP address', path: '/', self: true, hide: [ipText], drop: SELF_DROP }
+    const res = isSelf ? { cmd: 'whoami', value: ipText, what: 'your IP address', path: '/', self: true, hide: [ipText], terms: placeTerms(d), drop: SELF_DROP }
       : { cmd: 'lookup ' + ipText, value: ipText, what: 'the address ' + ipText, path: '/' + ipText };
     head.append(shareBar(res));
     out.appendChild(head);
@@ -1111,18 +1111,25 @@
       : "Nothing leaks beyond your IP address. Without a VPN, that address still shows your provider and rough location; a VPN would hide it.";
 
     const head = el('div', 'head');
+    // The tag names the tunnel as `tunnel` does (a Tor exit known only to proxycheck.io too).
     head.append(el('span', 'hip', 'leaktest'), el('span', 'tag pub', 'privacy check'),
-      el('span', 'tag', warp ? 'warp on' : torListed ? 'tor' : vpn ? 'vpn on' : homeNet ? 'no vpn' : flagged ? 'vpn unclear' : vpnKnown ? 'no vpn detected' : 'vpn unknown'),
+      el('span', 'tag', warp ? 'warp on' : tor ? 'tor' : vpn ? 'vpn on' : homeNet ? 'no vpn' : flagged ? 'vpn unclear' : vpnKnown ? 'no vpn detected' : 'vpn unknown'),
       el('span', 'tag', grade ? 'grade ' + grade : 'not graded'));
     // Share: your grade's link, whose code holds only the grade and each check's flag (leakgrade.js), or the check
-    // itself when the run has no grade. The Markdown keeps the findings but none of your addresses or resolvers:
-    // this run's, and the previous run's too, since the compare below prints its lines in the same block.
-    // (lastLeak is still the previous run here.) Each run keeps only its own, raw as the lines print them.
+    // itself when the run has no grade. The Markdown keeps the findings but nothing that is you: no address or
+    // resolver (hide), and no provider, network, resolver operator, place, time zone or language region (terms):
+    // this run's, and the previous run's too, since the compare below prints in the same block. (lastLeak is
+    // still the previous run here.) Each run keeps only its own, raw as the lines print them. A language tag
+    // counts only when it names a country (en-US): a bare one (no, it, so) places no one, and as a whole word
+    // it would hide ordinary words ("no vpn").
     const mine = [d.ip, other, ...rtc.ips, ...rtc.local, ...(dns && Array.isArray(dns.resolvers) ? dns.resolvers.map(r => r && r.ip) : [])].filter(Boolean);
+    const myTerms = [...placeTerms(d), net.org, net.asn, pc && pc.operator, ...placeTerms(otherInfo),
+      ...(dns && Array.isArray(dns.resolvers) ? dns.resolvers.flatMap(r => (r ? [r.org, r.asn, r.service, r.countryCode] : [])) : []),
+      devTz, ...(lr && lr.region ? [lr.tag, lr.region, regionName(lr.region)] : []), cc && regionName(cc), trace && trace.colo, trace && trace.loc];
     head.append(shareBar({ cmd: 'leaktest', value: verdict, what: 'the verdict', path: leakCode ? '/leaktest/r/' + leakCode : '/leaktest',
       self: !leakCode, text: leakCode ? `my ipterm leak test grade: ${grade}` : null,
       note: leakCode ? '   (it holds only the grade and which checks passed or leaked: no IP address, provider, location or DNS resolver; opening it never runs the test)' : null,
-      hide: lastLeak ? [...mine, ...lastLeak.hide] : mine }));
+      hide: lastLeak ? [...mine, ...lastLeak.hide] : mine, terms: lastLeak ? [...myTerms, ...lastLeak.terms] : myTerms, drop: LEAK_DROP }));
     out.appendChild(head);
     await kv([['leaks', grade || '–', 'big'],
       ['', frag(tally + (skipped.length ? `; not tested: ${skipped.join(', ')}` : '') + '. ', cmdButton('how the grade works', 'man leaktest')), 'plain'],
@@ -1140,7 +1147,7 @@
     }
 
     // Compare with the previous run in this tab, then keep this one (in memory only) for the next.
-    const run = { at: Date.now(), hide: mine, vpnState, tunnel, grade, lines: new Map(results.map(r => [r.key, r])),
+    const run = { at: Date.now(), hide: mine, terms: myTerms, vpnState, tunnel, grade, lines: new Map(results.map(r => [r.key, r])),
       ips: known, asns: new Set([d.asn, otherInfo && !otherInfo.error ? otherInfo.asn : null].filter(Boolean).map(up)), dnsAsns: new Set(dnsAsns) };
     if (lastLeak) await compareLeaks(lastLeak, run);
     lastLeak = run;
@@ -1156,6 +1163,8 @@
   }
 
   // Before → after, line by line. Unchanged lines collapse into one row, except a leak that's still there.
+  // Each side's summary (your addresses, networks, time zones) and the verdict are marked .yours, so copy md
+  // prints only each run's status: "sites see  [INFO]  →  [OK]".
   async function compareLeaks(b, a) {
     const state = r => (r.vpnState === 'vpn' ? (r.tunnel === 'your VPN' ? 'a VPN' : r.tunnel) : r.vpnState === 'none' ? 'no VPN' : 'VPN unclear');
     const mins = Math.round((a.at - b.at) / 60000);
@@ -1166,9 +1175,9 @@
       if (!x && !y) continue;
       const label = (y || x).label;
       if (x && y && x.st === y.st && x.sum === y.sum && x.st !== 'warn') { same.push(label); continue; }
-      const side = r => (r ? [stTag(r.st), ' ', r.sum || ''] : ['not tested']);
+      const side = r => (r ? [stTag(r.st), el('span', 'yours', r.sum ? ' ' + r.sum : '')] : ['not tested']);
       const verdict = leakVerdict(k, x, y, b, a);
-      rows.push([label, frag(...side(x), '  →  ', ...side(y), verdict ? '  · ' + verdict : '')]);
+      rows.push([label, frag(...side(x), '  →  ', ...side(y), el('span', 'yours', verdict ? '  · ' + verdict : ''))]);
     }
     if (same.length) rows.push(['unchanged', same.join(', ')]);
     await kv(rows);
@@ -1501,7 +1510,9 @@
     const head = el('div', 'head');
     head.append(el('span', 'hip', `port ${n}`), el('span', 'tag', 'tcp'), el('span', 'tag ' + cls, label));
     if (d.version) head.append(el('span', 'tag', 'IPv' + d.version));
-    head.append(shareBar({ cmd: `port ${n}`, value: String(n), what: 'the port number', path: '/port/' + n, self: true, hide: [d.ip], drop: SELF_DROP }));
+    // The notes may name your provider (one known for carrier-grade NAT): its Markdown hides that too.
+    head.append(shareBar({ cmd: `port ${n}`, value: String(n), what: 'the port number', path: '/port/' + n, self: true, hide: [d.ip],
+      terms: PORTSLIB ? PORTSLIB.cgnatNames() : [], drop: SELF_DROP }));
     out.appendChild(head);
     const rows = [['port', `${n}/tcp` + (svc ? '  ' + svc.name : '')]];
     if (d.ip) rows.push(['your address', `${d.ip}  (IPv${d.version}: the address you connected from, the only one ipterm tests)`]);
@@ -2050,12 +2061,12 @@
       ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/me', '/json', '/city', '/line', '/?format=text']],
     // The sixth entry: the grading rubric, from leakgrade.js (also on the /leaktest page and in docs/handbook.md).
     leaktest: ['leaktest   or   leaktest --result <code>', "VPN and DNS leak test, graded A to F: is your IP a known VPN (Cloudflare WARP and Tor by name), which DNS servers look up sites for you, and does WebRTC, IPv6 or your time zone give away more than your IP? For DNS, your browser looks up a few random names under ipterm's own DNS server (which answers \"no such name\"), and the check shows which resolvers asked: on a VPN, any outside the VPN's network is a DNS leak. Runs in your browser in a few seconds; nothing is stored. --result <code> shows a shared result without testing anything.",
-      ['leaktest'], ['whoami', 'share'], null, [
+      ['leaktest'], ['whoami', 'share'], ['/leaktest/r/1bjp', '/leaktest/r/1bjp?format=text'], [
         ...(LEAKLIB ? LEAKLIB.GRADES.map(([g, t], i) => [i ? '' : 'GRADE', `${g}: ${t}`]) : []),
         ...(LEAKLIB ? LEAKLIB.RULES.map((t, i) => [i ? '' : 'COUNTS', t]) : []),
         ['SITES SEE', "your IP, and with it your provider and rough location (or your VPN's), on its own line: never graded."],
         ['INFO', "never part of the grade: how your browser connects (TLS 1.3, HTTP/3 and post-quantum key exchange, from Cloudflare's edge), your browser language's country next to your IP's (expats and travelers differ for good reasons), and a local network address."],
-        ['COMPARE', "run leaktest again after turning your VPN on or off, or after a fix, and it prints each line before → after: a line that would be \"a leak if you use a VPN\" becomes a confirmed leak, or not. The last run is kept in this tab's memory only, never stored."],
+        ['COMPARE', "run leaktest again after turning your VPN on or off, or after a fix, and it prints each line before → after: a line that would be \"a leak if you use a VPN\" becomes a confirmed leak, or not. The last run is kept in this tab's memory only, never stored. copy md gives only each line's status before → after (OK, LEAK or INFO): what either run found, and the verdict, stay on screen."],
         ['SHARE', "share after leaktest copies a link like /leaktest/r/1bjp. It holds only the grade, whether a VPN was on and which checks passed, leaked or weren't tested: no IP address, provider, location or resolver, so every browser with the same result gets the same link. It's made in your browser, and opening one never runs the test."]]],
     lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
       ['lookup 8.8.8.8', 'lookup 2606:4700:4700::1111', 'lookup github.com'], ['whois', 'asn', 'dig'], ['/8.8.8.8', '/8.8.8.8/org', '/8.8.8.8?format=text']],
@@ -2083,9 +2094,9 @@
     ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
       ['ping', 'ping 10'], ['whoami', 'traceroute']],
     traceroute: ['traceroute', "not possible from a browser: tracing a route needs raw ICMP or UDP packets. ping times the connection to ipterm's edge instead.", ['ping'], ['ping', 'asn']],
-    share: ['share', "shares a link to the current result: the share sheet on phones, the clipboard elsewhere. Every lookup has its own page, so the link opens the same result. After whoami or a port check it shares the page itself (/ or /port/<n>), which shows each visitor their own result (check yours), never your address. After leaktest it shares your grade's link, /leaktest/r/<code>, which holds only the grade and which checks passed or leaked (no IP address, provider, location or resolver), or /leaktest when the run has no grade. Every result's header line has the same [share] button, and [copy] and [md] beside it.",
+    share: ['share', "shares a link to the current result: the share sheet on phones, the clipboard elsewhere. Every lookup has its own page, so the link opens the same result. After whoami or a port check it shares the page itself (/ or /port/<n>), which shows each visitor their own result (check yours), never your address. After leaktest it shares your grade's link, /leaktest/r/<code>, which holds only the grade and which checks passed or leaked (no IP address, provider, location or resolver), or /leaktest when the run has no grade. Every result's header line has the same [share] button, and [copy] and [md] beside it; [md] leaves your address, provider and location out of your own results (see copy).",
       ['share'], ['copy', 'leaktest']],
-    copy: ['copy [md | link]', "copies the current result's main value: the IP address, the domain, the range or the AS number. copy md copies the whole result as a Markdown code block that starts with the command and ends with its link, for GitHub issues, Discord or Stack Overflow (your own address is left out of whoami, leaktest and port results). copy link copies the link. The sponsored line is never copied.",
+    copy: ['copy [md | link]', "copies the current result's main value: the IP address, the domain, the range or the AS number. copy md copies the whole result as a Markdown code block that starts with the command and ends with its link, for GitHub issues, Discord or Stack Overflow. For whoami, leaktest and port results, which are about you, it leaves out your address and everything that names or places you: your provider and the other networks (AS numbers too), your city, region and country, your time zones and the data center. Lines that hold only those are left out, and elsewhere they read [hidden]. After a second leaktest, the before → after lines show only each run's OK, LEAK or INFO. Other lookups (lookup 8.8.8.8, whois, dig) are copied whole. copy link copies the link. The sponsored line is never copied.",
       ['copy', 'copy md', 'copy link'], ['share']],
     history: ['history [clear | off | on]', "lists the commands you ran, numbered (click one to run it again). They are saved in this browser's local storage, the newest 200 and never their results, so they are still there after a reload; nothing is sent anywhere. history clear deletes them, history off stops saving them (and deletes them) until history on. Up and Down recall them at the prompt either way, Ctrl+R searches them, Tab completes from them, !! runs the last one again and !<n> runs number n.",
       ['history', 'history clear', 'history off', 'history on'], ['keys', 'privacy']],
@@ -2281,10 +2292,22 @@
      connection never shares your address: after whoami or a port check its link is the page itself, which
      shows each visitor their own ("check yours"); after leaktest it is the grade's /leaktest/r/<code> (only
      the grade and per-check flags, see leakgrade.js), or /leaktest when the run has no grade. Its Markdown
-     leaves your addresses out (leaktest's: also its resolvers, and the previous run's in the compare). */
-  let current = null;              // { cmd, value, what, path, self, hide: [your addresses], drop: [row labels], bar, text, note }
-  // Rows of your own result that are your address in another form (or would point at it).
-  const SELF_DROP = ['hostname', 'IPv4', 'IPv6', 'postal', 'coords', 'decimal', 'hex', 'binary', 'rdns zone', 'expanded', '/64 prefix'];
+     leaves out your addresses and everything that names or places you: your provider and the networks
+     involved (with their AS numbers), the place, the time zones and the data center. Rows that hold only
+     those go; in sentences they read [hidden] (leaktest's: also its resolvers and the previous run's, and
+     its compare prints only each line's status). */
+  let current = null;              // { cmd, value, what, path, self, hide: [your addresses], terms: [names and places], drop: [row labels], bar, text, note }
+  // Rows of your own result that are your address in another form (or would point at it), or that only
+  // name your provider or place you: its network, domain and connection type, the location, local time
+  // and data center.
+  const SELF_DROP = ['hostname', 'IPv4', 'IPv6', 'postal', 'coords', 'decimal', 'hex', 'binary', 'rdns zone', 'expanded', '/64 prefix',
+    'network', 'domain', 'location', 'continent', 'local time', 'connection', 'edge'];
+  // leaktest's: the browser language's country (the other lines are checks, and keep their status).
+  const LEAK_DROP = ['language'];
+  // What names or places you in a lookup of your own address (whoami's data, /api/check's, the other IP
+  // version's), for the Markdown to hide wherever it stands: see termRe.
+  const placeTerms = d => (d && !d.error ? [d.org, d.asn, d.asDomain, d.hostname, d.city, d.region, d.postal, d.country, d.countryCode, d.continent, d.timezone, d.colo] : []);
+  const LEFT_OUT = ' (your address, provider and location left out)';
   function shareBar(r) {
     current = r;
     const bar = r.bar = el('span', 'share');
@@ -2296,12 +2319,12 @@
     };
     bar.append(btn('share', r.self ? 'Share a link to this page (it shows each visitor their own result, never yours)' : 'Share a link to this result', b => shareResult(r, b)),
       btn('copy', 'Copy ' + r.what, b => copyValue(r, b)),
-      btn('md', 'Copy this result as Markdown' + (hidesYours(r) ? ' (your address left out)' : ''), b => copyMd(r, b)));
+      btn('md', 'Copy this result as Markdown' + (hidesYours(r) ? LEFT_OUT : ''), b => copyMd(r, b)));
     return bar;
   }
-  // Whether the Markdown leaves your addresses out: your own result, or one with addresses to hide (a graded
+  // Whether the Markdown leaves you out: your own result, or one with addresses or names to hide (a graded
   // leaktest shares its grade's link, not the page itself, but its Markdown still hides them).
-  function hidesYours(r) { return !!(r.self || (r.hide || []).some(Boolean)); }
+  function hidesYours(r) { return !!(r.self || (r.hide || []).some(Boolean) || (r.terms || []).some(Boolean)); }
   // A button answers in place: its label says "copied" for a moment, and screen readers hear what was copied.
   function flash(b, spoken) {
     if (!b.dataset.label) b.dataset.label = b.textContent;
@@ -2332,7 +2355,7 @@
   async function copyMd(r, b) {
     const head = r.bar.isConnected ? r.bar.closest('.head') : null;
     if (!head) return line('That result is no longer on the screen. Run it again to copy it.', 'warn');
-    const ok = await toClipboard(markdown(r, head)), what = 'copied the result as Markdown' + (hidesYours(r) ? ' (your address left out)' : '');
+    const ok = await toClipboard(markdown(r, head)), what = 'copied the result as Markdown' + (hidesYours(r) ? LEFT_OUT : '');
     if (ok && b) return flash(b, what);
     line(ok ? what : 'The clipboard is blocked here, so select the result and copy it by hand.', ok ? 'sys' : 'warn');
   }
@@ -2346,12 +2369,29 @@
   // "203.0.113.7: unless…") and an IPv4 before ":port", but never inside a longer address (1.2.3.45, 1.2.3.4.5,
   // 4.3.2.1.in-addr.arpa, 2001:db8::1:5).
   const hideRe = ip => new RegExp(`(?<![\\w.:])${reEsc(ip)}` + (ip.includes(':') ? '(?!\\w|[.:][\\w:])' : '(?!\\w|\\.\\w)'), 'gi');
+  // A name or place to hide, as a whole word in any case ("Comcast", "comcast"), never inside a longer word
+  // (DE in DEN). A code (a country or data center: two or three capitals) only in capitals: in lower case it
+  // is an ordinary word (IN, IT, US, MAN, PER). UTC, and Cloudflare's T1 for Tor, say nothing about you.
+  const CODE_RE = /^[A-Z][A-Z0-9]{1,2}$/;
+  const termRe = t => new RegExp(`(?<![\\p{L}\\p{N}_])${reEsc(t)}(?![\\p{L}\\p{N}_])`, CODE_RE.test(t) ? 'gu' : 'giu');
+  const mdTerms = list => [...new Set((list || []).map(t => (typeof t === 'string' ? t.trim() : '')))]
+    .filter(t => t.length > 1 && t !== 'T1' && !/^(Etc\/)?(UTC|UCT|GMT|Universal|Zulu)$/i.test(t))
+    .sort((a, b) => b.length - a.length);         // the longest first: Europe/Berlin before Berlin
   function markdown(r, head) {
-    const hide = (r.hide || []).filter(x => x && parseIp(x)).map(hideRe);
-    const clean = t => hide.reduce((s, re) => s.replace(re, '[hidden]'), t.replace(/\s*↗/g, '').replace(/\s*\n\s*/g, ' ').trimEnd());
-    const textOf = node => {                     // status tags read [OK], [LEAK]...; buttons and outside links go
-      const c = node.cloneNode(true);
-      c.querySelectorAll('button, a[target="_blank"]').forEach(x => x.remove());
+    // Addresses first, so a number among the names (a postal code: 1234) can't match inside one (2001:db8:1234::7)
+    // and leave the rest showing. Then the names, with their own addresses hidden the same way, so a resolver named
+    // "Cloudflare (1.1.1.1)" still goes whole. Hidden parts next to each other read as one ("near [hidden]", not
+    // "near [hidden], [hidden]"), which doesn't say how many there were.
+    const mask = (s, res) => res.reduce((a, re) => a.replace(re, '[hidden]'), s);
+    const ips = (r.hide || []).filter(x => x && parseIp(x)).map(hideRe);
+    const hide = [...ips, ...mdTerms((r.terms || []).map(t => (typeof t === 'string' ? mask(t, ips) : t))).map(termRe)];
+    const clean = t => {
+      const s = mask(t.replace(/\s*↗/g, '').replace(/\s*\n\s*/g, ' ').trimEnd(), hide);
+      return hide.length ? s.replace(/\[hidden\](?:,? \[hidden\])+/g, '[hidden]') : s;
+    };
+    const textOf = node => {                     // status tags read [OK], [LEAK]...; buttons, outside links and
+      const c = node.cloneNode(true);            // what only your own run says (.yours: the compare's summaries) go
+      c.querySelectorAll('button, a[target="_blank"], .yours').forEach(x => x.remove());
       c.querySelectorAll('.tag').forEach(t => t.replaceWith(`[${t.textContent.toUpperCase()}]`));
       return c.textContent.trim();
     };
@@ -2449,6 +2489,7 @@
       [curlLine('/dns/example.com'), 'DNS records as JSON (add /MX for one type)'],
       [curlLine('/mail/gmail.com'), 'email security check (SPF, DMARC, DKIM, MTA-STS) and its grade as JSON'],
       [curlLine('/port/22', '-4'), 'is TCP port 22 open on your own IP? (JSON; -4 tests IPv4)'],
+      [curlLine('/leaktest/r/1bjp'), 'a leak test result someone shared, as JSON: the grade, whether a VPN was on, each check'],
       [curlLine('/8.8.8.8?format=text'), 'any lookup as aligned text lines instead of JSON'],
       [curlLine('/help'), 'this reference as plain text'],
     ]);
@@ -2799,7 +2840,7 @@
     if (init && init.kind === 'leakshare') {
       setLive(true);
       const cmd = running = 'leaktest --result ' + init.code;
-      echo(cmd); hist.push(cmd); hIdx = hist.length;
+      echo(cmd); addHist(cmd);
       navPush = false;
       try { await leakResult(init.code); } finally { navPush = true; }
       flushNext();
