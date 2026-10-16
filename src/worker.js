@@ -28,6 +28,8 @@
 //   GET /whois, /dns, /mail, /cidr, /leaktest, /port, /api  landing page for each tool (usage and examples); /api is
 //                           the API docs, and command-line clients get the /help text there instead
 //   GET /api/check          your own IP plus how IPinfo classifies it (VPN, hosting...), for the privacy check
+//   GET /api/dnsleak?t=     the DNS resolvers that looked up the page's random names, with their networks
+//                           (same-origin or command-line clients only; off unless DNSLEAK_* is set up)
 //   GET /robots.txt, /sitemap.xml
 //   GET /status             for the owner: today's and this hour's IPinfo Core and proxycheck.io budget use.
 //                           Needs the STATUS_KEY secret (x-status-key header or ?key=); without it, a 404
@@ -48,6 +50,7 @@
 //   domain registries and registrars (domains), all found via IANA's bootstrap files.
 //   Reverse DNS: Cloudflare DNS-over-HTTPS.
 //   Mail check: Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file (https://mta-sts.<domain>).
+//   DNS leak test: ipterm's own DNS server for DNSLEAK_ZONE (dnsleak-server/, on a VPS), plus IPinfo Lite.
 //
 // Hardening
 //   - Upstream lookups are cached; cache misses are rate limited per visitor IP (LOOKUP_LIMITER).
@@ -108,6 +111,8 @@ async function route(request, env, ctx) {
   if (path === '/json' || (path === '/api/lookup' && !url.searchParams.get('ip'))) return self();
   if (path === '/api/lookup') return ipRoute(io, url.searchParams.get('ip').trim(), false);
   if (path === '/api/check') return guard(() => checkData(io), d => json(d));
+  if (path === '/api/dnsleak') return dnsleakRoute(io);
+  if (path === '/dnsleak') return redirect('/leaktest');
   if (path === '/api/asn') return asnRoute(io, String(url.searchParams.get('asn') || '').trim(), false);
   if (Object.hasOwn(TOOLS, path.slice(1).toLowerCase())) return toolRoute(io, path.slice(1).toLowerCase(), html);
   if (path === '/api/port') return portRoute(io, url.searchParams.get('n'), false);
@@ -168,10 +173,11 @@ const TOOLS = {
     examples: [['mail gmail.com', '/mail/gmail.com'], ['mail outlook.com', '/mail/outlook.com'], ['mail github.com', '/mail/github.com'], ['mail example.com', '/mail/example.com']],
   },
   leaktest: {
-    title: 'VPN leak test: WebRTC, IPv6 and time zone check | ipterm', heading: 'VPN and privacy leak test',
-    desc: "Check whether your browser gives away more than your IP address: WebRTC leaks, IPv6 leaks that bypass a VPN, a device time zone that doesn't match your IP's location, and whether your IP is recognized as a VPN. Runs in your browser in a few seconds; nothing is stored.",
+    title: 'VPN and DNS leak test: DNS, WebRTC and IPv6 leaks | ipterm', heading: 'VPN and DNS leak test',
+    desc: "Free DNS leak test and VPN leak test: see which DNS servers look up sites for you, and whether they belong to your VPN or to your internet provider. Also checks WebRTC and IPv6 leaks that bypass a VPN, a time zone that gives you away, and whether your IP is a known VPN. Runs in your browser in a few seconds; nothing is stored.",
     usage: 'leaktest',
-    checks: ['WebRTC: does your browser reveal a public IP other than the one websites see?',
+    checks: ['DNS: which DNS servers look up sites for you, and do they belong to your VPN, or to your internet provider?',
+      'WebRTC: does your browser reveal a public IP other than the one websites see?',
       'IPv6: does your IPv6 traffic go through a different network than your VPN?',
       "Time zone: does your device's clock match your IP's location?",
       'VPN detection: is your IP recognized as a VPN, proxy, Tor or data center?'],
@@ -197,8 +203,15 @@ const TOOLS = {
   },
 };
 
+// The leak test page before (or without) the DNS test server: it doesn't promise what it can't check.
+const LEAKTEST_NO_DNS = {
+  title: 'VPN leak test: WebRTC, IPv6 and time zone check | ipterm', heading: 'VPN and privacy leak test',
+  desc: "Check whether your browser gives away more than your IP address: WebRTC leaks, IPv6 leaks that bypass a VPN, a device time zone that doesn't match your IP's location, and whether your IP is recognized as a VPN. Runs in your browser in a few seconds; nothing is stored.",
+  checks: TOOLS.leaktest.checks.slice(1),
+};
+
 function toolRoute(io, tool, html) {
-  const t = TOOLS[tool];
+  const t = tool === 'leaktest' && !dnsleakConf(io.env) ? { ...TOOLS.leaktest, ...LEAKTEST_NO_DNS } : TOOLS[tool];
   if (!html) {
     if (tool === 'api') return helpText(io);              // command-line clients get the reference itself
     if (!t.examples.length) return reply(io, { error: 'This check runs in your browser. Open the page in a browser to run it.', usage: t.usage }, 400);
@@ -442,13 +455,13 @@ const PORT_V6_RESERVED = ['2001::/23', '2002::/16', '3fff::/20'];
 const CGNAT_ASNS = { 14593: 'Starlink', 21928: 'T-Mobile', 22394: 'Verizon Wireless', 6167: 'Verizon Wireless', 20057: 'AT&T Mobility' };
 
 // Fetches from the page itself say so (Sec-Fetch-Site), and that always wins when it is sent. Browsers
-// without Sec-Fetch-* send no Origin on a same-origin GET, so the terminal also sends X-Ipterm, which a
-// cross-site page can't add: it needs a CORS preflight, and ipterm never allows one (OPTIONS is 405 unless
-// PUBLIC_API is on, and secure() never sends Access-Control-Allow-Headers).
+// without Sec-Fetch-* send no Origin on a same-origin GET, so the terminal also sends X-Ipterm (port or
+// dnsleak), which a cross-site page can't add: it needs a CORS preflight, and ipterm never allows one
+// (OPTIONS is 405 unless PUBLIC_API is on, and secure() never sends Access-Control-Allow-Headers).
 function sameOrigin(request, url) {
   const site = request.headers.get('sec-fetch-site');
   if (site) return site === 'same-origin';
-  return request.headers.get('origin') === url.origin || request.headers.get('x-ipterm') === 'port';
+  return request.headers.get('origin') === url.origin || /^(port|dnsleak)$/.test(request.headers.get('x-ipterm') || '');
 }
 
 async function portRoute(io, raw, html) {
@@ -556,6 +569,82 @@ function portNotes(io, d, state, svc, asn) {
       `If your router's internet (WAN) address isn't ${d.ip}, or is between 100.64.0.0 and 100.127.255.255, your provider uses carrier-grade NAT: the router has no public address of its own, so no port forward can reach it. Ask your provider for a public IPv4 address, or use IPv6 or a tunnel such as Tailscale or Cloudflare Tunnel.`);
   }
   return notes;
+}
+
+/* ---------- DNS leak test ----------
+   Which DNS resolvers look up names for the visitor. The page (leaktest) looks up a few random,
+   single-use names, <token>.<DNSLEAK_ZONE>. That zone is delegated to a small server outside Cloudflare
+   (dnsleak-server/ in this repo), which answers NXDOMAIN and notes the address of each resolver that
+   asked, in memory, for under two minutes. This route asks it which resolvers asked for the page's
+   tokens (DNSLEAK_API, with the DNSLEAK_KEY secret; it hands them over once and forgets them), then
+   names each resolver's network with IPinfo Lite: never Core, never proxycheck.io.
+   Off unless DNSLEAK_ZONE, DNSLEAK_API and DNSLEAK_KEY are all set: /api/check then doesn't offer it,
+   the CSP doesn't allow the zone, and leaktest says DNS leaks weren't tested. Guards:
+   - only the ipterm page (same-origin) or a command-line tool can ask, as with the port check;
+   - non-public resolver addresses are shown as such and never sent anywhere;
+   - the ask counts as one of the visitor's 30 lookups a minute, and so does each network looked up fresh. */
+const DNSLEAK_TOKEN = /^[0-9a-f]{20}$/;                  // as the page makes them and dnsleak-server accepts them
+const DNSLEAK_MAX_TOKENS = 10;
+// Resolvers people choose on purpose, by network, so the page can name the service and not just the company.
+const DNS_SERVICES = { 13335: 'Cloudflare (1.1.1.1)', 15169: 'Google Public DNS (8.8.8.8)', 19281: 'Quad9 (9.9.9.9)', 36692: 'Cisco OpenDNS' };
+
+function dnsleakConf(env) {
+  const zone = String(env.DNSLEAK_ZONE || '').trim().toLowerCase(), key = String(env.DNSLEAK_KEY || '');
+  let api = null;
+  try {
+    const u = new URL(String(env.DNSLEAK_API || '').trim());
+    // https only; plain http just for a responder or mock on this machine under `wrangler dev`
+    if (u.protocol === 'https:' || (u.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname))) api = u.origin;
+  } catch { api = null; }
+  if (!api || key.length < 32 || !/^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/.test(zone)) return null;
+  return { zone, api, key };
+}
+
+async function dnsleakRoute(io) {
+  const conf = dnsleakConf(io.env);
+  if (!conf) return reply(io, { error: 'The DNS leak test is not set up on this server.' }, 404);
+  if (!sameOrigin(io.request, io.url) && !CLI_UA.test(io.request.headers.get('user-agent') || '')) {
+    return reply(io, { error: 'The DNS leak test runs from the ipterm terminal (leaktest) or a command-line tool such as curl.' }, 403);
+  }
+  const tokens = [...new Set(String(io.url.searchParams.get('t') || '').toLowerCase().split(',').filter(Boolean))];
+  if (!tokens.length || tokens.length > DNSLEAK_MAX_TOKENS || !tokens.every(t => DNSLEAK_TOKEN.test(t))) {
+    return reply(io, { error: `Give 1 to ${DNSLEAK_MAX_TOKENS} tokens of 20 hex characters, t=<token>,<token>, after looking up <token>.${conf.zone}` }, 400);
+  }
+  return guard(() => dnsleakData(io, conf, tokens), d => reply(io, d, 200, {}, dnsleakText), (msg, status) => reply(io, { error: msg }, status));
+}
+
+const resolverGroup = p => (p.v === 4 ? p.o.slice(0, 3).join('.') : p.g.slice(0, 3).join(':'));   // its /24 or /48
+
+async function dnsleakData(io, conf, tokens) {
+  await limit(io);                                       // the ask itself is one of the visitor's lookups
+  const r = await fetch(`${conf.api}/v1/resolvers?t=${tokens.join(',')}`,   // tokens are checked hex: nothing to escape
+    { headers: { 'x-dnsleak-key': conf.key, accept: 'application/json' }, signal: AbortSignal.timeout(3000) });
+  if (!r.ok) { if (r.body) r.body.cancel(); throw new Error('dnsleak responder HTTP ' + r.status); }
+  const j = await readJson(r, 20_000);
+  const seen = Number.isInteger(j && j.seen) && j.seen >= 0 ? Math.min(j.seen, tokens.length) : 0;
+  const ips = [...new Set((Array.isArray(j && j.resolvers) ? j.resolvers : []).map(x => parseIp(String(x || '')))
+    .filter(Boolean).map(canonIp))].slice(0, 16);
+  // One lookup per /24 (IPv6: /48): a resolver service's addresses sit side by side, and one answer covers
+  // its neighbors. At most 8 networks per check. Lite only, never withPrivacy(): no Core or proxycheck.io.
+  const groups = new Map();
+  for (const ip of ips) { const p = parseIp(ip); if (!nonPublicReason(p) && !groups.has(resolverGroup(p))) groups.set(resolverGroup(p), [ip, p]); }
+  const nets = new Map();
+  await Promise.all([...groups].slice(0, 8).map(async ([g, [ip, p]]) => {
+    try { nets.set(g, await ipData(io, ip, p, { lite: true })); } catch { nets.set(g, null); }   // shown without its network
+  }));
+  const resolvers = ips.map(ip => {
+    const p = parseIp(ip), range = nonPublicReason(p);
+    if (range) return { ip, private: true, range };      // never sent upstream
+    const d = nets.get(resolverGroup(p)) || {}, asn = /^AS\d+$/.test(d.asn || '') ? d.asn : null;
+    return { ip, asn, org: d.org || null, countryCode: d.countryCode || null, service: (asn && DNS_SERVICES[asn.slice(2)]) || null };
+  });
+  return { zone: conf.zone, tokens: tokens.length, seen, resolvers };
+}
+
+function dnsleakText(d) {
+  const lines = d.resolvers.map(r => (r.private ? `${r.ip}  (${r.range})` : [r.ip, r.asn, r.service || r.org, r.countryCode].filter(Boolean).join('  ')));
+  return kvText([['zone', d.zone], ['names seen', `${d.seen} of ${d.tokens}`], ['resolvers', lines.length ? lines : 'none']],
+    d.resolvers.some(r => r.asn) ? [IPINFO_CREDIT] : []);
 }
 
 function portText(d) {
@@ -944,7 +1033,8 @@ async function checkData(io) {
       network = { source: d.source || null, asn: d.asn || null, org: d.org || null, asType: d.asType || null, flags: d.flags || null, privacy: privacy || null };
     } catch (e) { if (e instanceof RateLimited) throw e; }   // classification is a bonus; the check still runs
   }
-  return { ...self, network };
+  const dns = dnsleakConf(io.env);                       // where the page sends its DNS leak test lookups, if anywhere
+  return { ...self, network, ...(dns ? { dnsleak: dns.zone } : {}) };
 }
 
 async function selfInfo(io, quick = false) {
@@ -2732,10 +2822,17 @@ const CSP = [
   "frame-ancestors 'none'",
 ].join('; ');
 
+// The DNS leak test's lookups are fetches to https://<token>.<zone>, which fail at once (the zone's server
+// answers NXDOMAIN), so the zone is the one other host the page may contact, and only once it's set up.
+function cspFor(env) {
+  const dns = dnsleakConf(env);
+  return dns ? CSP.replace("connect-src 'self'", `connect-src 'self' https://*.${dns.zone}`) : CSP;
+}
+
 function secure(res, env) {
   const out = new Response(res.body, res);
   const h = out.headers;
-  h.set('content-security-policy', CSP);
+  h.set('content-security-policy', cspFor(env));
   h.set('x-content-type-options', 'nosniff');
   h.set('x-frame-options', 'DENY');
   h.set('referrer-policy', 'no-referrer');

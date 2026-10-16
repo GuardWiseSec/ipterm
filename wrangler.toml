@@ -64,6 +64,14 @@ IPINFO_VISITOR_HOURLY = "30"
 # PROXYCHECK_HOURLY_BUDGET / PROXYCHECK_VISITOR_HOURLY to change them. "0" turns proxycheck.io off.
 PROXYCHECK_DAILY_BUDGET = "900"
 
+# DNS leak test (leaktest's DNS line): the zone the page's test lookups go to, and the HTTPS API of the
+# small server that answers for that zone (dnsleak-server/ in this repo, on a VPS outside Cloudflare).
+# It stays off until the DNSLEAK_KEY secret is set as well (npx wrangler secret put DNSLEAK_KEY): until
+# then leaktest says DNS leaks weren't tested, and the CSP doesn't allow the zone. Set up the server
+# first (dnsleak-server/README.md). Remove either line to turn the test off again.
+DNSLEAK_ZONE = "dl.ipterm.net"
+DNSLEAK_API = "https://dlapi.ipterm.net"
+
 # The daily counter for IPINFO_DAILY_BUDGET and PROXYCHECK_DAILY_BUDGET (a Durable Object; included in the free Workers plan).
 [[durable_objects.bindings]]
 name = "BUDGET"

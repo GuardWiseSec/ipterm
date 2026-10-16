@@ -8,6 +8,8 @@ A terminal-style IP lookup site that runs on a single Cloudflare Worker.
 - Fonts: `public/fonts/` (self-hosted, SIL Open Font License, licenses included)
 - The API, routing and security headers: `src/worker.js`
 - Settings: `wrangler.toml`
+- The DNS leak test's own DNS server: `dnsleak-server/` (runs on a small VPS outside Cloudflare; see
+  [dnsleak-server/README.md](dnsleak-server/README.md))
 
 ## Deploy
 
@@ -178,6 +180,7 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | VPN / proxy / Tor second opinion, VPN service name (optional) | proxycheck.io, with the `PROXYCHECK_KEY` secret | Free, 1,000 a day; falls back to IPinfo alone |
 | Reverse DNS (hostname) | Cloudflare DNS-over-HTTPS | Free |
 | Mail checks: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI | Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file | Free |
+| Which DNS resolvers a visitor uses (leaktest) | ipterm's own DNS server for `dl.ipterm.net` (`dnsleak-server/`), plus IPinfo Lite for the resolvers' networks | The VPS, about $4 to $6 a month |
 
 Lookups of other IPs are cached at the edge for six hours.
 
@@ -381,8 +384,9 @@ country extensions don't (.de and .io, for example), and ipterm says so instead 
 
 ### Privacy check (leaktest)
 
-`leaktest` in the terminal, or the page `/leaktest` (which runs it on load), checks whether the
-browser gives away more than its IP address. Each line is marked OK, LEAK or INFO:
+`leaktest` (or `dnsleak`) in the terminal, or the page `/leaktest` (which runs it on load; `/dnsleak`
+redirects there), is a VPN and DNS leak test: it checks whether the browser gives away more than its IP
+address. Each line is marked OK, LEAK or INFO:
 
 - **VPN detection:** IPinfo Core's classification of the visitor's IP (VPN/proxy/Tor, hosting
   flag, or a network whose type is hosting), plus proxycheck.io's when `PROXYCHECK_KEY` is set
@@ -396,6 +400,16 @@ browser gives away more than its IP address. Each line is marked OK, LEAK or INF
   one anyway, as any hosting address does; elsewhere the tag says "vpn unclear" and the check
   treats it like an address it couldn't classify (mismatches marked LEAK, with the "if you use a
   VPN" caveat), and the sponsored line shows, since no VPN was detected.
+- **DNS:** which resolvers look up names for the visitor. The page looks up six random, single-use names
+  under the test zone (`<token>.dl.ipterm.net`, 20 hex characters from `crypto.getRandomValues`) with a
+  `no-cors` fetch and a 3-second abort. Each fails within milliseconds, since the zone's server answers
+  NXDOMAIN, but by then the visitor's resolvers have asked that server. Then `/api/dnsleak` asks which
+  resolvers those were, and names each one's network with IPinfo Lite. On a VPN, resolvers outside the
+  VPN's network (another AS number and name) are a LEAK, called "your ISP" when they belong to the network
+  the other IP version leaked to; resolvers inside it are OK. Without a VPN they're named, as INFO:
+  `Cloudflare (1.1.1.1)`, `your ISP: Verizon Business`, a private address, or "your own address" for a
+  resolver the visitor runs themselves. Until the DNS test server is set up, or when it doesn't answer, or
+  no lookup reached it, the check says "Not tested: DNS leaks" instead. See "DNS leak test server" below.
 - **WebRTC:** asks Cloudflare's public STUN server (`stun.cloudflare.com:3478`) which public
   addresses the browser reveals, and flags any that differ from the IP websites see.
 - **IPv6 / IPv4:** compares the network of the visitor's other IP version (via ipify) with the one
@@ -403,10 +417,45 @@ browser gives away more than its IP address. Each line is marked OK, LEAK or INF
 - **Time zone:** the device's time zone versus the IP's location (compared by UTC offset).
 
 Findings count as LEAK only when the visitor appears to be on a VPN; otherwise the same facts are
-shown as INFO. DNS leaks are not tested (that needs a custom DNS server). Nothing is stored. The
-visitor's own IP is sent to IPinfo only when they run the check (it uses the Core daily budget),
-and the privacy policy says so. When no VPN is detected, the verdict is always followed by the
-sponsored line (any sponsor with `"check"` in its `on` list in `sponsors.json`, currently Proton VPN).
+shown as INFO. (WebRTC, IPv6 and the time zone also count when the check can't tell whether a VPN is
+on, with the "if you use a VPN" caveat. DNS doesn't: without a VPN's network there is nothing to compare
+the resolvers with.) Nothing is stored. The visitor's own IP is sent to IPinfo only when they run the
+check (it uses the Core daily budget), and the privacy policy says so. When no VPN is detected, the
+verdict is always followed by the sponsored line (any sponsor with `"check"` in its `on` list in
+`sponsors.json`, currently Proton VPN). A DNS LEAK only happens on a VPN, so it never brings the line.
+
+### DNS leak test server (dnsleak-server/)
+
+Telling which resolver asked for a name takes a DNS server that answers for that name itself, which
+Cloudflare's DNS can't do for us. So `dl.ipterm.net` is delegated to a small VPS outside Cloudflare
+running `dnsleak-server/` (Node.js, no dependencies). Its README has the owner's setup steps (the VPS,
+the three Cloudflare records, `setup.sh`, the secret and the checks), its settings and its tests.
+
+- **How it fits together:** the browser's lookups go through the visitor's resolver to the VPS on port 53,
+  which notes the resolver's address against the token and answers NXDOMAIN. The page then asks
+  `/api/dnsleak?t=<tokens>`; the Worker asks `https://dlapi.ipterm.net/v1/resolvers` (Caddy with a Let's
+  Encrypt certificate in front of the VPS's API, since Workers can't fetch a bare IP address), sending the
+  `DNSLEAK_KEY` secret in an `x-dnsleak-key` header, with a 3-second limit, and gets the addresses once.
+- **Why NXDOMAIN, not an address:** in Chrome a fetch to an NXDOMAIN name fails within milliseconds,
+  while one to an address such as TEST-NET 192.0.2.1 hangs until the page gives up (and home routers with
+  rebinding protection drop such answers). The test is in dnsleak-server/README.md.
+- **Settings:** `DNSLEAK_ZONE` and `DNSLEAK_API` in `wrangler.toml`, and the `DNSLEAK_KEY` secret (32 characters
+  or more). Without all three the test is off: `/api/check` offers no zone, the CSP doesn't allow one,
+  `/api/dnsleak` is a 404, the `/leaktest` page keeps its old title and description, and leaktest says
+  DNS leaks weren't tested. Under `wrangler dev`, `DNSLEAK_API` may be plain `http://` on 127.0.0.1.
+- **`/api/dnsleak?t=<token>,...`:** only for the ipterm page (same-origin; the terminal sends
+  `X-Ipterm: dnsleak`) and command-line clients, like the port check; 1 to 10 tokens. It counts as one of
+  the visitor's 30 lookups a minute, plus one per resolver network not already cached (one IPinfo Lite
+  lookup per /24, or IPv6 /48, at most 8). Never Core, never proxycheck.io. Private and other non-public
+  resolver addresses are shown as such and never sent anywhere. JSON, or aligned text with
+  `?format=text`. From a shell:
+  `T=$(openssl rand -hex 10); dig +short $T.dl.ipterm.net; curl "ipterm.net/api/dnsleak?t=$T&format=text"`.
+- **Named services:** resolvers on Cloudflare's, Google's, Quad9's and Cisco OpenDNS's networks are named
+  as the service (`DNS_SERVICES` in `src/worker.js`); others by their network's name.
+- **Privacy:** the VPS sees resolvers' addresses (the visitor's own only if they run their own recursive
+  resolver), keeps them in memory for under two minutes, hands them over once, logs no queries or
+  addresses and never reads EDNS Client Subnet. The privacy policy says so.
+- **Costs:** the VPS, about $4 to $6 a month. Each `leaktest` makes one more Worker request.
 
 ### Port checker (port)
 
@@ -619,7 +668,8 @@ fonts, images and map data are served directly by Cloudflare, which is free and 
 headers from `public/_headers`. A first visit costs 1 Worker request (the homepage carries the visitor's
 address, so the terminal doesn't call the API) and each further lookup or page 1, so the free plan's 100,000
 requests a day covers up to about 100,000 visits. Every curl call (`/help`, `/asn`, `/8.8.8.8/org`, a
-`?format=text` lookup) is one request too; `/openapi.json` and `/llms.txt` are not. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
+`?format=text` lookup) is one request too; `/openapi.json` and `/llms.txt` are not. A `leaktest` costs two (`/api/check`
+and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
 which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
 requests.
 
@@ -716,13 +766,14 @@ allows (`notOlderThan` is how many seconds back you can query).
 | --- | --- | --- |
 | Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them | `[[ratelimits]]` in `wrangler.toml` | Edit `limit` (period must be 10 or 60 seconds) |
 | Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
+| DNS leak test: `/api/dnsleak` only from the ipterm page or a command-line tool, well-formed tokens only, rate limited; the VPS's API needs the `DNSLEAK_KEY` secret (compared in constant time), listens on 127.0.0.1 behind Caddy, hands each token's resolvers over once and forgets them; non-public resolver addresses never go to IPinfo | `dnsleakRoute()` in `src/worker.js`, `dnsleak-server/` | See "DNS leak test server" |
 | Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
 | Plain-text answers (`?format=text`, one-value endpoints) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal | `plain()` in `src/worker.js` | |
 | Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
 | The mail check's one outside fetch, the MTA-STS policy, goes only to `https://mta-sts.<domain>/.well-known/mta-sts.txt` for a validated domain name: no redirects followed, 5-second limit, 64 KB cap. Policy lines, report addresses and logo links are checked before use (host names, plain emails, https URLs only) | `stsPolicy()`, `parseSts()`, `reportUris()`, `httpsUrl()` in `src/worker.js` | |
 | Cross-site browser access (CORS) off by default. Only the static `/openapi.json` and `/llms.txt` allow any origin | `PUBLIC_API` in `wrangler.toml`; `public/_headers` for the two documents | Set to `"true"` to offer a public browser API |
 | Private, loopback, CGNAT, multicast and documentation addresses rejected before any upstream call | `nonPublicReason()` in `src/worker.js` | |
-| Strict Content-Security-Policy (no inline scripts or styles; the only outside host is ipify, for the visitor's other IP version), nosniff, no framing, HSTS, no referrer, locked-down browser permissions | `secure()` in `src/worker.js` | Loosen the CSP if you add ads or analytics |
+| Strict Content-Security-Policy (no inline scripts or styles; the only outside hosts are ipify, for the visitor's other IP version, and, once the DNS leak test is set up, `https://*.dl.ipterm.net` (the configured zone) for its lookups), nosniff, no framing, HSTS, no referrer, locked-down browser permissions | `secure()` and `cspFor()` in `src/worker.js` | Loosen the CSP if you add ads or analytics |
 | Only GET and HEAD accepted | `route()` in `src/worker.js` | |
 | IPinfo token kept server-side as a secret | `wrangler secret put` | |
 | proxycheck.io key kept server-side as a secret, masked in logs; its answers validated field by field (VPN name limited to plain letters, digits and punctuation) | `wrangler secret put`, `parseProxycheck` | |
@@ -768,4 +819,6 @@ in it exercises the whole check locally.
 ## Next steps worth considering
 
 - City-level data for every lookup: upgrade to IPinfo Core, or swap the provider function for another API.
-- VPN / proxy detection, bulk lookups, and a DNS / WebRTC leak test page.
+- Bulk lookups.
+- IPv6 for the DNS leak test server (`DNSLEAK_NS_IPV6` and an AAAA record for `ns1.dl`), so resolvers that
+  prefer IPv6 show their IPv6 addresses too.

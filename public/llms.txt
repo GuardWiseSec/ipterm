@@ -33,6 +33,7 @@ IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Regis
 - [Whois](https://ipterm.net/whois/example.com): registry record for a domain, IP address or ASN over RDAP: registrar, dates, status, name servers, owner and abuse contact (`/whois/<query>`)
 - [Subnet calculator](https://ipterm.net/cidr/10.0.0.0/22): network, broadcast, netmask, wildcard, usable hosts and how the block splits (`/cidr/<network>/<prefix>`, IPv4 and IPv6; no outside calls)
 - [Port check](https://ipterm.net/port/22): is a TCP port open on the caller's own address? `curl -4 ipterm.net/port/22` makes the server connect to the address the request comes from (never any other) and answers open, closed, no-answer or untestable (always for port 25, which Cloudflare blocks). Command-line clients only (browsers and search crawlers get a page explaining the port); 10 checks a minute. Like every "your own address" answer, it tests the machine running your code, not the person you are talking to
+- [DNS leak test](https://ipterm.net/leaktest): which DNS resolvers look up names for the caller. In a browser, `leaktest` runs it with the other leak checks. From a shell, look up a random name first, then ask: `T=$(openssl rand -hex 10); dig +short $T.dl.ipterm.net; curl "ipterm.net/api/dnsleak?t=$T"` lists the resolvers that asked, with their networks (IPinfo Lite), once. Tokens are 20 lowercase hex characters; the names answer NXDOMAIN on purpose
 
 ## Optional
 

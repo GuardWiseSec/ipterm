@@ -764,9 +764,31 @@
   /* ---------- privacy check (leaktest) ----------
      Everything runs on demand, in the visitor's browser, and nothing is stored:
        - /api/check: the IP websites see, plus IPinfo's view of it (VPN/proxy/Tor, hosting, mobile)
+       - DNS: which resolvers look up a few random names under ipterm's test zone (/api/dnsleak)
        - WebRTC: which public IPs the browser reveals to a STUN server (Cloudflare's public one)
        - ipify: the address on the other IP version, and whether it uses a different network
        - the device's time zone compared with the IP's location */
+  const LEAKTEST_TITLE = 'VPN and DNS leak test: DNS, WebRTC and IPv6 leaks | ipterm';
+  const LEAKTEST_TITLE_NO_DNS = 'VPN leak test: WebRTC, IPv6 and time zone check | ipterm';   // before the DNS test is set up
+  const ZONE_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
+
+  // DNS leak test: look up a few random, single-use names under the test zone (/api/check says which).
+  // Each fetch fails within milliseconds, since the zone's server answers NXDOMAIN, but by then the
+  // lookup has reached that server through whichever resolvers this device uses. Then ask which.
+  async function dnsLookups(zone) {
+    if (typeof zone !== 'string' || !ZONE_RE.test(zone)) return null;
+    const token = () => [...crypto.getRandomValues(new Uint8Array(10))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const tokens = Array.from({ length: 6 }, token);
+    await Promise.all(tokens.map(t => {
+      const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 3000);
+      return fetch(`https://${t}.${zone}/`, { mode: 'no-cors', signal: ctrl.signal, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' })
+        .catch(() => {}).finally(() => clearTimeout(timer));
+    }));
+    // Resolvers that asked in parallel may still be on their way. (Not sleep(): that one is for animation,
+    // and skips the wait under reduced motion.)
+    await new Promise(r => setTimeout(r, 600));
+    return getJson('/api/dnsleak?t=' + tokens.join(','), { 'x-ipterm': 'dnsleak' });
+  }
   const canonIp = s => { const q = parseIp(String(s || '').trim()); return q ? (q.v === 4 ? q.o.join('.') : q.g.map(x => x.toString(16)).join(':')) : null; };
   const isPrivate = s => { const q = parseIp(s); return !!q && classify(q)[0] !== 'public'; };
 
@@ -804,15 +826,18 @@
   }
 
   async function leaktest() {
-    setUrl('/leaktest', 'VPN leak test: WebRTC, IPv6 and time zone check | ipterm');
+    setUrl('/leaktest', LEAKTEST_TITLE);
     if (!live) return line('The privacy check tests your real connection, so it only runs on the deployed site.', 'warn');
     const ql = line('running privacy check… (nothing is stored)', 'sys'); const t0 = performance.now();
     const [d, rtc] = await Promise.all([getJson('/api/check'), webrtcIps()]);
     if (d.error) { ql.textContent = d.error; ql.className = 'ln err'; announce(d.error); return; }
     const p = parseIp(d.ip);
     if (!p) { ql.textContent = 'The server returned an address this page cannot read.'; ql.className = 'ln err'; return; }
+    if (!d.dnsleak) document.title = LEAKTEST_TITLE_NO_DNS;
+    const dnsPending = dnsLookups(d.dnsleak);    // runs alongside the other IP version's lookup
     const other = await otherFamily(p.v);
     const otherInfo = other ? await api(other) : null;
+    const dns = await dnsPending;
     ql.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
 
     const net = d.network || {}, f = net.flags || {}, pc = net.privacy || null;
@@ -850,7 +875,40 @@
     else if (homeNet) add('info', 'VPN detection', `no VPN service: your IP belongs to ${d.org || 'your internet provider'}, a home or mobile internet provider, so sites see your provider and rough location`);
     else add('info', 'VPN detection', `not on known VPN lists. Without a VPN, sites see your provider${d.org ? ' (' + d.org + ')' : ''} and rough location. If you are using one, it's a newer or unlisted server, and sites may not spot it either`);
 
-    // 3. WebRTC
+    // 3. DNS: which resolvers looked up the test names, grouped by network. A LEAK only on a VPN, when one
+    // of them is outside the VPN's network (your provider's or anyone else's); otherwise they're named, as INFO.
+    const dnsRan = !!(dns && !dns.error && dns.seen > 0 && Array.isArray(dns.resolvers) && dns.resolvers.length);
+    if (dnsRan) {
+      const up = s => String(s || '').toUpperCase(), low = s => String(s || '').trim().toLowerCase();
+      // On a VPN, your provider's network is known only if the other IP version leaked (step 5 below).
+      const ispAsn = vpn ? (otherInfo && !otherInfo.error && up(otherInfo.asn) !== up(d.asn) ? up(otherInfo.asn) : '') : up(d.asn);
+      const mine = new Set([canonIp(d.ip), canonIp(other)].filter(Boolean));
+      const groups = new Map();
+      for (const r of dns.resolvers) {
+        if (!r || !parseIp(String(r.ip || ''))) continue;
+        const asn = /^AS\d+$/i.test(r.asn || '') ? up(r.asn) : '', key = r.private ? 'private' : asn || 'ip:' + r.ip;
+        if (!groups.has(key)) {
+          const vpnNet = vpn && asn && (asn === up(d.asn) || (r.org && low(r.org) === low(d.org)));
+          groups.set(key, { kind: r.private ? 'private' : !asn ? 'unknown' : vpnNet ? 'vpn' : asn === ispAsn ? 'isp' : 'other',
+            org: r.org, asn, service: r.service, ips: [] });
+        }
+        groups.get(key).ips.push(r.ip);
+      }
+      const label = g => (g.kind === 'private' ? 'a resolver inside your own network (private address)'
+        : g.kind === 'vpn' ? `your VPN's network${g.org ? ' (' + g.org + ')' : ''}`
+        : g.ips.every(ip => mine.has(canonIp(ip))) ? 'your own address (a resolver you run yourself)'
+        : g.kind === 'isp' ? `your ISP: ${g.org || g.asn}`
+        : g.service || g.org || g.asn || 'a network ipterm could not identify');
+      const named = list => list.flatMap((g, i) => [i ? '; ' : '', label(g), ' at ',
+        ...g.ips.slice(0, 2).flatMap((ip, j) => (j ? [', ', ipLink(ip)] : [ipLink(ip)])), g.ips.length > 2 ? ` +${g.ips.length - 2} more` : '']);
+      const all = [...groups.values()], outside = all.filter(g => g.kind === 'isp' || g.kind === 'other');
+      if (vpn && outside.length) add('warn', 'DNS', frag('sites you visit are looked up by ', ...named(outside), `, outside your VPN's network${d.org ? ' (' + d.org + ')' : ''}`),
+        "turn on DNS leak protection in your VPN app, so lookups go through the tunnel to the VPN's own DNS servers. Also check your browser's secure DNS setting (Chrome and Edge: Settings › Privacy and security › Security › Use secure DNS; Firefox: Settings › Privacy & Security › DNS over HTTPS): when it names a provider, lookups go there instead of to your VPN");
+      else if (vpn && all.every(g => g.kind === 'vpn')) add('ok', 'DNS', frag('sites you visit are looked up by ', ...named(all), ", so your internet provider can't see them"));
+      else add('info', 'DNS', frag('sites you visit are looked up by ', ...named(all), all.length === 1 && all[0].kind === 'isp' ? ', which can see the name of every site you visit' : ''));
+    }
+
+    // 4. WebRTC
     const known = new Set([canonIp(d.ip), canonIp(other)].filter(Boolean));
     const extra = rtc.ips.filter(ip => !known.has(canonIp(ip)));
     const localIps = rtc.local.filter(x => x !== 'mdns');
@@ -863,7 +921,7 @@
     if (localIps.length) add(strict ? 'warn' : 'info', 'local address', `WebRTC also shows your local network address ${localIps.slice(0, 2).join(', ')} (modern browsers usually hide it)`,
       'update your browser: current versions of Chrome, Edge, Firefox and Safari hide local addresses by default');
 
-    // 4. the other IP version
+    // 5. the other IP version
     const otherV = p.v === 4 ? 'IPv6' : 'IPv4';
     if (!other) add('ok', otherV, `none detected (your connection looks IPv${p.v} only)`);
     else {
@@ -877,7 +935,7 @@
         `turn on your VPN app's ${otherV} leak protection (sometimes called "block ${otherV}"), or turn off ${otherV} on this device`);
     }
 
-    // 5. time zone
+    // 6. time zone
     const devTz = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || null; } catch { return null; } })();
     if (devTz && d.timezone) {
       const same = devTz === d.timezone || (tzOffset(devTz) != null && tzOffset(devTz) === tzOffset(d.timezone));
@@ -901,8 +959,13 @@
       : "Nothing leaks beyond your IP address. Without a VPN, that address still shows your provider and rough location; a VPN would hide it.";
     line(verdict, leaks ? 'warn' : 'sys');
     if (!leaks) announce(verdict);
-    line('Not tested: DNS leaks (which DNS servers answer for you). Your VPN app usually has a setting for this.', 'sys');
-    if (!vpn) await sponsor('check');
+    // Before the DNS test server is set up, or when it can't say anything this time, the check says so.
+    if (!dnsRan) {
+      const why = !d.dnsleak ? '' : dns && !dns.error ? ": none of the test lookups reached ipterm's DNS server (a blocker or proxy may have stopped them)"
+        : ": ipterm's DNS test server didn't answer this time";
+      line(`Not tested: DNS leaks (which DNS servers answer for you)${why}. Your VPN app usually has a setting for this.`, 'sys');
+    }
+    if (!vpn) await sponsor('check');            // only after a no-VPN verdict: never after a LEAK on a VPN
     next(leaks && ['leaktest', 'leaktest', 'run the check again after a fix'], ['share', 'share', 'copy a link to this check, so others can run it'],
       ['whoami', 'whoami', 'your IP, network and location']);
   }
@@ -1592,7 +1655,7 @@
   // [what to type, what it does, what clicking it runs (an example for commands that take one)]
   const HELP = [
     ['whoami', 'show your own IP, network and location', 'whoami'],
-    ['leaktest', 'privacy check: WebRTC, IPv6 and time-zone leaks, VPN detection', 'leaktest'],
+    ['leaktest', 'VPN and DNS leak test: DNS, WebRTC, IPv6 and time-zone leaks, VPN detection', 'leaktest'],
     ['lookup <ip>', 'look up any IPv4 or IPv6 address', 'lookup 8.8.8.8'],
     ['lookup <domain>', 'DNS records, mail and name servers, hosting, DNSSEC', 'lookup example.com'],
     ['dig <name> [type]', 'one record type: A AAAA MX NS TXT CAA SOA CNAME SRV ... (dig <ip> = reverse)', 'dig gmail.com MX'],
@@ -1618,7 +1681,7 @@
   ];
   // Other names each command answers to (run() goes by these too).
   const ALIASES = { myip: 'whoami', me: 'whoami', leaks: 'leaktest', leak: 'leaktest', privacycheck: 'leaktest', vpntest: 'leaktest',
-    vpncheck: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
+    vpncheck: 'leaktest', dnsleak: 'leaktest', dnsleaktest: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
     spf: 'mail', dmarc: 'mail', dkim: 'mail', email: 'mail', mailcheck: 'mail',
     as: 'asn', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
     portcheck: 'port', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
@@ -1626,7 +1689,7 @@
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
       ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/json', '/city', '/?format=text']],
-    leaktest: ['leaktest', 'privacy check: is your IP a known VPN, and does WebRTC, IPv6 or your time zone give away more than your IP? Runs in your browser in a few seconds; nothing is stored.',
+    leaktest: ['leaktest', "VPN and DNS leak test: is your IP a known VPN, which DNS servers look up sites for you, and does WebRTC, IPv6 or your time zone give away more than your IP? For DNS, your browser looks up a few random names under ipterm's own DNS server (which answers \"no such name\"), and the check shows which resolvers asked: on a VPN, any outside the VPN's network is a DNS leak. Runs in your browser in a few seconds; nothing is stored.",
       ['leaktest'], ['whoami']],
     lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
       ['lookup 8.8.8.8', 'lookup 2606:4700:4700::1111', 'lookup github.com'], ['whois', 'asn', 'dig'], ['/8.8.8.8', '/8.8.8.8/org', '/8.8.8.8?format=text']],
@@ -1670,7 +1733,7 @@
   const guideLink = slug => { const g = GUIDES.find(x => x[0] === slug), a = el('a', 'cmd', g ? g[1] : slug); a.href = '/guides/' + slug; return a; };
   // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup),
   // unless the caller names one to prefer ("mal gmail.com" -> mail, not man).
-  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'lookup', 'nslookup', 'asn', 'port', 'ping', 'traceroute', 'dmarc',
+  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'lookup', 'nslookup', 'asn', 'port', 'ping', 'traceroute', 'dmarc',
     'share', 'copy', 'privacy', 'clear', 'history', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
   function osa(a, b) {
@@ -1846,7 +1909,7 @@
 
   async function privacy() {
     await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
-      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, and a mail check also fetches the domain\'s own MTA-STS policy file. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.'], 'sys');
+      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, and a mail check also fetches the domain\'s own MTA-STS policy file. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
     const d = el('div', 'ln sys'); const a = el('a', 'cmd', 'read the full privacy policy ↗'); a.href = '/privacy';
     d.append(a); out.appendChild(d); scroll();
