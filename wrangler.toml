@@ -47,7 +47,7 @@ SELF_HOSTED = "false"
 
 # Where the source code lives. The footer, `about` and /help link the deployed build's commit here
 # (<SOURCE_URL>/commit/<sha>), so anyone can read the code that is running. Leave it empty for no link.
-SOURCE_URL = ""
+SOURCE_URL = "https://github.com/GuardWiseSec/ipterm"
 
 # Which IPinfo plan your IPINFO_TOKEN is on: "lite" (free: country and network only) or
 # "core" (paid: adds city, region, coordinates, time zone and connection type).
