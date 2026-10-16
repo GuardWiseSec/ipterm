@@ -128,6 +128,45 @@ proxycheck.io's API reference defines `anonymous` as "any kind of anonymising se
 TOR, etc.)", and it's also set on addresses that are none of those: Google Public DNS (8.8.8.8) has
 it, with only `hosting` besides. So on its own it isn't reported as a VPN, here or in `leaktest`.
 
+### Budget status for the owner: /status (optional)
+
+`/status` shows how much of the IPinfo Core and proxycheck.io budgets ipterm has used today and this hour,
+read from the same `LookupBudget` counters, plus each past day's total (kept for 35 days). It counts
+ipterm's own upstream lookups and nothing else: no visitor data, no addresses. To turn it on, make a random
+key of at least 16 characters and store it as a secret:
+
+```sh
+node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
+npx wrangler secret put STATUS_KEY
+```
+
+Then send the key in a header. A key in the query string can end up in browser history, so the header is
+the better habit:
+
+```sh
+curl -H "x-status-key: <your key>" https://ipterm.net/status
+curl -H "x-status-key: <your key>" "https://ipterm.net/status?format=text"
+```
+
+`?key=<your key>` works too, for a quick look in a browser. Without the right key (and while no key of 16+
+characters is set), `/status` is an ordinary 404, the same answer as any unknown address, so scrapers can't
+watch the budgets run down. It isn't linked anywhere or listed in the sitemap, and the keyed answer is sent
+`no-store` with `X-Robots-Tag: noindex, nofollow`. Each look costs one Worker request and two Durable
+Object requests; it never touches IPinfo or proxycheck.io.
+
+| Field (per service) | Meaning |
+| --- | --- |
+| `on`, `off` | Whether the service is in use, and if not, why (no secret, plan not Core, budget `"0"`) |
+| `usedToday`, `dailyLimit` | Fresh lookups since 00:00 UTC, and the daily budget |
+| `usedThisHour`, `hourlyLimit` | The same for the current UTC hour (limit `0` = no hourly pacing) |
+| `perVisitorHourly` | Each visitor's hourly share (`0` = no cap) |
+| `hoursRunOutToday` | UTC hours (`"14"`) whose hourly budget filled. After that, lookups used IPinfo Lite (or skipped proxycheck.io) until the hour ended |
+| `dayRanOutAt` | When the daily budget filled, if it did. After that, the fallback lasted until midnight UTC |
+| `pastDays` | The same per finished day, newest first: `used`, `hoursRunOut`, `ranOutAt`. A day with no lookups has no entry |
+
+Not counted: lookups that fell back because one visitor used up their own hourly share, or because Core
+errored or refused the token (those are logged; watch with `npx wrangler tail`).
+
 ## How the data works
 
 | What | Source | Cost |
@@ -379,6 +418,14 @@ Targeting by result type works without tracking: a VPN offer fits `check`, a hos
 Affiliate programs (VPNs, hosting, dev tools) and direct sponsors both work: put the referral link in `url`.
 In the US, the FTC requires affiliate and sponsored links to be disclosed; the `sponsored` tag does that.
 
+**Placement sub-ID.** The Proton VPN link ends in `&aff_sub=leaktest`. Proton's affiliate links run on TUNE
+(formerly HasOffers, the `go.getproton.me/aff_c` address), where `aff_sub` is the first of five sub-ID fields
+that stats reports can be grouped by. So clicks and sign-ups from the leaktest line can be told apart from
+any others. The value names the placement, never the visitor: it's the same for everyone who sees the line,
+as the privacy policy says. To show a sponsor in a second place, give it a second entry with its own `on`
+list and its own value (`aff_sub=whoami`), rather than adding to `on`, which would credit both places to
+`leaktest`. Never put anything per visitor in it. TUNE itself warns against unique values in `aff_sub`.
+
 ## Privacy policy
 
 `public/privacy.html` is served at `/privacy` and linked in the footer and the `privacy` command.
@@ -423,6 +470,87 @@ requests.
 **If you add a new static file** (an image, a script, like `cidr.js` was), add a `"!/<file>"` line to `run_worker_first`
 so it doesn't count against the limit. Watch usage under **Workers & Pages → ipterm → Metrics**.
 
+## Measuring
+
+ipterm runs no analytics, beacons or Workers Analytics Engine, and the privacy policy promises as much
+("runs no analytics or tracking"). Adding any of them changes that promise, so it's the owner's decision,
+and the policy is updated first. Everything below comes from places that need nothing on the page:
+Cloudflare's dashboards, the search engines' webmaster tools, the affiliate dashboard and `/status`.
+What visitors do once they arrive (which commands, lookups per visit) is deliberately not measured.
+
+### Primary metric and guardrails
+
+**Primary: Google Search clicks per week, whole site** (Search Console → Performance → Search results).
+It counts people, not crawlers or scrapers (which inflate request counts). It has 16 months of history,
+so a "before" exists for any change. And it isn't skewed by request accounting: a homepage visit now costs
+one Worker request instead of two, which lowers request counts without any change in visitors.
+
+**Guardrails.** If one of these goes bad, fix it before reading anything into the primary metric:
+
+| Guardrail | Where | Healthy | When it isn't |
+| --- | --- | --- | --- |
+| Worker requests a day | Workers metrics | Busiest day under 70,000 (70% of the Free plan's 100,000) | Look for a scraper, or move to Workers Paid ($5/month, 10 million a month). Past 100,000, requests fail until 00:00 UTC |
+| Worker errors | Workers metrics | Close to zero | `npx wrangler tail` shows which service failed |
+| CPU time | Workers metrics | Median well under the Free plan's 10 ms a request | Near 10 ms, "Exceeded Resources" errors follow |
+| 429 rate (rate-limited answers) | GraphQL query below | Under 1% of requests | A scraper, or the 30-a-minute limit is too tight for real use |
+| Core fallback | `/status`, `pastDays` | No hours run out on most days, and the day never runs out | Raise `IPINFO_HOURLY_BUDGET` if the monthly quota allows, or look for a scraper. The same goes for proxycheck.io |
+| Durable Object use | Dashboard, Durable Objects (under Storage & databases) | Far below the Free plan's 100,000 requests and 100,000 rows written a day | Past either, the budget counter fails and every lookup falls back to Lite |
+
+### Checklist for a 4-week baseline
+
+Search Console keeps 16 months, so its "before" numbers can be read at any time. Cloudflare's Free plan keeps
+about 30 days and Proton's sub-ID split starts with the new link, so write those down before a deploy you
+want to judge. Then fill in one row per source once a week, on the same weekday, for four weeks. Use a
+spreadsheet, not anything on the site.
+
+**Once:**
+
+- [ ] `npx wrangler secret put STATUS_KEY` (see "Budget status for the owner: /status" above), then check
+      `curl -H "x-status-key: <your key>" https://ipterm.net/status` answers, and that `/status` without it is a 404.
+- [ ] **Google Search Console:** add a *Domain* property for `ipterm.net` (verified with a DNS TXT record; for a
+      Cloudflare domain, Search Console offers to add it for you), then submit `https://ipterm.net/sitemap.xml`
+      under Sitemaps.
+- [ ] **URL Inspection** in Search Console for `/`, `/8.8.8.8`, `/AS13335`, `/whois`, `/leaktest` and `/api`:
+      *Test live URL* → *View tested page*. In the HTML tab, check that the title, the h1, the plain summary
+      and the BreadcrumbList are in the rendered HTML. In the screenshot, check that the page looks right.
+      Repeat after deploys that touch page markup.
+- [ ] **Bing Webmaster Tools:** add `https://ipterm.net` and verify with the XML file option:
+      `public/BingSiteAuth.xml` is already served at `/BingSiteAuth.xml`. (Bing can also import the site
+      from Search Console.) Submit the sitemap there too.
+- [ ] **Proton affiliate dashboard:** find the report that can be grouped by sub-ID (`aff_sub`), and after the
+      deploy, check that clicks show up under `leaktest`. Clicks with no sub-ID come from older copies of the link.
+- [ ] **For the 429 guardrail:** create a Cloudflare API token with *Analytics: Read* for the zone, and note the
+      zone ID (on the zone's Overview page).
+
+**Every week:**
+
+| Source | Where | Write down |
+| --- | --- | --- |
+| Workers metrics | Workers & Pages → ipterm → Metrics, last 7 days | Requests a day (busiest and average), errors, CPU time (median and the highest percentile shown) |
+| Zone analytics | ipterm.net → Analytics & Logs → HTTP Traffic, last 7 days | Requests and unique visitors. Free plans show no status codes or paths here; Pro and up can filter by them |
+| 429s | The GraphQL query below, one day per query | Count of `429` against all requests for each day, as a percentage |
+| Google Search Console | Performance → Search results, last 7 days (Compare with the previous period) | Clicks, impressions, CTR and position for the whole site, then for each of `/`, `/whois`, `/dns`, `/cidr`, `/leaktest`, `/api` (Page filter, *Exact URL*). For page groups, use *Custom (regex)*: `^https://ipterm\.net/AS\d+$` (networks), `/dns/`, `/whois/`, `/cidr/`, `/guides/`. Also Indexing → Pages: indexed count, and any new reason for pages not being indexed |
+| Bing Webmaster Tools | Search Performance, last 7 days | Clicks and impressions; indexed pages |
+| Proton affiliate dashboard | Stats grouped by sub-ID, last 7 days | Clicks, sign-ups and earnings for `leaktest` (and for no sub-ID) |
+| `/status` | `curl -H "x-status-key: <your key>" "https://ipterm.net/status?format=text"` | From `past days`, each day's Core and proxycheck.io lookups, hours run out, and whether the day ran out |
+
+Unique visitors in zone analytics count addresses, crawlers included, so treat Worker requests ÷ unique
+visitors as a rough engagement hint. Compare it only between weeks with the same deployed code.
+
+**429s from the GraphQL Analytics API.** Free plans can't see status codes in the dashboard, but the
+`httpRequestsAdaptiveGroups` dataset is open to every plan, one day per query. Run it once per day of the week:
+
+```sh
+curl -s https://api.cloudflare.com/client/v4/graphql \
+  -H "Authorization: Bearer <analytics token>" -H "Content-Type: application/json" \
+  --data '{"query":"{ viewer { zones(filter: {zoneTag: \"<zone id>\"}) { httpRequestsAdaptiveGroups(limit: 50, filter: {datetime_geq: \"2026-11-02T00:00:00Z\", datetime_lt: \"2026-11-03T00:00:00Z\"}, orderBy: [count_DESC]) { count dimensions { edgeResponseStatus } } } } }"}'
+```
+
+It lists requests by status code for that day; add them up for the total, and divide the `429` count by it.
+This query wasn't run when this section was written. If the API rejects a field or the date range, ask the
+zone's `settings { httpRequestsAdaptiveGroups { enabled maxDuration notOlderThan } }` node what your plan
+allows (`notOlderThan` is how many seconds back you can query).
+
 ## Security
 
 | Protection | Where | How to change it |
@@ -437,6 +565,7 @@ so it doesn't count against the limit. Watch usage under **Workers & Pages → i
 | Only GET and HEAD accepted | `route()` in `src/worker.js` | |
 | IPinfo token kept server-side as a secret | `wrangler secret put` | |
 | proxycheck.io key kept server-side as a secret, masked in logs; its answers validated field by field (VPN name limited to plain letters, digits and punctuation) | `wrangler secret put`, `parseProxycheck` | |
+| `/status` (budget counts) answers only with the `STATUS_KEY` secret, compared in constant time; without it, an ordinary 404 | `statusKeyOk()` in `src/worker.js` | `wrangler secret put STATUS_KEY`; delete the secret to turn it off |
 
 Notes:
 

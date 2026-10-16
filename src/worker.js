@@ -23,6 +23,8 @@
 //                           API docs, and command-line clients get the /help text there instead
 //   GET /api/check          your own IP plus how IPinfo classifies it (VPN, hosting...), for the privacy check
 //   GET /robots.txt, /sitemap.xml
+//   GET /status             for the owner: today's and this hour's IPinfo Core and proxycheck.io budget use.
+//                           Needs the STATUS_KEY secret (x-status-key header or ?key=); without it, a 404
 //   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /whois/..., /cidr/... and their /api/
 //                           forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
 //   /openapi.json, /llms.txt  static files describing the API (served without running the Worker)
@@ -89,6 +91,7 @@ async function route(request, env, ctx) {
   if (Object.hasOwn(SELF_FIELDS, path.slice(1).toLowerCase())) return selfField(io, path.slice(1).toLowerCase());
   if (path === '/robots.txt') return robots(url);
   if (path === '/sitemap.xml') return sitemap(url);
+  if (path === '/status' && await statusKeyOk(request, url, env)) return statusRoute(io);
 
   if (path === '/json' || (path === '/api/lookup' && !url.searchParams.get('ip'))) return self();
   if (path === '/api/lookup') return ipRoute(io, url.searchParams.get('ip').trim(), false);
@@ -728,27 +731,53 @@ export class LookupBudget extends DurableObject {
       if (v >= perVisitor) return { ok: false, reason: 'visitor', used, usedHour, daily, hourly, day, hour };
       this.visitors.set(key, v + 1);
     }
-    await s.put({ day, count: used + 1, hour, hcount: usedHour + 1 });
+    const put = { day, count: used + 1, hour, hcount: usedHour + 1 };
+    // For /status: each finished day's totals (kept 35 days), the UTC hours whose limit filled today,
+    // and when the day's did. Written only at those moments: about 26 times a day at the very most.
+    if (savedDay && savedDay !== day) {
+      const hist = await s.get('history');
+      put.history = [await dayTotals(s, savedDay, count), ...(Array.isArray(hist) ? hist : [])].slice(0, 35);
+    }
+    if (hourly > 0 && usedHour + 1 === hourly) {
+      const caps = await s.get('caps');
+      put.caps = { day, hours: [...(caps && caps.day === day ? caps.hours : []), iso.slice(11, 13)] };
+    }
+    if (used + 1 === daily) put.full = iso;
+    await s.put(put);
     return { ok: true, used: used + 1, usedHour: usedHour + 1, daily, hourly, day, hour };
   }
+  // Counts only, for /status: today, this hour, and the past days (newest first).
   async status(now = Date.now()) {
-    const iso = new Date(now).toISOString();
-    const s = this.ctx.storage, [d, c, h, hc] = [await s.get('day'), await s.get('count'), await s.get('hour'), await s.get('hcount')];
-    return { day: iso.slice(0, 10), used: d === iso.slice(0, 10) ? Number(c) || 0 : 0, usedHour: h === iso.slice(0, 13) ? Number(hc) || 0 : 0 };
+    const iso = new Date(now).toISOString(), day = iso.slice(0, 10);
+    const s = this.ctx.storage, [d, c, h, hc, hist] = [await s.get('day'), await s.get('count'), await s.get('hour'), await s.get('hcount'), await s.get('history')];
+    // A finished day stays in the current keys until the next lookup moves it into the history.
+    const past = [...(d && d !== day ? [await dayTotals(s, d, c)] : []), ...(Array.isArray(hist) ? hist : [])];
+    return { ...await dayTotals(s, day, d === day ? c : 0), usedHour: h === iso.slice(0, 13) ? Number(hc) || 0 : 0, past: past.slice(0, 35) };
   }
+}
+
+// One day's totals: lookups made, the UTC hours whose limit filled ("14"), and when the day's limit did.
+async function dayTotals(s, day, count) {
+  const [caps, full] = [await s.get('caps'), await s.get('full')];
+  return { day, used: Number(count) || 0, hoursRunOut: caps && caps.day === day && Array.isArray(caps.hours) ? caps.hours : [],
+    ranOutAt: typeof full === 'string' && full.startsWith(day) ? full : null };
 }
 
 // Whole numbers only ("4500"); anything else (empty, negative, decimals, "abc", "1e400") uses the default.
 const intVar = (v, def) => { const t = String(v ?? '').trim(); return /^\d{1,9}$/.test(t) ? Number(t) : def; };
 
+// The configured limits, shared by the budget checks and /status. Hourly pacing defaults to twice an
+// even share of the day; "0" turns it (or the per-visitor cap) off.
+const limitsOf = (daily, hourly, perVisitor) => ({ daily, hourly: intVar(hourly, Math.ceil((daily / 24) * 2)), perVisitor });
+const coreLimits = env => limitsOf(intVar(env.IPINFO_DAILY_BUDGET, 4500), env.IPINFO_HOURLY_BUDGET, intVar(env.IPINFO_VISITOR_HOURLY, 30));
+const pcLimits = env => limitsOf(intVar(env.PROXYCHECK_DAILY_BUDGET, 900), env.PROXYCHECK_HOURLY_BUDGET, intVar(env.PROXYCHECK_VISITOR_HOURLY, 10));
+
 let budgetBlockedUntil = 0;                              // per-instance memo: skip the check until the hour/day rolls over
 async function coreAllowed(env, who = null, now = Date.now()) {
-  const daily = intVar(env.IPINFO_DAILY_BUDGET, 4500);
+  const { daily, hourly, perVisitor } = coreLimits(env);
   if (daily === 0) return false;                         // "0" turns Core off
   if (!env.BUDGET) return true;                          // no budget configured: no cap
   if (now < budgetBlockedUntil) return false;
-  const hourly = intVar(env.IPINFO_HOURLY_BUDGET, Math.ceil((daily / 24) * 2));   // default: twice an even share; "0" = no pacing
-  const perVisitor = intVar(env.IPINFO_VISITOR_HOURLY, 30);                       // "0" = no per-visitor cap
   try {
     const r = await env.BUDGET.get(env.BUDGET.idFromName('ipinfo-core')).take(daily, hourly, who, perVisitor);
     if (!r.ok && r.reason === 'visitor') return 'visitor';   // just this visitor: no memo, no log
@@ -833,11 +862,9 @@ async function provider(ip, env, opts = {}) {
    proxycheck.io not to keep the query in the account's log. */
 let pcBlockedUntil = 0, pcRefusedUntil = 0;
 async function proxycheckAllowed(env, who, now = Date.now()) {
-  const daily = intVar(env.PROXYCHECK_DAILY_BUDGET, 900);
+  const { daily, hourly, perVisitor } = pcLimits(env);
   if (daily === 0 || now < pcBlockedUntil) return false;
   if (!env.BUDGET) return true;
-  const hourly = intVar(env.PROXYCHECK_HOURLY_BUDGET, Math.ceil((daily / 24) * 2));
-  const perVisitor = intVar(env.PROXYCHECK_VISITOR_HOURLY, 10);
   try {
     const r = await env.BUDGET.get(env.BUDGET.idFromName('proxycheck')).take(daily, hourly, who, perVisitor);
     if (!r.ok && r.reason !== 'visitor') {
@@ -1740,6 +1767,64 @@ function sitemap(url) {
   return new Response(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${items}\n</urlset>\n`, {
     headers: { 'content-type': 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=86400' },
   });
+}
+
+/* ---------- owner status ----------
+   /status shows ipterm's own upstream spend: today's and this hour's IPinfo Core and proxycheck.io
+   lookups against their limits, from the LookupBudget counters. Counts only, nothing about visitors.
+   It needs the STATUS_KEY secret (16+ characters) in an x-status-key header or ?key=. Without it the
+   path is a 404 like any unknown one, so scrapers get no gauge of when the budgets run out. It is
+   never linked and not in the sitemap. */
+async function statusKeyOk(request, url, env) {
+  const want = String(env.STATUS_KEY || '');
+  if (want.length < 16) return false;                    // unset, or too short to be a real secret
+  const got = request.headers.get('x-status-key') || url.searchParams.get('key') || '';
+  const hash = s => crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));   // same length, so it can be compared
+  const [a, b] = await Promise.all([hash(got), hash(want)]);
+  return crypto.subtle.timingSafeEqual(a, b);
+}
+
+async function statusRoute(io) {
+  const env = io.env, d = new Date();
+  const at = (h, plusDays = 0) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + plusDays, h)).toISOString();
+  const budget = async (name, lim, off) => {
+    const b = { on: !off, off: off || undefined, usedToday: null, dailyLimit: lim.daily, usedThisHour: null,
+      hourlyLimit: lim.hourly, perVisitorHourly: lim.perVisitor, hoursRunOutToday: [], dayRanOutAt: null, pastDays: [] };
+    if (!env.BUDGET) return { ...b, error: 'no BUDGET binding, so nothing is counted' };
+    try {
+      const s = await env.BUDGET.get(env.BUDGET.idFromName(name)).status();
+      return { ...b, usedToday: s.used, usedThisHour: s.usedHour, hoursRunOutToday: s.hoursRunOut, dayRanOutAt: s.ranOutAt, pastDays: s.past };
+    } catch (e) {
+      return { ...b, error: 'counter unreachable: ' + String((e && e.message) || e) };
+    }
+  };
+  const plan = String(env.IPINFO_PLAN || '').toLowerCase(), core = coreLimits(env), pc = pcLimits(env);
+  const coreOff = !env.IPINFO_TOKEN ? 'no IPINFO_TOKEN secret' : plan !== 'core' ? `IPINFO_PLAN is "${plan}", not "core"`
+    : core.daily === 0 ? 'IPINFO_DAILY_BUDGET is 0' : null;
+  const pcOff = !env.PROXYCHECK_KEY ? 'no PROXYCHECK_KEY secret' : pc.daily === 0 ? 'PROXYCHECK_DAILY_BUDGET is 0' : null;
+  const [ipinfoCore, proxycheck] = await Promise.all([budget('ipinfo-core', core, coreOff), budget('proxycheck', pc, pcOff)]);
+  return reply(io, {
+    time: d.toISOString(), ipinfoCore, proxycheck, resets: { hour: at(d.getUTCHours() + 1), day: at(0, 1) },
+    note: "Counts of ipterm's own upstream lookups (limit 0 = none; hours are UTC). Nothing about visitors.",
+  }, 200, { 'x-robots-tag': 'noindex, nofollow' }, statusText);
+}
+
+function statusText(d) {
+  const hhmm = iso => iso.slice(11, 16);
+  const of = (used, limit) => `${used ?? '?'} ` + (limit ? `of ${limit}` : '(no limit)');
+  const runOut = (hours, at) => [hours.length ? 'hours run out ' + hours.map(h => h + ':00').join(' ') : '',
+    at ? 'day ran out ' + hhmm(at) : ''].filter(Boolean).join(', ');
+  const part = (name, b) => [
+    [name, b.on ? 'on' : `off (${b.off})`],
+    ['  today', `${of(b.usedToday, b.dailyLimit)}, resets 00:00 UTC`],
+    ['  this hour', `${of(b.usedThisHour, b.hourlyLimit)}, resets ${hhmm(d.resets.hour)} UTC`],
+    ['  per visitor', b.perVisitorHourly ? `${b.perVisitorHourly} an hour` : 'no cap'],
+    ['  ran out today', runOut(b.hoursRunOutToday, b.dayRanOutAt) || 'no'],
+    ['  past days', b.pastDays.map(p => [p.day, String(p.used).padStart(6), runOut(p.hoursRunOut, p.ranOutAt)].join('  ').trimEnd())],
+    ['  error', b.error],
+  ];
+  return kvText([['time', d.time.slice(0, 16).replace('T', ' ') + ' UTC'], ...part('ipinfo core', d.ipinfoCore), ...part('proxycheck.io', d.proxycheck)],
+    ["Counts of ipterm's own upstream lookups (hours are UTC). Nothing about visitors."]);
 }
 
 /* ---------- hardening ---------- */
