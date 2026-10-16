@@ -139,6 +139,12 @@ button.cmd{font:inherit;color:var(--accent);background:none;border:0;padding:0;c
 button.cmd:hover{color:var(--hi)}
 button.cmd:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
 .next{margin-top:6px}
+/* the search form for wikis: as HTML to copy in the terminal (`api`), and as a working form on /api without scripts */
+.ln.snippet{color:var(--fg);border-left:2px solid var(--rule);padding-left:10px;margin:2px 0 6px}
+.go-form{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px}
+.go-form input{flex:1 1 16em;min-width:0;font:inherit;color:var(--hi);background:var(--screen);border:1px solid var(--rule);border-radius:4px;padding:5px 8px}
+.go-form button{font:inherit;color:var(--fg);background:transparent;border:1px solid var(--rule);border-radius:4px;padding:5px 10px;cursor:pointer}
+.go-form input:focus-visible,.go-form button:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
 /* the homepage's server copy reserves room for the map and the other IP version; without scripts neither fills in */
 @media (scripting: none){ .static .geo,.static .js-only{display:none} }
 .ttl{color:var(--dim)}

@@ -1272,13 +1272,17 @@
     announce(t.text + ' ' + t.usage);
   }
 
+  // A 404, or a search /go couldn't read (init.message, and maybe two suggestions: a number is an ASN or a port).
   function notFound(init) {
-    line(`ipterm: ${init.path}: no such page (404)`, 'err');
-    const s = init.suggest;
-    if (s && s.href) {
+    line(init.message || `ipterm: ${init.path}: no such page (404)`, 'err');
+    const list = [].concat(init.suggest || []).filter(s => s && s.href);
+    if (list.length) {
       const d = el('div', 'ln sys'); d.append('did you mean: ');
-      if (s.cmd) d.append(cmdLink(s.cmd, s.cmd, s.href));
-      else { const a = el('a', 'cmd', s.label || s.href); a.href = s.href; d.append(a); }
+      list.forEach((s, i) => {
+        if (i) d.append(' or ');
+        if (s.cmd) d.append(cmdLink(s.cmd, s.cmd, s.href));
+        else { const a = el('a', 'cmd', s.label || s.href); a.href = s.href; d.append(a); }
+      });
       d.append(' ?'); out.appendChild(d);
     }
     const d = el('div', 'ln sys'); d.append('type help for commands, or run ');
@@ -1781,7 +1785,7 @@
       ['keys', 'history'], ['history']],
     theme: ['theme [phosphor | amber | ice | contrast | paper]', 'changes the colors; with no name, moves to the next theme. Remembered on this device only.', ['theme amber', 'theme paper', 'theme contrast'], ['crt', 'access']],
     crt: ['crt [on | off]', 'turns the CRT glow, scanlines and vignette on or off; with neither, switches. Remembered on this device only.', ['crt off', 'crt on'], ['theme', 'access']],
-    api: ['api', "how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP). /me draws a card of your own address with a world map (?w=<columns> to fit, ?color=0 for no colors, ?redact to hide the IP). One value at a time as plain text: /asn, /org, /cc, /city, /tz, /colo and /hostname for your own address, /<ip>/asn, org, cc, country, continent or hostname for any other. /line puts your IP, network, country and data center on one line for a shell prompt. /expect/<ASN or country code> answers HTTP 200 when your address matches and 412 when it doesn't, so curl -fs …/expect/AS13335 || <stop something> works as a VPN kill switch. Add ?format=text to any lookup for aligned lines instead of JSON. curl …/help prints the whole reference.",
+    api: ['api', "how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP). /me draws a card of your own address with a world map (?w=<columns> to fit, ?color=0 for no colors, ?redact to hide the IP). One value at a time as plain text: /asn, /org, /cc, /city, /tz, /colo and /hostname for your own address, /<ip>/asn, org, cc, country, continent or hostname for any other. /line puts your IP, network, country and data center on one line for a shell prompt. /expect/<ASN or country code> answers HTTP 200 when your address matches and 412 when it doesn't, so curl -fs …/expect/AS13335 || <stop something> works as a VPN kill switch. Add ?format=text to any lookup for aligned lines instead of JSON. curl …/help prints the whole reference. In a browser, /go?q=<anything> opens the page for an IP address, domain, AS number, range, email address (its mail check) or port <n>, or for a command such as dig gmail.com MX; browsers offer ipterm as a search engine through it, and api shows a search form for wikis that uses it.",
       ['api'], ['whoami', 'lookup'], ['/help', '/me', '/asn', '/line', '-fs /expect/AS13335', '/8.8.8.8/country', '/8.8.8.8?format=text']],
     man: ['man <command>', 'shows the manual for a command: what it does, examples to click and related commands. help <command> and <command> --help do the same.', ['man dig', 'man whois'], ['help']],
     help: ['help [command]', 'lists every command; click one to run it. With a command name, shows its manual.', ['help', 'help dig'], ['man']],
@@ -2095,6 +2099,10 @@
     d.append(a); out.appendChild(d); scroll();
   }
 
+  // The search form people paste into a wiki: a plain GET to /go. The same as goForm() in worker.js.
+  const goForm = action => `<form action="${action}" method="get" role="search">\n` +
+    '  <input type="search" name="q" aria-label="IP address, domain, ASN, range or port" placeholder="8.8.8.8, example.com, AS13335 or 10.0.0.0/22" required>\n' +
+    '  <button type="submit">Look up on ipterm</button>\n</form>';
   // A curl line to show; URLs with ? are quoted, since zsh would treat the ? as a wildcard.
   const curlLine = (p, flag = '') => { const u = (live ? location.origin : 'https://your-domain') + p, f = flag ? flag + ' ' : ''; return p.includes('?') ? `curl ${f}'${u}'` : `curl ${f}${u}`; };
   async function apiHelp() {
@@ -2121,10 +2129,18 @@
     line('Open the same links in a browser to get a shareable page. One-value answers are a single line; a missing value is an empty line with HTTP 404.', 'sys');
     const d = el('div', 'ln sys'), doc = (href, text) => { const a = el('a', 'cmd', text); a.href = href; return a; };
     d.append('machine-readable: ', doc('/openapi.json', 'OpenAPI'), '  ·  ', doc('/llms.txt', 'llms.txt'));
+    // Address-bar search (/go, which public/opensearch.xml offers to browsers) and a form for wikis that uses it.
+    const go = el('div', 'ln sys');
+    go.append('search from the address bar: ', doc('/go?q=8.8.8.8', '/go?q=<IP, domain, ASN, range, email or port n>'),
+      ' opens the matching page, and browsers offer ipterm as a search engine.');
+    const form = el('div', 'ln sys'), html = goForm((live ? location.origin : 'https://your-domain') + '/go');
+    const btn = el('button', 'share-btn', 'copy'); btn.type = 'button'; btn.setAttribute('aria-label', 'Copy the search form as HTML');
+    btn.addEventListener('click', () => toClipboard(html).then(ok => (ok ? flash(btn, 'copied the search form') : line('The clipboard is blocked here, so select the form below and copy it by hand.', 'warn'))));
+    form.append('a search box for a wiki or intranet page (plain HTML, no script)  ', btn);
     const credit = el('div', 'ln sys'), ipinfo = el('a', '', 'IPinfo ↗');
     ipinfo.href = 'https://ipinfo.io'; ipinfo.target = '_blank'; ipinfo.rel = 'noopener';
     credit.append('IP address data powered by ', ipinfo);
-    out.append(d, credit); scroll();
+    out.append(d, go, form, el('div', 'ln snippet', html), credit); scroll();
     if (!live) line('These routes work once the Worker is deployed.', 'sys');
     announce('API reference: curl commands for your IP, one value at a time, any IP, network, DNS name, registry record or subnet.');
     next(['whoami', 'whoami', 'your own IP, as /json returns it'], ['lookup 8.8.8.8', 'lookup 8.8.8.8', 'what /8.8.8.8 returns, drawn in the terminal']);
