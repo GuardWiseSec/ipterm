@@ -22,8 +22,8 @@ Why a separate server: Cloudflare's DNS can't tell anyone which resolver asked f
 has to be delegated to a server that can. Why the API runs behind HTTPS on a host name: a Worker can't
 fetch a bare IP address, and the key shouldn't cross the internet in the clear.
 
-It is plain Node.js with no dependencies (Go wasn't installed on the machine it was written on). Debian 12
-and Ubuntu 24.04 ship a new enough Node (18), and Caddy, so the server needs nothing from outside the
+It is plain Node.js with no dependencies (Go wasn't installed on the machine it was written on). Debian 12 and 13
+and Ubuntu 24.04 ship a new enough Node (18 or 20), and Caddy, so the server needs nothing from outside the
 distribution, no build step and no `npm install`.
 
 ## What it keeps (privacy)
@@ -58,12 +58,12 @@ You'll need the server's public IPv4 address in several places; below it is `<vp
 
 Any of these works. Pick the smallest plan with a fixed (static) public IPv4 address, about $4 to $6 a month:
 
-- **Hetzner Cloud:** Create Server, image **Debian 12**, type CX22 (or the cheapest shared-CPU type offered),
+- **Hetzner Cloud:** Create Server, image **Debian 13** (or 12), type CX22 (or the cheapest shared-CPU type offered),
   with a public IPv4 address. Add your SSH key.
-- **Vultr:** Deploy, Cloud Compute (shared CPU), **Debian 12**, the cheapest plan with IPv4. Add your SSH key.
-- **DigitalOcean:** Create Droplet, **Debian 12**, Basic, Regular, the $4 or $6 plan. Add your SSH key.
+- **Vultr:** Deploy, Cloud Compute (shared CPU), **Debian 13** (or 12), the cheapest plan with IPv4. Add your SSH key.
+- **DigitalOcean:** Create Droplet, **Debian 13** (or 12), Basic, Regular, the $4 or $6 plan. Add your SSH key.
 
-Ubuntu 24.04 works too. Ubuntu 22.04 and Debian 11 don't (their Node is older than 18). The region doesn't
+Ubuntu 24.04 works too, if Debian is not offered. Ubuntu 22.04 and Debian 11 don't (their Node is older than 18). The region doesn't
 matter much: resolvers from everywhere will ask it, and one query takes a few milliseconds more or less.
 
 Note the public IPv4 address. These providers keep it for as long as the server exists (on Hetzner, the

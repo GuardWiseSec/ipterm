@@ -1709,7 +1709,7 @@
       ['lookup 8.8.8.8', 'lookup 2606:4700:4700::1111', 'lookup github.com'], ['whois', 'asn', 'dig'], ['/8.8.8.8', '/8.8.8.8/org', '/8.8.8.8?format=text']],
     dig: ['dig <domain> [type]   or   dig <ip>', "DNS records from Cloudflare's resolver (1.1.1.1). With a type, just that type with its TTLs: A AAAA CNAME MX NS TXT CAA SOA SRV PTR DS DNSKEY HTTPS. With an IP address, its reverse DNS name.",
       ['dig example.com', 'dig gmail.com MX', 'dig github.com TXT', 'dig 8.8.8.8'], ['lookup', 'whois', 'mail'], ['/dns/example.com', '/dns/gmail.com/MX', '/dns/example.com?format=text']],
-    // The sixth entry: extra rows. The grading rubric is the same as MAIL_GRADES in worker.js and the README.
+    // The sixth entry: extra rows. The grading rubric is the same as MAIL_GRADES in worker.js and docs/handbook.md.
     mail: ['mail <domain> [--dkim <selector>]', "checks a domain's email security: its mail servers and the provider behind them, SPF (following includes to count its DNS lookups against the limit of 10), the DMARC policy and where reports go, DKIM keys, MTA-STS (the record, plus the policy file fetched from https://mta-sts.<domain>), TLS-RPT and BIMI. Each finding is OK, WARN, FAIL or INFO, with a fix under every problem. Records come from Cloudflare's resolver (1.1.1.1) and are cached for five minutes.",
       ['mail gmail.com', 'mail github.com', 'mail example.com', 'mail outlook.com --dkim selector1'], ['dig', 'whois'], ['/mail/gmail.com', '/mail/gmail.com?format=text', '/mail/outlook.com?dkim=selector1'],
       [['GRADE', 'A: no FAIL and no WARN'], ['', 'B: no FAIL, one or two WARN'], ['', 'C: one FAIL, or three or more WARN'], ['', 'D: two FAIL'],

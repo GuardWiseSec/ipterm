@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs or updates ipterm's DNS leak test responder on Debian 12+ or Ubuntu 24.04+. Run it as root,
+# Installs or updates ipterm's DNS leak test responder on Debian 12 or 13, or Ubuntu 24.04+. Run it as root,
 # from this directory, with the server's public IPv4 address:
 #   sh setup.sh 203.0.113.10
 # Running it again (say, after copying newer files) updates the program and settings and keeps the key.
@@ -27,7 +27,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -y -q nodejs caddy ca-certificates
 major=$(node -p 'process.versions.node.split(".")[0]')
-[ "$major" -ge 18 ] || die "Node.js $major is too old (18 or newer needed): use Debian 12 or Ubuntu 24.04"
+[ "$major" -ge 18 ] || die "Node.js $major is too old (18 or newer needed): use Debian 13 (or 12) or Ubuntu 24.04"
 
 echo "== 2. The program, in /opt/dnsleak"
 install -d -m 0755 /opt/dnsleak
