@@ -11,10 +11,12 @@
 //                           request.cf only (?w=<columns>, ?color=0, ?redact). Browsers are sent to /
 //   GET /line               your IP, network, country and data center on one line (shell prompts, tmux)
 //   GET /expect/<ASN|cc>    200 and the value if your address is on that network or in that country, else 412
-//   GET /<ip>               page for any IPv4/IPv6 address        (add ?format=json to force JSON)
+//   GET /<ip>               page for any IPv4/IPv6 address        (add ?format=json to force JSON). Pages for
+//                           non-public addresses are noindex, except the router and well-known ones in SITEMAP_PATHS;
+//                           common typos of those (/192.168.l.l, /192,168,1,1) get a 301 to the address in the list
 //   GET /<ip>/<field>       one value for any public address as plain text: asn, org, cc, country, continent,
 //                           hostname. IPinfo Lite only (never Core or proxycheck.io), so no budget is spent
-//   GET /AS<number>         page for any autonomous system (ASN)  (add ?format=json to force JSON)
+//   GET /AS<number>         page for any autonomous system (ASN), with its main upstreams (add ?format=json for JSON)
 //   GET /api/lookup?ip=     IP details as JSON (no ip = yourself), used by the terminal
 //   GET /api/asn?asn=       ASN details as JSON, used by the terminal
 //   GET /whois/<ip|ASN|domain> registry record via RDAP: owner, address block and abuse contact for
@@ -25,7 +27,11 @@
 //   GET /mail/<domain>      email security check: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, graded A-F
 //                           (?dkim=<selector> checks that DKIM selector as well as the common ones)
 //   GET /api/mail?domain=&dkim= the same as JSON, used by the terminal
-//   GET /cidr/<ip>/<prefix> subnet calculator page (also /api/cidr?q=); pure calculation, no outside calls
+//   GET /cidr/<ip>/<prefix> subnet calculator page (also /api/cidr?q=). The calculation makes no outside calls; the
+//                           page for a public prefix adds how it is routed (RIPEstat, see "routing" below)
+//   GET /route/<prefix|ip>  routing as JSON: origin network, RPKI, RIS visibility, sample AS paths (RIPEstat only,
+//                           never IPinfo or proxycheck.io). Browsers are sent to the prefix's /cidr page
+//   GET /api/route?q=       the same, used by the terminal (`route`)
 //   GET /port/<n>           page explaining port n with a button to check it (browsers); command-line tools get
 //                           the check itself. It only ever tests your own address (see "port check" below)
 //   GET /api/port?n=        the check as JSON, used by the terminal (same-origin or command-line clients only)
@@ -34,10 +40,12 @@
 //   GET /api/check          your own IP plus how IPinfo classifies it (VPN, hosting...), for the privacy check
 //   GET /api/dnsleak?t=     the DNS resolvers that looked up the page's random names, with their networks
 //                           (same-origin or command-line clients only; off unless DNSLEAK_* is set up)
-//   GET /robots.txt, /sitemap.xml
+//   GET /robots.txt
+//   GET /sitemap.xml        a sitemap index: /sitemap-pages.xml (SITEMAP_PATHS) and /sitemap-asn-<n>.xml, the
+//                           largest networks in tiers (src/asn-sitemap.js, built by tools/build_asn_sitemap.mjs)
 //   GET /status             for the owner: today's and this hour's IPinfo Core and proxycheck.io budget use.
 //                           Needs the STATUS_KEY secret (x-status-key header or ?key=); without it, a 404
-//   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /mail/..., /whois/..., /cidr/... and their
+//   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /mail/..., /whois/..., /cidr/..., /route/... and their
 //                           /api/ forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
 //   /openapi.json, /llms.txt  static files describing the API (served without running the Worker)
 //   anything else: a static file if one exists, a domain-shaped path (/example.com) redirects to its
@@ -49,7 +57,9 @@
 //   Other IPs: IPinfo. Set the IPINFO_TOKEN secret to use IPinfo Lite (free, unlimited,
 //   country + ASN). Without a token it falls back to IPinfo's public endpoint
 //   (city-level, ~1,000 requests/day, shared rate limit).
-//   ASNs: RIPEstat (free, public, no key).
+//   ASNs: RIPEstat (free, public, no key), including the main upstreams (asn-neighbours, read with a size cap).
+//   Routing of a prefix: RIPEstat's prefix-overview, routing-status, rpki-validation and bgp-state (AS paths from
+//   three RIS collectors only, rrcs=), cached six hours.
 //   Registry records (whois): RDAP from the regional internet registries (addresses, networks) and the
 //   domain registries and registrars (domains), all found via IANA's bootstrap files.
 //   Reverse DNS: Cloudflare DNS-over-HTTPS.
@@ -60,6 +70,7 @@
 //   - Upstream lookups are cached; cache misses are rate limited per visitor IP (LOOKUP_LIMITER).
 //   - Cross-site browser access (CORS) is off unless PUBLIC_API = "true".
 //   - Private and other non-public addresses never reach a provider.
+//   - Redirects for router-address typos take their Location from SITEMAP_PATHS, never from the request.
 //   - Every value placed into HTML is escaped; embedded JSON cannot close its script tag.
 //   - Every response carries a strict Content-Security-Policy and related headers.
 
@@ -68,6 +79,7 @@ import { connect } from 'cloudflare:sockets';
 import '../public/cidr.js';                       // shared subnet calculator (also served to the page)
 import '../public/ports.js';                      // what common ports are for (also served to the page)
 import { meCard, ME_WIDTH } from './me.js';         // the /me card and its world map
+import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
 const CIDR = globalThis.IPTERM_CIDR;
 const PORTS = globalThis.IPTERM_PORTS;
 
@@ -113,7 +125,10 @@ async function route(request, env, ctx) {
   if (path === '/line') return selfLine(io);
   if (path === '/expect' || path.startsWith('/expect/')) return expectRoute(io, path.slice(8));
   if (path === '/robots.txt') return robots(url);
-  if (path === '/sitemap.xml') return sitemap(url, env);
+  if (path === '/sitemap.xml') return sitemapIndex(url, env);
+  if (path === '/sitemap-pages.xml') return sitemap(url, env, SITEMAP_PATHS);
+  const asnMap = /^\/sitemap-asn-([1-9]\d{0,2})\.xml$/.exec(path);
+  if (asnMap && asnSitemapFiles()[asnMap[1] - 1]) return sitemap(url, env, asnSitemapFiles()[asnMap[1] - 1].map(n => '/AS' + n));
   if (path === '/status' && await statusKeyOk(request, url, env)) return statusRoute(io);
 
   if (path === '/json' || (path === '/api/lookup' && !url.searchParams.get('ip'))) return self();
@@ -129,6 +144,8 @@ async function route(request, env, ctx) {
   if (path.startsWith('/whois/')) return whoisRoute(io, path.slice(7), html);
   if (path === '/api/cidr') return cidrRoute(io, url.searchParams.get('q'), false);
   if (path.startsWith('/cidr/')) return cidrRoute(io, path.slice(6), html);
+  if (path === '/api/route') return routeRoute(io, url.searchParams.get('q'), false);
+  if (path === '/route' || path.startsWith('/route/')) return routeRoute(io, path.slice(7), html);
   if (path === '/api/dns') return dnsRoute(io, url.searchParams.get('name'), url.searchParams.get('type'), false);
   if (path.startsWith('/dns/')) { const [n, t] = path.slice(5).split('/'); return dnsRoute(io, n, t, html); }
   if (path === '/api/mail') return mailRoute(io, url.searchParams.get('domain'), url.searchParams.get('dkim'), false);
@@ -137,14 +154,17 @@ async function route(request, env, ctx) {
   const bare = path.slice(1);
   if (bare && parseIp(bare)) return ipRoute(io, bare, html);
   if (ASN_RE.test(bare)) return asnRoute(io, bare, html);
+  const typo = routerTypo(bare);
+  if (typo) return redirect('/' + typo, 301);
   const field = /^([0-9a-f.:]{2,45})\/([a-z]{1,20})$/i.exec(bare);   // /8.8.8.8/asn
   if (field && parseIp(field[1])) return ipField(io, field[1], field[2].toLowerCase());
-  if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/mail, /api/cidr, /api/port. See /help.' }, 404);
+  if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/mail, /api/cidr, /api/route, /api/port. See /help.' }, 404);
 
   const res = await env.ASSETS.fetch(request);
   if (res.status !== 404) return withOrigin(res, url);
   // Someone typed a domain straight after the slash (ipterm.net/github.com): send them to its DNS page.
-  const dom = !bare.includes('/') && !FILE_EXT.test(bare) ? normalizeDomain(bare) : null;
+  // (An address typo that isn't curated, /10.0.0.13l, gets the 404 page and its "did you mean", not DNS.)
+  const dom = !bare.includes('/') && !FILE_EXT.test(bare) && !typoIp(bare) ? normalizeDomain(bare) : null;
   if (dom) return redirect('/dns/' + dom);
   if (!html) return reply(io, { error: 'Not found. See /help for what curl and scripts can ask for.' }, 404);
   return notFoundPage(io, path);
@@ -193,9 +213,9 @@ const TOOLS = {
   },
   cidr: {
     title: 'Subnet calculator: CIDR, netmask and usable host range | ipterm', heading: 'Subnet calculator',
-    desc: 'Free IPv4 and IPv6 subnet calculator. Enter a range like 10.0.0.0/22 or an address with a netmask to get the network and broadcast addresses, netmask, wildcard mask, usable host range and host count.',
+    desc: 'Free IPv4 and IPv6 subnet calculator. Enter a range like 10.0.0.0/22 or an address with a netmask to get the network and broadcast addresses, netmask, wildcard mask, usable host range and host count. For a public range, see how it is routed: the origin network, RPKI and AS paths.',
     usage: 'cidr <range>',
-    examples: [['cidr 192.168.1.0/24', '/cidr/192.168.1.0/24'], ['cidr 10.0.0.0/22', '/cidr/10.0.0.0/22'], ['cidr 172.16.0.0/12', '/cidr/172.16.0.0/12'], ['cidr 2001:db8::/48', '/cidr/2001:db8::/48']],
+    examples: [['cidr 192.168.1.0/24', '/cidr/192.168.1.0/24'], ['cidr 10.0.0.0/22', '/cidr/10.0.0.0/22'], ['cidr 172.16.0.0/12', '/cidr/172.16.0.0/12'], ['cidr 1.1.1.0/24', '/cidr/1.1.1.0/24']],
   },
   port: {
     title: 'Port checker: is a port open on my IP? | ipterm', heading: 'Port checker',
@@ -240,11 +260,37 @@ function toolRoute(io, tool, html) {
     body: staticBlock(t.heading, [tool], [['usage', t.usage]], t.desc, extra) });
 }
 
+// The router and well-known addresses with their own indexable pages: the IPv4 and IPv6 entries in
+// SITEMAP_PATHS. Pages for other non-public addresses are noindex. Built on first use (parseIp's regex is
+// defined further down).
+let curated = null;
+const curatedIps = () => curated || (curated = new Set(SITEMAP_PATHS.map(p => p.slice(1)).filter(s => parseIp(s))));
+
+// What an IPv4 address typed with the usual slips would be: l, i, I, | and ! for 1, o and O for 0, commas,
+// semicolons, underscores or spaces for dots, doubled dots, and zero padding (192.168.l.l, 192,168,1,1,
+// 192.168.o.1, 192.168.001.001). Null when that still isn't an address.
+function typoIp(s) {
+  if (s.length > 24 || !/^[0-9lio.,;_ |!]+$/i.test(s)) return null;
+  const t = s.toLowerCase().replace(/[li|!]/g, '1').replace(/o/g, '0').replace(/[,;_ ]/g, '.').replace(/\.{2,}/g, '.').replace(/^\.|\.$/g, '');
+  const o = t.split('.');
+  if (o.length !== 4 || !o.every(x => /^\d{1,3}$/.test(x) && Number(x) <= 255)) return null;
+  return o.map(Number).join('.');
+}
+// A typo of one of the curated addresses (/192.168.l.l, /192,168,1,1, /10.0.0.l): that address, as written in
+// SITEMAP_PATHS, for a 301. The Location is always taken from the list, never from the request, so this can't
+// redirect anywhere else. Anything else (a valid address, another typo) is null.
+function routerTypo(bare) {
+  const ip = typoIp(bare);
+  if (!ip || ip === bare) return null;
+  for (const c of curatedIps()) if (c === ip) return c;
+  return null;
+}
+
 // What the visitor probably meant, from the first part of the path.
 function suggestFor(path) {
   const seg = path.split('/').filter(Boolean);
   const first = seg[0] || '';
-  const p = parseIp(first);
+  const p = parseIp(first) || parseIp(typoIp(first) || '');   // a typo of an address that isn't curated: a link, not a redirect
   if (p) { const ip = canonIp(p); return { cmd: 'lookup ' + ip, href: '/' + ip }; }
   if (ASN_RE.test(first)) return { cmd: 'asn ' + first.toUpperCase(), href: '/' + first.toUpperCase() };
   const dom = !FILE_EXT.test(first) && normalizeDomain(first);
@@ -301,10 +347,39 @@ async function ipRoute(io, q, html) {
   );
 }
 
-function cidrRoute(io, q, html) {
+// The calculation answers JSON and text on its own (no outside call); the page for a public prefix adds its
+// routing, which /route/<prefix> also answers. A routing lookup that fails or is rate limited leaves the
+// page as it was, with a note, rather than failing it.
+async function cidrRoute(io, q, html) {
   const d = CIDR.calc(String(q || '').replace(/-(\d{1,3})$/, '/$1'));   // also accept 10.0.0.0-22
   if (d.error) return html ? cidrPage(io, { error: d.error, input: q }, 400) : reply(io, { error: d.error }, 400);
-  return html ? cidrPage(io, d, 200) : reply(io, d, 200, { 'cache-control': 'public, max-age=86400' }, cidrText);
+  if (!html) return reply(io, d, 200, { 'cache-control': 'public, max-age=86400' }, cidrText);
+  const t = d.range === 'public' ? routeTarget(d.cidr) : null;
+  let route = null;
+  if (t && !t.error) {
+    try { route = await routeData(io, t); } catch (e) {
+      if (!(e instanceof RateLimited)) console.error('[ipterm] routing lookup failed:', String((e && e.message) || e));
+      route = { error: e instanceof RateLimited ? 'Routing data skipped: too many lookups from your address. Wait a minute and reload.'
+        : "Routing data didn't load: RIPEstat didn't answer. Try again in a moment." };
+    }
+  }
+  return cidrPage(io, d, 200, route);
+}
+
+// /route/<prefix or ip> and /api/route?q=: the routing on its own. Browsers get the prefix's /cidr page, where
+// the same data sits under the subnet calculation (an address goes to the prefix it is routed in).
+async function routeRoute(io, raw, html) {
+  const t = routeTarget(raw);
+  if (html) {
+    if (t.error) return redirect('/cidr');
+    if (!t.ip) return redirect(encodePath('/cidr/' + t.query), 301);
+    let to = `${t.query}/${t.p.v === 4 ? 32 : 128}`;
+    try { const d = await routeData(io, t); if (d.prefix) to = d.prefix; } catch {}
+    return redirect(encodePath('/cidr/' + to));
+  }
+  if (t.error) return reply(io, { error: t.error }, 400);
+  return guard(() => routeData(io, t), d => reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, routeText),
+    (msg, status) => reply(io, { error: msg }, status));
 }
 
 // Adds proxycheck.io's VPN / proxy opinion, unless IPinfo already flagged the address (then a
@@ -828,8 +903,16 @@ function asnText(d) {
     ['asn', d.asn], ['network', d.name || d.holder], ['handle', d.handle], ['registry', d.registry],
     ['announced', d.announced ? 'yes, visible in global routing' : 'no prefixes announced right now'],
     ['IPv4 prefixes', n(v4.count)], ['IPv4 space', v4.addresses != null ? n(v4.addresses) + ' addresses' + (bits ? ` (about a /${bits})` : '') : null],
-    ['IPv6 prefixes', n(v6.count)], ['largest v4', show4], ['largest v6', show6],
+    ['IPv6 prefixes', n(v6.count)], ['upstreams', upstreamText(d.upstreams)], ['largest v4', show4], ['largest v6', show6],
   ], more > 0 ? [`${n(more)} more prefixes not shown (the JSON lists up to 50 of each).`] : []);
+}
+
+// "AS174 Cogent Communications, LLC · AS3356 Level 3 Parent, LLC (2 of 4 seen)", or why there is no list.
+function upstreamText(u) {
+  if (!u) return null;
+  if (u.tooMany) return 'not listed: a transit network with thousands of neighbours (its neighbours are customers and peers)';
+  if (!u.list.length) return 'none seen';
+  return u.list.map(x => x.asn + (x.name ? ' ' + x.name : '')).join(' · ') + (u.total > u.list.length ? `  (${u.list.length} of ${u.total.toLocaleString('en-US')} seen)` : '');
 }
 
 function dnsText(d) {
@@ -983,6 +1066,8 @@ function helpBody(h, env = {}) {
       ['', 'graded A-F (?dkim=<selector> for your DKIM key)'],
       [`curl ${h}/whois/github.com`, 'registry record: domain, IP or ASN'],
       [`curl ${h}/cidr/10.0.0.0/22`, 'subnet calculator'],
+      [`curl ${h}/route/1.1.1.0/24`, 'routing: origin network, RPKI, visibility,'],
+      ['', 'AS paths (a prefix or an address)'],
     ]),
     block('PORT CHECK (YOUR OWN ADDRESS ONLY, 10 A MINUTE)', [
       [`curl -4 ${h}/port/22`, 'is TCP port 22 open on your IP?'],
@@ -1411,19 +1496,51 @@ async function privacyData(io, ip) {
   return d;
 }
 
+/* ---------- RIPEstat: networks and routing ----------
+   Free, no key. Answers are read with a size cap, since a big network's answer can run to megabytes and
+   parsing that would use up the Worker's CPU time. */
+const RIPESTAT = 'https://stat.ripe.net/data/';
+async function ripestat(call, query, { max = 1_000_000, timeout = 8000, retry = true } = {}) {
+  const url = `${RIPESTAT}${call}/data.json?${query}&sourceapp=ipterm`;
+  const r = retry ? await fetchRetry(url, {}, 'ripestat ' + call, timeout) : await fetch(url, { signal: AbortSignal.timeout(timeout) });
+  if (!r.ok) { if (r.body) r.body.cancel(); throw new Error(`ripestat ${call} HTTP ${r.status}`); }
+  const j = await readJson(r, max);
+  return j && typeof j.data === 'object' && j.data ? j.data : {};
+}
+const holderName = h => { const m = /^(\S+) - (.+)$/.exec(h || ''); return m ? m[2] : h || null; };   // "CLOUDFLARENET - Cloudflare, Inc."
+
+// A network's main upstreams: the neighbours RIPEstat sees just before it in AS paths ("left" of it), the
+// five seen by the most RIS peers, with their names. The neighbour list of a large transit network runs to
+// thousands of entries and hundreds of kilobytes, and its "left" neighbours are peers, not upstreams, so a
+// list over UPSTREAM_MAX bytes is skipped: tooMany. Six RIPEstat calls at most, the names in parallel.
+const UPSTREAM_MAX = 300_000;
+async function upstreams(n) {
+  let nb;
+  try { nb = await ripestat('asn-neighbours', `resource=AS${n}`, { max: UPSTREAM_MAX }); } catch (e) {
+    if (/too large/.test(String(e && e.message))) return { tooMany: true, list: [] };
+    throw e;
+  }
+  const left = (Array.isArray(nb.neighbours) ? nb.neighbours : [])
+    .filter(x => x && x.type === 'left' && Number.isInteger(x.asn) && x.asn > 0 && x.asn <= 4294967295 && x.asn !== n)
+    .sort((a, b) => (Number(b.power) || 0) - (Number(a.power) || 0) || (Number(b.v4_peers) || 0) - (Number(a.v4_peers) || 0)).slice(0, 5);
+  const names = await Promise.all(left.map(x => ripestat('as-overview', `resource=AS${x.asn}`, { max: 20_000, timeout: 4000, retry: false })
+    .then(o => txt(holderName(typeof o.holder === 'string' ? o.holder : ''), 80), () => null)));
+  const counts = nb.neighbour_counts || {};
+  return { total: Number.isInteger(counts.left) ? counts.left : left.length, list: left.map((x, i) => ({ asn: 'AS' + x.asn, name: names[i] || null })) };
+}
+
 async function asnData(n) {
-  const base = 'https://stat.ripe.net/data';
-  const get = async u => { const r = await fetchRetry(u, {}, 'ripestat'); if (!r.ok) throw new Error('ripestat ' + r.status); return (await r.json()).data || {}; };
-  const [ov, pf] = await Promise.all([
-    get(`${base}/as-overview/data.json?resource=AS${n}&sourceapp=ipterm`),
-    get(`${base}/announced-prefixes/data.json?resource=AS${n}&sourceapp=ipterm`),
+  // The upstreams are a bonus: if RIPEstat has trouble with them, the page goes out without, kept 10 minutes.
+  const [ov, pf, up] = await Promise.all([
+    ripestat('as-overview', `resource=AS${n}`),
+    ripestat('announced-prefixes', `resource=AS${n}`, { max: 4_000_000 }),
+    upstreams(n).catch(() => null),
   ]);
   const holder = typeof ov.holder === 'string' ? ov.holder : '';
   const hm = /^(\S+) - (.+)$/.exec(holder);
   const reg = /Assigned by (\w+)/i.exec((ov.block && ov.block.desc) || '');
   const all = (pf.prefixes || []).map(x => x && x.prefix).filter(x => typeof x === 'string' && /^[0-9a-f.:]+\/\d{1,3}$/i.test(x));
   const v4 = all.filter(x => !x.includes(':')), v6 = all.filter(x => x.includes(':'));
-  const byLen = (a, b) => Number(a.split('/')[1]) - Number(b.split('/')[1]) || a.localeCompare(b, 'en', { numeric: true });
   return {
     asn: 'AS' + n,
     number: n,
@@ -1433,19 +1550,191 @@ async function asnData(n) {
     name: hm ? hm[2] : holder || null,
     registry: reg ? reg[1].toUpperCase() : null,
     announced: Boolean(ov.announced),
-    v4: { count: v4.length, addresses: v4Addresses(v4), prefixes: v4.sort(byLen).slice(0, 50) },
-    v6: { count: v6.length, prefixes: v6.sort(byLen).slice(0, 50) },
+    v4: { count: v4.length, addresses: v4Addresses(v4), prefixes: largestFirst(v4).slice(0, 50) },
+    v6: { count: v6.length, prefixes: largestFirst(v6).slice(0, 50) },
+    upstreams: up,
     source: 'ripestat',
+    ...(up ? {} : { _ttl: 600 }),
   };
 }
 
-// Unique IPv4 addresses covered by a set of prefixes (overlaps counted once).
+/* Routing for a public prefix or address: the route that carries it, which network originates that route,
+   whether RPKI allows that origin, how many RIS peers see it, and a few AS paths. RIPEstat only (never IPinfo
+   or proxycheck.io), five calls at most, cached six hours (ten minutes if a part didn't answer):
+     prefix-overview  the route (the prefix itself, or the less specific that covers it) and its origins;
+                      6 seconds, one retry. Then, in parallel, one try each:
+     routing-status   RIS visibility and first seen; 4 seconds (it is slow for big aggregates)
+     rpki-validation  each origin (up to two) against the published ROAs; 5 seconds
+     bgp-state        AS paths, 5 seconds, from three RIS collectors only (rrcs=): RRC00 Amsterdam (multihop, peers
+                      worldwide), RRC01 London and RRC11 New York, about 100 routes. (looking-glass ignores
+                      rrcs= and answers with every collector, so it isn't used.) */
+const ROUTE_RRCS = [['00', 'Amsterdam'], ['01', 'London'], ['11', 'New York']];
+const RPKI_STATES = { valid: 'valid', invalid_asn: 'invalid-asn', invalid_length: 'invalid-length', invalid: 'invalid', unknown: 'not-found', not_found: 'not-found' };
+
+// What to look up: { query, ip, p } for a public address or prefix (canonical), or { error }.
+function routeTarget(raw) {
+  const s = String(raw || '').trim().replace(/-(\d{1,3})$/, '/$1');
+  if (!s) return { error: 'Give a prefix or an address, like 1.1.1.0/24 or 8.8.8.8.' };
+  const p = !s.includes('/') && parseIp(s);
+  if (p) {
+    const why = nonPublicReason(p);
+    return why ? { error: `${canonIp(p)} is not a public address (${why}), so it isn't routed on the internet.` } : { query: canonIp(p), ip: true, p };
+  }
+  const d = CIDR.calc(s);
+  if (d.error) return { error: d.error };
+  const why = nonPublicReason(parseIp(d.network));
+  if (d.range !== 'public' || why) return { error: `${d.cidr} is not public address space (${why || d.rangeNote}), so it isn't routed on the internet.` };
+  if (d.prefix < (d.v === 4 ? 8 : 16)) return { error: `${d.cidr} is larger than any route: give a /${d.v === 4 ? 8 : 16} or smaller.` };
+  return { query: d.cidr, ip: false, p: parseIp(d.network), len: d.prefix };
+}
+const routeData = (io, t) => cached(io, 'route/' + t.query, 21600, () => routeLookup(t));
+
+// A prefix from upstream data, in canonical form, or null.
+function canonPrefix(s) {
+  if (typeof s !== 'string' || !/^[0-9a-f.:]{2,39}\/\d{1,3}$/i.test(s)) return null;
+  const d = CIDR.calc(s);
+  return d.error ? null : d.cidr;
+}
+// Whether prefix a lies within b (or is b).
+const prefixWithin = (a, b) => { const [na, la] = a.split('/'), lb = Number(b.split('/')[1]), p = parseIp(na); return !!p && Number(la) >= lb && inPrefix(p, b) >= 0; };
+
+async function routeLookup(t) {
+  const po = await ripestat('prefix-overview', 'resource=' + t.query, { max: 200_000, timeout: 6000 });
+  const origins = (Array.isArray(po.asns) ? po.asns : []).filter(a => a && Number.isInteger(a.asn) && a.asn > 0 && a.asn <= 4294967295).slice(0, 4)
+    .map(a => { const holder = txt(a.holder, 160); return { asn: 'AS' + a.asn, holder, name: holderName(holder), rpki: null, roas: [] }; });
+  const asked = t.ip ? `${t.query}/${t.p.v === 4 ? 32 : 128}` : t.query;
+  let prefix = po.announced && origins.length ? canonPrefix(po.resource) : null;
+  if (prefix && !prefixWithin(asked, prefix)) prefix = null;   // must cover what was asked
+  const related = (Array.isArray(po.related_prefixes) ? po.related_prefixes : []).slice(0, 200).map(canonPrefix).filter(Boolean);
+  const inside = t.ip ? [] : [...new Set(related.filter(x => x !== t.query && prefixWithin(x, t.query)))];
+  const reg = /\b(ARIN|RIPE NCC|APNIC|LACNIC|AFRINIC)\b/.exec((po.block && po.block.desc) || '');
+  const d = {
+    query: t.query, kind: t.ip ? 'ip' : 'prefix',
+    status: prefix ? (prefix === t.query ? 'announced' : 'covered') : inside.length ? 'split' : 'unrouted',
+    prefix, origins: prefix ? origins : [], registry: reg ? reg[1] : null,
+    visibility: null, firstSeen: null, upstreams: [], paths: [], routes: 0,
+    inside: inside.slice(0, 8), insideMore: inside.length > 8 || (Number(po.actual_num_related) || 0) > related.length,
+    collectors: ROUTE_RRCS.map(([k, place]) => `RRC${k} ${place}`), source: 'ripestat',
+  };
+  if (!prefix) return withRouteNotes(d);
+  let partial = false;
+  const soft = pending => pending.catch(() => { partial = true; return null; });
+  // One try each, in parallel, so a slow part costs at most five seconds and the rest still shows.
+  const once = { retry: false, timeout: 5000 };
+  const [rs, bs, ...rpki] = await Promise.all([
+    soft(ripestat('routing-status', 'resource=' + prefix, { ...once, max: 100_000, timeout: 4000 })),
+    soft(ripestat('bgp-state', `resource=${prefix}&rrcs=${ROUTE_RRCS.map(([k]) => k).join(',')}`, { ...once, max: 400_000 })),
+    ...d.origins.slice(0, 2).map(o => soft(ripestat('rpki-validation', `resource=${o.asn}&prefix=${prefix}`, { ...once, max: 50_000 }))),
+  ]);
+  rpki.forEach((r, i) => {
+    if (!r) return;
+    const o = d.origins[i];
+    o.rpki = RPKI_STATES[String(r.status || '').toLowerCase()] || null;
+    o.roas = (Array.isArray(r.validating_roas) ? r.validating_roas : []).slice(0, 3)
+      .map(x => ({ asn: /^\d{1,10}$/.test(String(x && x.origin)) ? 'AS' + Number(x.origin) : null, prefix: canonPrefix(x && x.prefix), maxLength: Number.isInteger(x && x.max_length) ? x.max_length : null }))
+      .filter(x => x.asn && x.prefix);
+  });
+  const vis = rs && rs.visibility && rs.visibility[t.p.v === 4 ? 'v4' : 'v6'];
+  if (vis && Number.isInteger(vis.ris_peers_seeing) && Number.isInteger(vis.total_ris_peers) && vis.total_ris_peers > 0) {
+    d.visibility = { seeing: vis.ris_peers_seeing, total: vis.total_ris_peers };
+  }
+  const fs = rs && rs.first_seen;
+  if (fs && fs.prefix === prefix && /^\d{4}-\d{2}-\d{2}/.test(String(fs.time))) d.firstSeen = String(fs.time).slice(0, 10);
+  // AS paths: prepending collapsed, the origin last. The upstream is the AS just before the origin.
+  const routes = (bs && Array.isArray(bs.bgp_state) ? bs.bgp_state : []).slice(0, 400).flatMap(r => {
+    if (!r || r.target_prefix !== prefix || !Array.isArray(r.path)) return [];
+    const path = r.path.filter(a => Number.isInteger(a) && a > 0 && a <= 4294967295).filter((a, i, all) => a !== all[i - 1]);
+    const rrc = /^(\d\d)-/.exec(String(r.source_id || ''));
+    return path.length && path.length <= 32 ? [{ path, rrc: rrc ? rrc[1] : null }] : [];
+  });
+  d.routes = routes.length;
+  const ups = new Map();
+  for (const r of routes) if (r.path.length > 1) { const u = r.path[r.path.length - 2]; ups.set(u, (ups.get(u) || 0) + 1); }
+  d.upstreams = [...ups].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, 5).map(([a, n]) => ({ asn: 'AS' + a, routes: n }));
+  // Two or three sample paths: the shortest through each of the most common upstreams, then the shortest others.
+  const byLen = [...routes].sort((a, b) => a.path.length - b.path.length), picked = [], seen = new Set();
+  const take = r => { const k = r.path.join(' '); if (picked.length < 3 && !seen.has(k)) { seen.add(k); picked.push({ path: r.path, collector: r.rrc ? 'RRC' + r.rrc : null }); } };
+  for (const u of d.upstreams) { const r = byLen.find(x => x.path.length > 1 && 'AS' + x.path[x.path.length - 2] === u.asn); if (r) take(r); }
+  byLen.forEach(take);
+  d.paths = picked;
+  if (partial || !bs) d._ttl = 600;
+  return withRouteNotes(d);
+}
+
+// The words for RPKI and the whole result, in the JSON too (rpkiNote, summary), so the terminal says the same.
+function withRouteNotes(d) {
+  for (const o of d.origins) o.rpkiNote = o.rpki ? rpkiText(o) : null;
+  d.summary = routeSummary(d);
+  return d;
+}
+function rpkiText(o) {
+  const roa = o.roas.find(r => r.asn === o.asn);
+  return { valid: `valid: a ROA allows ${o.asn} to announce it` + (roa && roa.maxLength ? `, up to /${roa.maxLength}` : ''),
+    'invalid-asn': 'invalid: the ROAs for this prefix name another network as its origin',
+    'invalid-length': 'invalid: the route is more specific than its ROA allows',
+    invalid: 'invalid: the published ROAs do not allow this route',
+    'not-found': 'not found: no ROA covers this prefix' }[o.rpki] || 'not checked';
+}
+
+function routeSummary(r) {
+  if (!r || r.error) return '';
+  const o = r.origins[0], who = o ? o.asn + (o.name ? ` (${o.name})` : '') : 'an unknown network';
+  const more = r.origins.length > 1 ? ` and ${r.origins.length - 1} other network${r.origins.length > 2 ? 's' : ''}` : '';
+  const tail = (o && o.rpki ? ` RPKI: ${rpkiText(o)}.` : '') + (r.visibility ? ` ${r.visibility.seeing} of ${r.visibility.total} RIS peers see it.` : '');
+  if (r.status === 'announced') return `${r.query} is announced in BGP by ${who}${more}.${tail}`;
+  if (r.status === 'covered') return (r.kind === 'ip' ? `${r.query} is routed in ${r.prefix}` : `${r.query} is not announced on its own: it is routed as part of ${r.prefix}`) + `, announced by ${who}${more}.${tail}`;
+  if (r.status === 'split') return `${r.query} is not announced as a whole, but as more specific prefixes such as ${r.inside.slice(0, 3).join(', ')}.`;
+  return `${r.query} is not announced in BGP: no RIS peer sees a route that covers it.`;
+}
+
+// [key, value] rows for the page and ?format=text. asText: one AS path per line.
+function routeRows(r) {
+  const path = p => p.path.map(a => 'AS' + a).join(' ') + (p.collector ? `  (${p.collector})` : '');
+  return [
+    ['route', r.prefix ? r.prefix + (r.status === 'covered' ? (r.kind === 'ip' ? ' (the route this address is in)' : ' (covers this prefix)') : ' (announced as is)')
+      : r.status === 'split' ? 'not announced as a whole' : 'not announced'],
+    ['origin', r.origins.map(o => o.asn + (o.name ? ' ' + o.name : ''))],
+    ['RPKI', r.origins.filter(o => o.rpki).map(o => (r.origins.length > 1 ? o.asn + ': ' : '') + rpkiText(o))],
+    ['visibility', r.visibility ? `seen by ${r.visibility.seeing} of ${r.visibility.total} RIS peers` : null],
+    ['first seen', r.firstSeen], ['registry', r.registry],
+    ['upstreams', r.upstreams.length ? r.upstreams.map(u => u.asn).join(' ') + `  (just before the origin in ${r.routes} sampled routes)` : null],
+    ['AS paths', r.paths.map(path)],
+    ['more specific', r.inside.length ? r.inside.join(' ') + (r.insideMore ? ' and more' : '') : null],
+    ['collectors', r.prefix ? r.collectors.join(', ') : null],
+  ];
+}
+
+function routeText(d) {
+  return kvText([['query', d.query], ['summary', d.summary], ...routeRows(d)], ['Routing data: RIPEstat (https://stat.ripe.net), from the RIS route collectors.']);
+}
+
+// The n largest prefixes, largest first, then in address order. Only the sizes needed to reach n are parsed
+// and sorted, with each key worked out once. (A comparator that called localeCompare(..., { numeric: true })
+// built a collator on every comparison: a quarter of a second of CPU for a network with 5,000 prefixes,
+// AS13335, far past the Workers limit.)
+function largestFirst(list, n = 50) {
+  const bySize = new Map();
+  for (const s of list) { const len = Number(s.slice(s.indexOf('/') + 1)); if (!bySize.has(len)) bySize.set(len, []); bySize.get(len).push(s); }
+  const out = [];
+  for (const len of [...bySize.keys()].sort((a, b) => a - b)) {
+    if (out.length >= n) break;
+    const keyed = bySize.get(len).map(s => { const p = parseIp(s.slice(0, s.indexOf('/'))); return { s, k: p ? (p.v === 4 ? p.o : p.g) : [] }; });
+    keyed.sort((x, y) => { for (let i = 0; i < x.k.length; i++) if (x.k[i] !== y.k[i]) return x.k[i] - y.k[i]; return 0; });
+    for (const x of keyed) out.push(x.s);
+  }
+  return out.slice(0, n);
+}
+
+// Unique IPv4 addresses covered by a set of prefixes (overlaps counted once). A light parse, not parseIp():
+// a big network has thousands of prefixes, and every millisecond here counts against the CPU limit.
 function v4Addresses(prefixes) {
   const iv = [];
   for (const s of prefixes) {
-    const [a, l] = s.split('/'); const p = parseIp(a); const len = Number(l);
-    if (!p || p.v !== 4 || len > 32) continue;
-    const start = p.o[0] * 16777216 + p.o[1] * 65536 + p.o[2] * 256 + p.o[3];
+    const [a, l] = s.split('/'), o = a.split('.'), len = Number(l);
+    if (o.length !== 4 || !(len >= 0 && len <= 32)) continue;
+    let start = 0;
+    for (const x of o) { const v = x.length && x.length <= 3 ? Number(x) : NaN; if (!(v >= 0 && v <= 255)) { start = NaN; break; } start = start * 256 + v; }
+    if (Number.isNaN(start)) continue;
     iv.push([start, start + 2 ** (32 - len)]);
   }
   iv.sort((x, y) => x[0] - y[0]);
@@ -2397,7 +2686,8 @@ async function loadShell(io) {
 // Fills the terminal page with a title, description, share tags, a static summary that works
 // without JavaScript (and for search engines), and the data the terminal boots from. Pages other
 // than the homepage get their own h1 (the title without " | ipterm") in place of the generic one.
-// noindex: a working page that search engines should skip (ports without an explainer of their own).
+// noindex: a working page that search engines should skip but whose links they may follow (ports without an
+// explainer of their own, non-public addresses that aren't in SITEMAP_PATHS).
 async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null, cache = null, noindex = false }) {
   let h = await loadShell(io);
   const canonical = io.url.origin + (path === '/' ? '/' : encodePath(path));
@@ -2417,7 +2707,7 @@ async function shell(io, { status = 200, title, desc, path = '/', body = '', ini
     `<meta property="og:image" content="${esc(io.url.origin)}/og.png">`,
     `<meta name="twitter:card" content="summary_large_image">`,
     path === '/' ? homeJsonLd(io.url.origin) : status < 400 ? breadcrumbJsonLd(io.url.origin, path) : '',
-    (status >= 400 && status !== 429) || noindex || selfHosted(io.env) ? `<meta name="robots" content="noindex">` : '',
+    (status >= 400 && status !== 429) || noindex || selfHosted(io.env) ? `<meta name="robots" content="noindex, follow">` : '',
   ].filter(Boolean).join('\n');
   if (path !== '/') h = h.replace(/\s*<p class="intro">[\s\S]*?<\/p>/, '');   // the plain-English line is for the homepage
   const h1 = path !== '/' && title ? title.replace(/\s*\|\s*ipterm$/, '') : null;
@@ -2560,7 +2850,9 @@ function ipPage(io, d, status) {
     const priv = /RFC 1918|unique local/.test(d.range || '');
     const summary = `${ip} is a non-public ${v} address in the ${d.range}. It is used inside local networks and cannot be reached or located from the internet.` +
       (priv ? ` If it is your router's address, open http://${d.version === 6 ? '[' + ip + ']' : ip} in a browser on the same network to reach its settings.` : '');
-    return shell(io, { status, path, title: `${ip} · private ${v} address | ipterm`, desc: summary,
+    // Only the router and well-known addresses in SITEMAP_PATHS are indexed: the rest of the private space
+    // is millions of near-identical pages.
+    return shell(io, { status, path, title: `${ip} · private ${v} address | ipterm`, desc: summary, noindex: !curatedIps().has(ip),
       initial: { kind: 'ip', query: ip, data: d }, body: staticBlock(ip, [v, 'private'], [['range', d.range]], summary,
         `<p class="ln sys">Guides: <a href="/guides/find-router-ip">How to find your router's IP address</a> · <a href="/guides/private-ip-ranges">Private IP address ranges explained</a></p>`) });
   }
@@ -2581,7 +2873,8 @@ function ipPage(io, d, status) {
     body: staticBlock(ip, [v, 'public'], rows, summary, links) });
 }
 
-function cidrPage(io, d, status) {
+// route: the routing of a public prefix (routeLookup()), { error } if it didn't load, or null for private ranges.
+function cidrPage(io, d, status, route = null) {
   if (d.error) {
     return shell(io, { status, path: '/cidr/' + String(d.input || '').slice(0, 60), title: 'Subnet calculator | ipterm',
       initial: { kind: 'cidr', query: String(d.input || ''), error: d.error }, body: staticBlock('Subnet calculator', ['cidr'], [], d.error) });
@@ -2602,10 +2895,25 @@ function cidrPage(io, d, status) {
     rows = [['network', d.cidr], ['first address', d.network], ['last address', d.last], ['addresses', `${d.totalPow} = ${d.totalText}`],
       ['/64 subnets', d.subnets64], ['expanded', d.expanded], ['splits into', d.halves && d.halves.join(' · ')], ['part of', d.supernet], ['range', d.rangeNote]];
   }
-  const links = `<p class="ln sys">Guide: <a href="/guides/subnet-cheat-sheet">Subnet mask cheat sheet</a>` +
+  let links = `<p class="ln sys">Guide: <a href="/guides/subnet-cheat-sheet">Subnet mask cheat sheet</a>` +
     (d.range === 'public' ? ` · Registry: <a href="/whois/${esc(d.network)}">whois ${esc(d.network)}</a>` : '') + `</p>`;
-  return shell(io, { status, path, title, desc: summary, initial: { kind: 'cidr', query: d.cidr, data: d },
-    body: staticBlock(`Subnet ${d.cidr}`, ['cidr', 'IPv' + d.v, d.range], rows, summary, links) });
+  const r = route && !route.error ? route : null;
+  if (r) {
+    // How it is routed leads the page: that is what "1.1.1.0/24" and "AS13335 prefix RPKI" searches look for.
+    const o = r.origins[0];
+    const rpki = o && o.rpki ? (o.rpki === 'valid' ? ', RPKI valid' : o.rpki === 'not-found' ? ', no ROA' : ', RPKI invalid') : '';
+    if (o && r.status === 'announced') title = `${d.cidr}: announced by ${o.asn}${o.name ? ' ' + o.name : ''}${rpki} | ipterm`;
+    else if (o) title = `${d.cidr}: routed in ${r.prefix} by ${o.asn}${o.name ? ' ' + o.name : ''} | ipterm`;
+    summary = r.summary + ' ' + summary;
+    rows.push(...routeRows(r).map(([k, v]) => [k, Array.isArray(v) ? v.join(' · ') : v]));
+    const asLink = a => `<a href="/${esc(a)}">${esc(a)}</a>`;   // ASN pages ask RIPEstat only
+    const nets = [...new Set([...r.origins.map(x => x.asn), ...r.upstreams.map(u => u.asn)])];
+    links = (nets.length ? `<p class="ln sys">Networks: ${nets.map(asLink).join(' · ')}</p>` : '') +
+      (r.prefix && r.prefix !== d.cidr ? `<p class="ln sys">Route: <a href="/cidr/${esc(r.prefix)}">${esc(r.prefix)}</a></p>` : '') +
+      `<p class="ln sys">Routing data from <a href="https://stat.ripe.net/" rel="noopener">RIPEstat</a> (RIS collectors ${esc(r.collectors.map(c => c.split(' ')[0]).join(', '))}). From a command line: <code>curl ${esc(io.url.host)}/route/${esc(d.cidr)}</code></p>` + links;
+  } else if (route && route.error) links = `<p class="ln sys">${esc(route.error)}</p>` + links;
+  return shell(io, { status, path, title, desc: summary, initial: { kind: 'cidr', query: d.cidr, data: d, ...(route ? { route } : {}) },
+    body: staticBlock(`Subnet ${d.cidr}`, ['cidr', 'IPv' + d.v, d.range, ...(r ? [r.status] : [])], rows, summary, links) });
 }
 
 function dnsPage(io, d, status) {
@@ -2743,24 +3051,32 @@ function asnPage(io, d, status) {
       body: staticBlock(d.asn, ['asn'], [], msg) });
   }
   const name = d.name || d.holder || d.asn;
+  const ups = d.upstreams && d.upstreams.list ? d.upstreams.list : [];
+  const upName = u => u.asn + (u.name ? ` (${u.name})` : '');
   const summary = `${d.asn} (${name}) is an autonomous system` + (d.registry ? ` registered with ${d.registry}` : '') +
     `. It announces ${d.v4.count.toLocaleString('en-US')} IPv4 prefixes covering ${d.v4.addresses.toLocaleString('en-US')} addresses` +
-    ` and ${d.v6.count.toLocaleString('en-US')} IPv6 prefixes.`;
+    ` and ${d.v6.count.toLocaleString('en-US')} IPv6 prefixes.` +
+    (ups.length ? ` Its main upstream network${ups.length > 1 ? 's are' : ' is'} ${andList(ups.slice(0, 3).map(upName))}.` : '');
   const rows = [
     ['holder', d.holder], ['registry', d.registry], ['announced', d.announced ? 'yes' : 'no'],
     ['IPv4 prefixes', d.v4.count.toLocaleString('en-US')], ['IPv4 addresses', d.v4.addresses.toLocaleString('en-US')],
-    ['IPv6 prefixes', d.v6.count.toLocaleString('en-US')],
+    ['IPv6 prefixes', d.v6.count.toLocaleString('en-US')], ['upstreams', upstreamText(d.upstreams)],
   ];
-  // Prefixes link to the subnet calculator (no outside calls), not to an IP lookup of the network
-  // address: crawlers following 30 links per ASN page would otherwise spend the IPinfo budget.
+  // Prefixes link to the subnet calculator, whose routing section asks RIPEstat only, never IPinfo, and
+  // upstreams to their ASN pages (RIPEstat too): crawlers following 30 links per ASN page would otherwise
+  // spend the IPinfo budget. Keep it that way: no IP lookup links here.
   const list = [...d.v4.prefixes.slice(0, 20), ...d.v6.prefixes.slice(0, 10)]
     .map(px => `<li><a href="/cidr/${esc(px)}">${esc(px)}</a></li>`).join('');
-  const links = (list ? `<p class="ln sys">Largest announced prefixes:</p><ul class="static-list">${list}</ul>` : '') +
+  const upList = ups.map(u => `<li><a href="/${esc(u.asn)}">${esc(u.asn)}${u.name ? ' ' + esc(u.name) : ''}</a></li>`).join('');
+  const links = (upList ? `<p class="ln sys">Main upstream networks (seen just before ${esc(d.asn)} in AS paths):</p><ul class="static-list">${upList}</ul>` : '') +
+    (list ? `<p class="ln sys">Largest announced prefixes:</p><ul class="static-list">${list}</ul>` : '') +
     `<p class="ln sys">Registry record: <a href="/whois/${esc(d.asn)}">whois ${esc(d.asn)}</a></p>` +
     `<p class="ln sys">Guide: <a href="/guides/what-is-an-asn">What is an ASN?</a></p>`;
   return shell(io, { status, path, title: `${d.asn} · ${name} | ipterm`, desc: summary,
     initial: { kind: 'asn', query: d.asn, data: d }, body: staticBlock(`${d.asn} · ${name}`, ['asn'], rows, summary, links) });
 }
+
+const andList = a => (a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1]);
 
 function staticBlock(heading, tags, rows, summary, extra = '') {
   const tagHtml = tags.map(t => `<span class="tag">${esc(t)}</span>`).join(' ');
@@ -2777,19 +3093,18 @@ const SITEMAP_PATHS = [
   '/guides/ipv4-vs-ipv6', '/guides/what-is-an-asn', '/privacy',
   // port checker: what each port is for (the pages never run a check themselves)
   '/port', '/port/22', '/port/80', '/port/443', '/port/3389', '/port/25565', '/port/32400', '/port/8080', '/port/27015', '/port/51820',
-  // router and other private addresses people search for
+  // router and other private addresses people search for. These are the only non-public addresses whose pages
+  // are indexed (curatedIps()), and typos of them redirect here (routerTypo()).
   '/192.168.1.1', '/192.168.0.1', '/10.0.0.1', '/192.168.1.254', '/192.168.100.1', '/192.168.2.1', '/192.168.0.254',
   '/192.168.10.1', '/192.168.8.1', '/10.0.0.138', '/10.1.1.1', '/10.0.1.1', '/172.16.0.1', '/127.0.0.1', '/169.254.1.1',
   // public DNS resolvers
   '/8.8.8.8', '/8.8.4.4', '/1.1.1.1', '/1.0.0.1', '/9.9.9.9', '/149.112.112.112', '/208.67.222.222', '/208.67.220.220',
   '/94.140.14.14', '/2001:4860:4860::8888', '/2001:4860:4860::8844', '/2606:4700:4700::1111', '/2620:fe::fe',
-  // well-known networks
-  '/AS15169', '/AS13335', '/AS16509', '/AS14618', '/AS8075', '/AS32934', '/AS396982', '/AS14061', '/AS16276', '/AS24940',
-  '/AS63949', '/AS20940', '/AS7922', '/AS701', '/AS7018', '/AS20115', '/AS22773', '/AS3356', '/AS174', '/AS2914',
-  '/AS6939', '/AS1299', '/AS3257', '/AS6453', '/AS4134', '/AS4837',
-  // subnet calculator
+  // networks (ASNs) have their own sitemap files: /sitemap-asn-<n>.xml, from src/asn-sitemap.js
+  // subnet calculator, and routing for the resolvers' prefixes
   '/guides/subnet-cheat-sheet', '/cidr/192.168.1.0/24', '/cidr/192.168.0.0/24', '/cidr/192.168.0.0/16', '/cidr/10.0.0.0/8', '/cidr/10.0.0.0/24',
   '/cidr/172.16.0.0/12', '/cidr/100.64.0.0/10', '/cidr/10.0.0.0/22', '/cidr/192.168.1.0/25', '/cidr/192.168.1.0/30', '/cidr/2001:db8::/32', '/cidr/2001:db8::/48',
+  '/cidr/1.1.1.0/24', '/cidr/8.8.8.0/24', '/cidr/9.9.9.0/24',
   // DNS pages
   '/dns/google.com', '/dns/cloudflare.com', '/dns/github.com', '/dns/wikipedia.org', '/dns/example.com', '/dns/gmail.com/MX',
   // mail checks (SPF, DMARC, DKIM)
@@ -2803,11 +3118,42 @@ function robots(url) {
   return text(`User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: ${url.origin}/sitemap.xml\n`, 'public, max-age=86400');
 }
 
-function sitemap(url, env) {
-  const items = (selfHosted(env) ? [] : SITEMAP_PATHS).map(p => `  <url><loc>${esc(url.origin + encodePath(p))}</loc></url>`).join('\n');
-  return new Response(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${items}\n</urlset>\n`, {
-    headers: { 'content-type': 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=86400' },
-  });
+// The ASN sitemap in tiers by size, so Search Console shows how each tier is indexed: the 1,000 largest
+// networks, then the rest of the top 10,000, then files of 40,000 should the list grow (a sitemap file may
+// hold 50,000 URLs and 50 MB; 40,000 ASN URLs are about 1.8 MB).
+const ASN_TIERS = [1000, 10000], ASN_FILE_MAX = 40000;
+let asnFiles = null;
+function asnSitemapFiles() {
+  if (asnFiles) return asnFiles;
+  asnFiles = [];
+  for (let start = 0, t = 0; start < ASN_SITEMAP.length; t++) {
+    const end = Math.min(ASN_SITEMAP.length, t < ASN_TIERS.length ? ASN_TIERS[t] : start + ASN_FILE_MAX);
+    asnFiles.push(ASN_SITEMAP.slice(start, end));
+    start = end;
+  }
+  return asnFiles;
+}
+
+const XML = { 'content-type': 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=86400' };
+// /sitemap.xml: the index of the sitemap files. A copy run by someone else (SELF_HOSTED) lists nothing.
+function sitemapIndex(url, env) {
+  if (selfHosted(env)) return sitemap(url, env, []);
+  const files = [['/sitemap-pages.xml', null], ...asnSitemapFiles().map((_, i) => [`/sitemap-asn-${i + 1}.xml`, ASN_SITEMAP_DATE])];
+  const items = files.map(([p, mod]) => `  <sitemap><loc>${esc(url.origin + p)}</loc>${mod ? `<lastmod>${esc(mod)}</lastmod>` : ''}</sitemap>`).join('\n');
+  return new Response(`<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${items}\n</sitemapindex>\n`, { headers: XML });
+}
+
+// A file of 9,000 URLs takes about 7 ms of CPU to build, so each isolate keeps what it built (a few files at most).
+const sitemapMemo = new Map();
+function sitemap(url, env, paths) {
+  const key = url.origin + url.pathname + (selfHosted(env) ? ' copy' : '');
+  if (!sitemapMemo.has(key)) {
+    const origin = esc(url.origin);
+    const items = (selfHosted(env) ? [] : paths).map(p => `  <url><loc>${origin}${esc(encodePath(p))}</loc></url>`).join('\n');
+    if (sitemapMemo.size > 20) sitemapMemo.clear();
+    sitemapMemo.set(key, `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${items}\n</urlset>\n`);
+  }
+  return new Response(sitemapMemo.get(key), { headers: XML });
 }
 
 /* ---------- owner status ----------
@@ -3015,7 +3361,8 @@ function text(s, cache = 'no-store', status = 200, extra = {}) {
   return new Response(s, { status, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': cache, ...extra } });
 }
 
-// Same-site redirects. Some answers differ for browsers and curl (/help), hence the Vary.
-function redirect(location) {
-  return new Response(null, { status: 302, headers: { location, 'cache-control': 'public, max-age=3600', vary: 'Accept, User-Agent' } });
+// Same-site redirects. Some answers differ for browsers and curl (/help), hence the Vary. Permanent ones (301)
+// may be kept for a day.
+function redirect(location, status = 302) {
+  return new Response(null, { status, headers: { location, 'cache-control': `public, max-age=${status === 301 ? 86400 : 3600}`, vary: 'Accept, User-Agent' } });
 }

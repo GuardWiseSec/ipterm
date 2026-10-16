@@ -462,6 +462,7 @@
   const apiWhois = q => getJson('/api/whois?q=' + encodeURIComponent(q));
   const apiMail = (name, sel) => getJson('/api/mail?domain=' + encodeURIComponent(name) + (sel ? '&dkim=' + encodeURIComponent(sel) : ''));
   const apiAsn = n => getJson('/api/asn?asn=' + n);
+  const apiRoute = q => getJson('/api/route?q=' + encodeURIComponent(q));
 
   /* ---------- links and URLs ----------
      Every result has its own address (/8.8.8.8, /AS13335). When live, lookups update the
@@ -538,6 +539,11 @@
       case 'asn': {
         const m = /^(?:as)?(\d{1,10})$/i.exec(a || ''), n = m ? Number(m[1]) : 0;
         return n >= 1 && n <= 4294967295 ? '/AS' + n : null;
+      }
+      case 'route': {                                          // a prefix's routing is on its /cidr page; an address has none of its own
+        if (!a || !looksLikeCidr(a)) return null;
+        const d = CIDRLIB && CIDRLIB.calc(a);
+        return d && !d.error && d.range === 'public' ? '/cidr/' + d.cidr : null;
       }
       case 'port': {                                           // the page explains the port; the link's click runs the check
         if (!a) return '/port';
@@ -1048,7 +1054,8 @@
     const block = `${ipText}/${p.v === 4 ? 24 : 64}`;
     next(d && [`whois ${ipText}`, `whois ${ipText}`, 'registry record: owner and abuse contact'],
       d && /^AS\d+$/i.test(d.asn || '') && [`asn ${d.asn.toUpperCase()}`, `asn ${d.asn.toUpperCase()}`, 'the network this address belongs to'],
-      [`cidr ${block}`, `cidr ${block}`, `the /${p.v === 4 ? 24 : 64} block around this address`],
+      live ? [`route ${ipText}`, `route ${ipText}`, 'the route it is in: who announces it, RPKI, AS paths']
+        : [`cidr ${block}`, `cidr ${block}`, `the /${p.v === 4 ? 24 : 64} block around this address`],
       d && live && ['share', 'share', 'copy a link to this result']);
   }
 
@@ -1076,7 +1083,7 @@
     await sponsor('asn');
     const top = (d.v4 && d.v4.prefixes && d.v4.prefixes[0]) || (d.v6 && d.v6.prefixes && d.v6.prefixes[0]);
     next([`whois ${id}`, `whois ${id}`, 'registry record: holder and abuse contact'],
-      top && [`cidr ${top}`, `cidr ${top}`, 'its largest address block'], live && ['share', 'share', 'copy a link to this network']);
+      top && [`cidr ${top}`, `cidr ${top}`, 'its largest address block, and how it is routed'], live && ['share', 'share', 'copy a link to this network']);
   }
 
   // Sample registry records for the preview (deployed sites query the registries live).
@@ -1107,11 +1114,87 @@
     if (d.error) return line(d.error, 'err');
     setUrl('/cidr/' + d.cidr, (d.v === 4 ? `${d.cidr} subnet: ${d.netmask}, ${d.usableText} usable hosts` : `${d.cidr} IPv6 subnet`) + ' | ipterm');
     await renderCidr(d);
+    // A public range also gets its routing: from the page when the server sent it, else one request (RIPEstat, cached).
+    let r = null;
+    if (d.range === 'public' && pre && pre.route) r = pre.route;
+    else if (d.range === 'public' && live && !pre) {
+      const q = line('routing: asking RIPEstat…', 'sys'); const t0 = performance.now();
+      r = await apiRoute(d.cidr);
+      q.textContent = r.error ? r.error : `routing: ok · ${Math.round(performance.now() - t0)} ms`;
+      if (r.error) q.className = 'ln warn';
+    }
+    if (r && r.error && pre) line(r.error, 'warn');
+    if (r && !r.error) {
+      await renderRoute(r);
+      const o = r.origins[0];
+      if (o) document.title = routeTitle(d.cidr, r);
+      return next(o && [`asn ${o.asn}`, `asn ${o.asn}`, 'the network that announces it'],
+        [`whois ${d.network}`, `whois ${d.network}`, 'who this block is registered to'],
+        d.supernet && [`cidr ${d.supernet}`, `cidr ${d.supernet}`, 'the block twice this size'], live && ['share', 'share', 'copy a link to this prefix']);
+    }
     next(d.supernet && [`cidr ${d.supernet}`, `cidr ${d.supernet}`, 'the block twice this size'],
       d.halves && d.halves[0] && [`cidr ${d.halves[0]}`, `cidr ${d.halves[0]}`, 'the first half of this block'],
       d.range === 'public' ? [`whois ${d.network}`, `whois ${d.network}`, 'who this block is registered to']
         : d.v === 4 && ['cheat sheet', null, 'subnet mask cheat sheet: /8 to /32', '/guides/subnet-cheat-sheet']);
   }
+
+  /* ---------- routing (route) ----------
+     How a public prefix or address is routed: the route that carries it, the network that originates it,
+     RPKI, how many RIS peers see it, its main upstreams and a few AS paths. The Worker asks RIPEstat (never
+     IPinfo) and caches the answer for six hours; the wording (summary, rpkiNote) comes with the data. */
+  async function route(raw) {
+    const q = String(raw || '').trim();
+    if (!q || /^-/.test(q)) {                    // route -n is the Linux habit for the local table
+      line("route shows how a prefix or address is routed on the internet (BGP): the network that announces it, RPKI, visibility and AS paths, from RIPEstat. Browsers can't read your own device's routing table.", 'sys');
+      line('usage: route <prefix or ip>   e.g. route 1.1.1.0/24', 'sys');
+      return next(['route 1.1.1.0/24', 'route 1.1.1.0/24', "Cloudflare's resolver prefix"], ['route 8.8.8.8', 'route 8.8.8.8', 'the route Google Public DNS is in'], ['man route', 'man route', 'the manual']);
+    }
+    if (!live) return line('route asks RIPEstat through the deployed Worker, so it works once the site is deployed.', 'warn');
+    const ql = line('querying RIPEstat…', 'sys'); const t0 = performance.now();
+    const d = await apiRoute(q);
+    if (d.error) { ql.textContent = d.error; ql.className = 'ln err'; announce(d.error); return; }
+    ql.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
+    const page = d.kind === 'ip' ? d.prefix : d.query, o = d.origins[0];
+    if (page) setUrl('/cidr/' + page, o ? routeTitle(page, d.kind === 'ip' ? { ...d, status: 'announced' } : d) : `${page} routing | ipterm`);
+    await renderRoute(d);
+    next(o && [`asn ${o.asn}`, `asn ${o.asn}`, 'the network that announces it'],
+      d.prefix && [`cidr ${d.prefix}`, `cidr ${d.prefix}`, 'subnet math for the route, on its own page'],
+      d.prefix && [`whois ${d.prefix.split('/')[0]}`, `whois ${d.prefix.split('/')[0]}`, 'who the block is registered to'],
+      page && ['share', 'share', 'copy a link to this route']);
+  }
+
+  async function renderRoute(d) {
+    const head = el('div', 'head'), o = d.origins[0];
+    head.append(el('span', 'hip', 'route ' + d.query), el('span', 'tag ' + (d.prefix ? 'pub' : 'priv'), { announced: 'announced', covered: 'routed', split: 'split', unrouted: 'not routed' }[d.status] || d.status));
+    if (o && o.rpki) head.append(el('span', 'tag', o.rpki === 'not-found' ? 'no roa' : 'rpki ' + o.rpki.replace('-', ' ')));
+    head.append(el('span', 'tag', 'ripestat'));
+    out.appendChild(head);
+    const asLink = a => cmdLink(a, 'asn ' + a, '/' + a);
+    const pfxLink = p => cmdLink(p, 'cidr ' + p, '/cidr/' + p);
+    const rows = [];
+    if (d.prefix) rows.push(['route', d.status === 'covered' ? joinFrag([pfxLink(d.prefix), d.kind === 'ip' ? '  (the route this address is in)' : '  (covers this prefix)']) : pfxLink(d.prefix), 'big']);
+    else rows.push(['route', d.status === 'split' ? 'not announced as a whole' : 'not announced: no RIS peer sees a route that covers it', 'big']);
+    if (d.summary) rows.push(['', d.summary, 'plain']);
+    d.origins.forEach((x, i) => rows.push([i ? '' : 'origin', joinFrag([asLink(x.asn), x.name ? '  ' + x.name : ''])]));
+    d.origins.filter(x => x.rpkiNote).forEach((x, i) => rows.push([i ? '' : 'RPKI', (d.origins.length > 1 ? x.asn + ': ' : '') + x.rpkiNote]));
+    if (d.visibility) rows.push(['visibility', `seen by ${d.visibility.seeing} of ${d.visibility.total} RIS peers`]);
+    if (d.firstSeen) rows.push(['first seen', d.firstSeen]);
+    if (d.registry) rows.push(['registry', d.registry]);
+    if (d.upstreams.length) rows.push(['upstreams', joinFrag(d.upstreams.flatMap((u, i) => [i ? '  ' : '', asLink(u.asn)]).concat(`  (just before the origin in ${d.routes} sampled routes)`))]);
+    d.paths.forEach((p, i) => rows.push([i ? '' : 'AS paths', joinFrag(p.path.flatMap((a, j) => [j ? ' ' : '', asLink('AS' + a)]).concat(p.collector ? `  (${p.collector})` : ''))]));
+    if (d.inside.length) rows.push(['more specific', joinFrag(d.inside.flatMap((p, i) => [i ? '  ' : '', pfxLink(p)]).concat(d.insideMore ? '  and more' : ''))]);
+    if (d.prefix) rows.push(['collectors', d.collectors.join(' · ')]);
+    await kv(rows);
+    announce(d.summary || `route ${d.query}`);
+  }
+  // The /cidr page's title for a routed prefix (cidrPage() in worker.js words it the same way).
+  function routeTitle(cidr, r) {
+    const o = r.origins[0], name = o.asn + (o.name ? ' ' + o.name : '');
+    const rpki = o.rpki ? (o.rpki === 'valid' ? ', RPKI valid' : o.rpki === 'not-found' ? ', no ROA' : ', RPKI invalid') : '';
+    return (r.status === 'announced' ? `${cidr}: announced by ${name}${rpki}` : `${cidr}: routed in ${r.prefix} by ${name}`) + ' | ipterm';
+  }
+  // Text and nodes in one fragment.
+  const joinFrag = parts => { const f = document.createDocumentFragment(); parts.forEach(p => { if (p !== '' && p != null) f.append(p); }); return f; };
 
   async function cidrTable() {
     await kv(CIDRLIB.table(16, 32).map(r => [`/${r.prefix}`, `${r.netmask.padEnd(16)} ${CIDRLIB.fmt(r.usable)} usable`]));
@@ -1223,9 +1306,9 @@
       usage: 'usage: mail <domain> [--dkim <selector>]',
       ex: [['mail gmail.com', '/mail/gmail.com'], ['mail outlook.com', '/mail/outlook.com'], ['mail github.com', '/mail/github.com'], ['mail example.com', '/mail/example.com']] },
     cidr: { url: '/cidr', title: 'Subnet calculator: CIDR, netmask and usable host range | ipterm',
-      text: 'cidr works out a subnet: network and broadcast addresses, netmask, wildcard, usable host range and host count. IPv6 works too.',
+      text: 'cidr works out a subnet: network and broadcast addresses, netmask, wildcard, usable host range and host count. IPv6 works too. For a public range it also shows how it is routed (route).',
       usage: 'usage: cidr <range>   also accepts an address and netmask: cidr 192.168.1.10 255.255.255.0',
-      ex: [['cidr 192.168.1.0/24', '/cidr/192.168.1.0/24'], ['cidr 10.0.0.0/22', '/cidr/10.0.0.0/22'], ['cidr 172.16.0.0/12', '/cidr/172.16.0.0/12'], ['cidr 2001:db8::/48', '/cidr/2001:db8::/48']] },
+      ex: [['cidr 192.168.1.0/24', '/cidr/192.168.1.0/24'], ['cidr 10.0.0.0/22', '/cidr/10.0.0.0/22'], ['cidr 172.16.0.0/12', '/cidr/172.16.0.0/12'], ['cidr 1.1.1.0/24', '/cidr/1.1.1.0/24']] },
   };
   async function toolIntro(tool) {
     const t = TOOL_INTRO[tool];
@@ -1644,6 +1727,14 @@
       rows.push(['IPv4 space', fmt(v4.addresses) + ' addresses' + (bits && v4.addresses >= 256 ? `  (about a /${bits})` : '')]);
     }
     rows.push(['IPv6 prefixes', fmt(n6)]);
+    // The main upstreams: the networks RIPEstat sees just before this one in AS paths (worker.js upstreams()).
+    const up = d.upstreams;
+    if (up && up.tooMany) rows.push(['upstreams', 'not listed: a transit network with thousands of neighbours (customers and peers)']);
+    else if (up && up.list) {
+      up.list.forEach((u, i) => rows.push([i ? '' : 'upstreams', joinFrag([cmdLink(u.asn, 'asn ' + u.asn, '/' + u.asn), u.name ? '  ' + u.name : ''])]));
+      if (!up.list.length) rows.push(['upstreams', 'none seen']);
+      else if (up.total > up.list.length) rows.push(['', `${up.list.length} of ${fmt(up.total)} seen, by how many RIS peers see each`]);
+    }
     rows.push(['registry', cmdLink(`whois ${d.asn}`, `whois ${d.asn}`, `/whois/${d.asn}`)]);
 
     const show4 = v4.prefixes.slice(0, 12), show6 = v6.prefixes.slice(0, 6);
@@ -1676,7 +1767,8 @@
     ['mail <domain>', 'email security: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, graded A to F', 'mail gmail.com'],
     ['cidr <range>', 'subnet calculator: cidr 10.0.0.0/22, IP + netmask, or IPv6', 'cidr 10.0.0.0/22'],
     ['whois <ip|ASN|domain>', 'registry record: owner, registrar, dates, name servers, abuse contact', 'whois example.com'],
-    ['asn <number>', 'network details and address blocks, e.g. asn AS13335', 'asn AS13335'],
+    ['asn <number>', 'network details, address blocks and upstreams, e.g. asn AS13335', 'asn AS13335'],
+    ['route <prefix|ip>', 'how it is routed: origin network, RPKI, visibility, AS paths', 'route 1.1.1.0/24'],
     ['port <number>', 'is a TCP port open on your IP? (tests your own address only)', 'port'],
     ['<ip> or <ASN>', 'same as lookup', null],
     ['ping [count]', 'round trip from your browser to the nearest Cloudflare data center', 'ping'],
@@ -1697,7 +1789,7 @@
   const ALIASES = { myip: 'whoami', me: 'whoami', leaks: 'leaktest', leak: 'leaktest', privacycheck: 'leaktest', vpntest: 'leaktest',
     vpncheck: 'leaktest', dnsleak: 'leaktest', dnsleaktest: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
     spf: 'mail', dmarc: 'mail', dkim: 'mail', email: 'mail', mailcheck: 'mail',
-    as: 'asn', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
+    as: 'asn', bgp: 'route', rpki: 'route', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
     portcheck: 'port', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
   // man <command>: [synopsis, description, examples, see also, curl paths]
   const MAN = {
@@ -1720,10 +1812,12 @@
         ['NULL MX', 'a domain that accepts no mail (MX 0 .) should have v=spf1 -all and DMARC p=reject; the other checks don\'t apply']]],
     whois: ['whois <ip | ASN | domain>', 'the registry record. For addresses and networks: owner, address block and abuse contact. For domains: registrar, registration and expiry dates, status and name servers. Straight from the registries over RDAP.',
       ['whois example.com', 'whois 8.8.8.8', 'whois AS13335'], ['lookup', 'asn', 'dig'], ['/whois/example.com', '/whois/8.8.8.8', '/whois/example.com?format=text']],
-    asn: ['asn <number>', 'an autonomous system: a network such as an internet provider, a cloud or a large company. Shows its holder and registry, and how many IPv4 and IPv6 prefixes it announces, largest first.',
-      ['asn AS13335', 'asn 15169'], ['whois', 'cidr'], ['/AS13335', '/AS13335?format=text']],
-    cidr: ['cidr <range>   or   cidr <ip> <netmask>', 'subnet calculator: network and broadcast addresses, netmask, wildcard, usable host range and count, and how the block splits and combines. IPv6 too. Calculated in your browser.',
-      ['cidr 192.168.1.0/24', 'cidr 10.0.0.0/22', 'cidr 192.168.1.10 255.255.255.0', 'cidr 2001:db8::/48'], ['whois', 'asn'], ['/cidr/10.0.0.0/22', '/cidr/10.0.0.0/22?format=text']],
+    asn: ['asn <number>', "an autonomous system: a network such as an internet provider, a cloud or a large company. Shows its holder and registry, how many IPv4 and IPv6 prefixes it announces, largest first, and its main upstreams: the networks RIPEstat sees just before it in AS paths, usually its transit providers. The largest transit networks, with thousands of neighbours, get no upstream list.",
+      ['asn AS13335', 'asn 15169'], ['whois', 'route', 'cidr'], ['/AS13335', '/AS13335?format=text']],
+    cidr: ['cidr <range>   or   cidr <ip> <netmask>', "subnet calculator: network and broadcast addresses, netmask, wildcard, usable host range and count, and how the block splits and combines. IPv6 too. Calculated in your browser; for a public range it also asks how the range is routed (see route).",
+      ['cidr 192.168.1.0/24', 'cidr 10.0.0.0/22', 'cidr 192.168.1.10 255.255.255.0', 'cidr 1.1.1.0/24'], ['route', 'whois', 'asn'], ['/cidr/10.0.0.0/22', '/cidr/10.0.0.0/22?format=text']],
+    route: ['route <prefix>   or   route <ip>', "how a public prefix or address is routed on the internet (BGP), from RIPEstat's route collectors: the route that carries it (the prefix itself, or the less specific one it is part of), the network that announces it, whether RPKI allows that (a ROA names the network and the longest prefix it may announce), how many RIS peers see it, the networks just before the origin in AS paths, and a few sample paths from RRC00 (Amsterdam), RRC01 (London) and RRC11 (New York). An address shows the route it is in. Cached for six hours. Browsers can't read your own device's routing table, so route with nothing after it only explains itself.",
+      ['route 1.1.1.0/24', 'route 8.8.8.8', 'route 8.8.0.0/16', 'route 2001:4860::/32'], ['asn', 'cidr', 'whois'], ['/route/1.1.1.0/24', '/route/8.8.8.8?format=text']],
     port: ['port <number>   or   port <number> --info', "checks whether a TCP port is open on your own public IP address: ipterm's server connects to the address you are visiting from, on the one port you name, and reports open (something accepted), closed (turned away at once: nothing is listening, or a firewall rejected it) or no answer (dropped, usually by a router that isn't forwarding the port). It never tests any other address, sends nothing over the connection and stores nothing; 10 checks a minute. Port 25 can't be checked: Cloudflare, which runs ipterm, blocks it. Over IPv6 it tests your IPv6 address, where port forwards don't apply: curl -4 tests IPv4. --info explains a port without checking it.",
       ['port 25565', 'port 22', 'port 32400 --info'], ['whoami', 'ping'], ['-4 /port/22', '-4 /port/22?format=text']],
     ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
@@ -1743,11 +1837,11 @@
   const GUIDES = [['find-router-ip', "How to find your router's IP address", 'router-ip'], ['private-ip-ranges', 'Private IP address ranges explained', 'private-ip'],
     ['what-your-ip-reveals', 'What your IP address reveals', 'ip-privacy'], ['ipv4-vs-ipv6', 'IPv4 vs IPv6', 'ipv6'],
     ['what-is-an-asn', 'What is an ASN?', null], ['subnet-cheat-sheet', 'Subnet mask cheat sheet', null]];
-  const MAN_GUIDE = { whoami: 'what-your-ip-reveals', leaktest: 'what-your-ip-reveals', asn: 'what-is-an-asn', cidr: 'subnet-cheat-sheet' };
+  const MAN_GUIDE = { whoami: 'what-your-ip-reveals', leaktest: 'what-your-ip-reveals', asn: 'what-is-an-asn', route: 'what-is-an-asn', cidr: 'subnet-cheat-sheet' };
   const guideLink = slug => { const g = GUIDES.find(x => x[0] === slug), a = el('a', 'cmd', g ? g[1] : slug); a.href = '/guides/' + slug; return a; };
   // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup),
   // unless the caller names one to prefer ("mal gmail.com" -> mail, not man).
-  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'lookup', 'nslookup', 'asn', 'port', 'ping', 'traceroute', 'dmarc',
+  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'lookup', 'nslookup', 'asn', 'route', 'port', 'ping', 'traceroute', 'dmarc',
     'share', 'copy', 'privacy', 'clear', 'history', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
   function osa(a, b) {
@@ -1946,6 +2040,7 @@
       [curlLine('/whois/8.8.8.8'), 'registry record as JSON'],
       [curlLine('/whois/example.com'), 'domain registration as JSON'],
       [curlLine('/cidr/10.0.0.0/22'), 'subnet calculation as JSON'],
+      [curlLine('/route/1.1.1.0/24'), 'routing as JSON: origin network, RPKI, visibility, AS paths (a prefix or an address)'],
       [curlLine('/dns/example.com'), 'DNS records as JSON (add /MX for one type)'],
       [curlLine('/mail/gmail.com'), 'email security check (SPF, DMARC, DKIM, MTA-STS) and its grade as JSON'],
       [curlLine('/port/22', '-4'), 'is TCP port 22 open on your own IP? (JSON; -4 tests IPv4)'],
@@ -2003,6 +2098,7 @@
         return mail(lc === 'dkim' && args[1] && !/^-/.test(args[1]) ? [args[0], '--dkim', args[1]] : args);
       case 'lookup': return args[0] ? lookup(args[0]) : line('usage: lookup <ip, domain or ASN>   example: lookup 8.8.8.8', 'warn');
       case 'asn': return args[0] ? asn(args[0]) : line('usage: asn <number>   example: asn AS13335', 'warn');
+      case 'route': return route(args.join(' '));
       case 'port': return portCmd(args);
       case 'ping': return ping(args);
       case 'traceroute': return traceroute(args[0]);

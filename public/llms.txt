@@ -26,7 +26,8 @@ IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Regis
 
 - [IP lookup](https://ipterm.net/8.8.8.8): owner, network, location and VPN / proxy flags for any IPv4 or IPv6 address (`/<ip>`)
 - [One value for an IP](https://ipterm.net/8.8.8.8/country): `/<ip>/<field>` with asn, org, cc, country, continent or hostname, as plain text
-- [Network (ASN)](https://ipterm.net/AS13335): holder, registry and announced prefixes (`/AS<number>`)
+- [Network (ASN)](https://ipterm.net/AS13335): holder, registry, announced prefixes and main upstream networks (`/AS<number>`)
+- [Routing](https://ipterm.net/route/1.1.1.0/24): how a public prefix or address is routed (BGP): the route that carries it, the network that announces it, RPKI validity, how many RIS peers see it and sample AS paths, from RIPEstat (`/route/<prefix>` or `/route/<ip>`)
 - [As text](https://ipterm.net/8.8.8.8?format=text): add `?format=text` to any lookup for aligned key/value lines
 
 ## Tools
@@ -34,7 +35,7 @@ IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Regis
 - [DNS](https://ipterm.net/dns/example.com): A, AAAA, MX, NS, TXT and CAA records, the host of the first address and DNSSEC (`/dns/<name>`, or `/dns/<name>/<TYPE>` for one type with TTLs; an IP address gives its reverse DNS)
 - [Mail check](https://ipterm.net/mail/gmail.com): a domain's email security, graded A to F: MX and the provider behind it, SPF (includes followed, DNS lookups counted against the limit of 10), DMARC policy and report addresses, DKIM keys at common selectors (add `?dkim=<selector>` for another), MTA-STS (record and policy file), TLS-RPT and BIMI. Each finding is ok, warn, fail or info, with a fix for every warn and fail (`/mail/<domain>`)
 - [Whois](https://ipterm.net/whois/example.com): registry record for a domain, IP address or ASN over RDAP: registrar, dates, status, name servers, owner and abuse contact (`/whois/<query>`)
-- [Subnet calculator](https://ipterm.net/cidr/10.0.0.0/22): network, broadcast, netmask, wildcard, usable hosts and how the block splits (`/cidr/<network>/<prefix>`, IPv4 and IPv6; no outside calls)
+- [Subnet calculator](https://ipterm.net/cidr/10.0.0.0/22): network, broadcast, netmask, wildcard, usable hosts and how the block splits (`/cidr/<network>/<prefix>`, IPv4 and IPv6; the JSON makes no outside calls, and the page for a public range adds its routing)
 - [Port check](https://ipterm.net/port/22): is a TCP port open on the caller's own address? `curl -4 ipterm.net/port/22` makes the server connect to the address the request comes from (never any other) and answers open, closed, no-answer or untestable (always for port 25, which Cloudflare blocks). Command-line clients only (browsers and search crawlers get a page explaining the port); 10 checks a minute. Like every "your own address" answer, it tests the machine running your code, not the person you are talking to
 - [DNS leak test](https://ipterm.net/leaktest): which DNS resolvers look up names for the caller. In a browser, `leaktest` runs it with the other leak checks. From a shell, look up a random name first, then ask: `T=$(openssl rand -hex 10); dig +short $T.dl.ipterm.net; curl "ipterm.net/api/dnsleak?t=$T"` lists the resolvers that asked, with their networks (IPinfo Lite), once. Tokens are 20 lowercase hex characters; the names answer NXDOMAIN on purpose
 
