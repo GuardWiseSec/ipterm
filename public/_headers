@@ -35,3 +35,18 @@
 
 /og.png
   Cache-Control: public, max-age=86400
+
+/og-leak-a.png
+  Cache-Control: public, max-age=86400
+
+/og-leak-b.png
+  Cache-Control: public, max-age=86400
+
+/og-leak-c.png
+  Cache-Control: public, max-age=86400
+
+/og-leak-d.png
+  Cache-Control: public, max-age=86400
+
+/og-leak-f.png
+  Cache-Control: public, max-age=86400

@@ -31,7 +31,10 @@
 //   GET /api/port?n=        the check as JSON, used by the terminal (same-origin or command-line clients only)
 //   GET /whois, /dns, /mail, /cidr, /leaktest, /port, /api  landing page for each tool (usage and examples); /api is
 //                           the API docs, and command-line clients get the /help text there instead
-//   GET /api/check          your own IP plus how IPinfo classifies it (VPN, hosting...), for the privacy check
+//   GET /api/check          your own IP plus how IPinfo classifies it (VPN, hosting...) and whether it's a Tor exit,
+//                           for the privacy check
+//   GET /leaktest/r/<code>  a leak test result someone shared: the grade and per-check flags from the code alone
+//                           (public/leakgrade.js), a "run yours" link, never a test run. noindex. JSON for curl
 //   GET /api/dnsleak?t=     the DNS resolvers that looked up the page's random names, with their networks
 //                           (same-origin or command-line clients only; off unless DNSLEAK_* is set up)
 //   GET /robots.txt, /sitemap.xml
@@ -55,6 +58,7 @@
 //   Reverse DNS: Cloudflare DNS-over-HTTPS.
 //   Mail check: Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file (https://mta-sts.<domain>).
 //   DNS leak test: ipterm's own DNS server for DNSLEAK_ZONE (dnsleak-server/, on a VPS), plus IPinfo Lite.
+//   Tor exits (leaktest): the Tor Project's exit list, cached for an hour per data center.
 //
 // Hardening
 //   - Upstream lookups are cached; cache misses are rate limited per visitor IP (LOOKUP_LIMITER).
@@ -67,9 +71,11 @@ import { DurableObject } from 'cloudflare:workers';
 import { connect } from 'cloudflare:sockets';
 import '../public/cidr.js';                       // shared subnet calculator (also served to the page)
 import '../public/ports.js';                      // what common ports are for (also served to the page)
+import '../public/leakgrade.js';                  // the leak test's grade and share codes (also served to the page)
 import { meCard, ME_WIDTH } from './me.js';         // the /me card and its world map
 const CIDR = globalThis.IPTERM_CIDR;
 const PORTS = globalThis.IPTERM_PORTS;
+const LEAKG = globalThis.IPTERM_LEAK;
 
 const CLI_UA = /^(curl|wget|httpie|xh|fetch|libfetch|aria2)\b|powershell/i;
 // Link-preview fetchers for chat apps and social sites, and search engine crawlers. Many send "Accept: */*"
@@ -121,6 +127,7 @@ async function route(request, env, ctx) {
   if (path === '/api/check') return guard(() => checkData(io), d => json(d));
   if (path === '/api/dnsleak') return dnsleakRoute(io);
   if (path === '/dnsleak') return redirect('/leaktest');
+  if (/^\/leaktest\/r\//i.test(path)) return leakShareRoute(io, path.slice(12), html);
   if (path === '/api/asn') return asnRoute(io, String(url.searchParams.get('asn') || '').trim(), false);
   if (Object.hasOwn(TOOLS, path.slice(1).toLowerCase())) return toolRoute(io, path.slice(1).toLowerCase(), html);
   if (path === '/api/port') return portRoute(io, url.searchParams.get('n'), false);
@@ -182,13 +189,13 @@ const TOOLS = {
   },
   leaktest: {
     title: 'VPN and DNS leak test: DNS, WebRTC and IPv6 leaks | ipterm', heading: 'VPN and DNS leak test',
-    desc: "Free DNS leak test and VPN leak test: see which DNS servers look up sites for you, and whether they belong to your VPN or to your internet provider. Also checks WebRTC and IPv6 leaks that bypass a VPN, a time zone that gives you away, and whether your IP is a known VPN. Runs in your browser in a few seconds; nothing is stored.",
+    desc: "Free DNS leak test and VPN leak test, graded A to F: see which DNS servers look up sites for you, and whether they belong to your VPN or to your internet provider. Also checks WebRTC and IPv6 leaks that bypass a VPN, a time zone that gives you away, and whether your IP is a known VPN. Runs in your browser in a few seconds; nothing is stored.",
     usage: 'leaktest',
     checks: ['DNS: which DNS servers look up sites for you, and do they belong to your VPN, or to your internet provider?',
       'WebRTC: does your browser reveal a public IP other than the one websites see?',
       'IPv6: does your IPv6 traffic go through a different network than your VPN?',
       "Time zone: does your device's clock match your IP's location?",
-      'VPN detection: is your IP recognized as a VPN, proxy, Tor or data center?'],
+      'VPN detection: is your IP recognized as a VPN, proxy, Tor or data center, or does it come through Cloudflare WARP?'],
     examples: [],
   },
   cidr: {
@@ -214,7 +221,7 @@ const TOOLS = {
 // The leak test page before (or without) the DNS test server: it doesn't promise what it can't check.
 const LEAKTEST_NO_DNS = {
   title: 'VPN leak test: WebRTC, IPv6 and time zone check | ipterm', heading: 'VPN and privacy leak test',
-  desc: "Check whether your browser gives away more than your IP address: WebRTC leaks, IPv6 leaks that bypass a VPN, a device time zone that doesn't match your IP's location, and whether your IP is recognized as a VPN. Runs in your browser in a few seconds; nothing is stored.",
+  desc: "Check whether your browser gives away more than your IP address, graded A to F: WebRTC leaks, IPv6 leaks that bypass a VPN, a device time zone that doesn't match your IP's location, and whether your IP is recognized as a VPN. Runs in your browser in a few seconds; nothing is stored.",
   checks: TOOLS.leaktest.checks.slice(1),
 };
 
@@ -232,12 +239,41 @@ function toolRoute(io, tool, html) {
     (tool === 'mail' ? `<p class="ln sys">How the grade works (each line is OK, WARN, FAIL or INFO; INFO never counts):</p>` +
       MAIL_GRADES.map(([g, t]) => `<p class="ln">${esc(g)}: ${esc(t)}</p>`).join('') : '') +
     (tool === 'port' ? `<p class="ln sys">It only ever tests the address you connect from, so it can't be pointed at anyone else's.</p>${portIndex()}` : '') +
+    (tool === 'leaktest' ? `<p class="ln sys">How the grade works (only leaks past a VPN count, so not using one never lowers it):</p>` +
+      LEAKG.GRADES.map(([g, t]) => `<p class="ln">${esc(g)}: ${esc(t)}</p>`).join('') + `<p class="ln sys">${esc(LEAKG.RULES[1])}</p>` : '') +
     // The full reference for visitors without JavaScript and for crawlers; the terminal prints its own (`api`).
     (tool === 'api' ? `<pre class="doc-pre api-ref"><code>${esc(helpBody(io.url.host, io.env))}</code></pre>` +
       `<p class="ln sys">Machine-readable: <a href="/openapi.json">OpenAPI description</a> · <a href="/llms.txt">llms.txt</a> · plain text: <code>curl ${esc(io.url.host)}/help</code></p>` +
       `<p class="ln sys">IP address data powered by <a href="https://ipinfo.io" rel="noopener">IPinfo</a>.</p>` : '');
   return shell(io, { status: 200, path: '/' + tool, title: t.title, desc: t.desc, initial: { kind: 'tool', tool },
     body: staticBlock(t.heading, [tool], [['usage', t.usage]], t.desc, extra) });
+}
+
+/* ---------- shared leak test results ----------
+   /leaktest/r/<code>: a result someone shared after leaktest. The code is made in their browser
+   (public/leakgrade.js) and holds only the grade, whether a VPN was on, and each graded check's flag
+   (passed, leaked or not tested): no IP address, provider, location or resolver. This page shows that
+   result with a "run yours" link and never runs the test itself: opening someone's link must not test
+   your browser. Not indexed; each grade has its own share image (public/og-leak-<grade>.png, made by
+   tools/build_og_leak.mjs). Nothing is looked up or stored, so it's cached like a static page. */
+async function leakShareRoute(io, raw, html) {
+  const r = LEAKG.decode(raw);
+  if (!r) return html ? notFoundPage(io, '/leaktest/r/' + raw) : reply(io, { error: 'Not a leak test result code. They come from share after leaktest, like /leaktest/r/1bjp.' }, 404);
+  const says = `This browser got ${LEAKG.article(r.grade)} on ipterm's leak test`;
+  const lines = LEAKG.CHECKS.map(([k, label]) => [label, LEAKG.checkWord(r[k])]);
+  const cache = 'public, max-age=86400';
+  if (!html) {
+    const d = { code: r.code, grade: r.grade, vpn: LEAKG.vpnWord(r.vpn), checks: Object.fromEntries(LEAKG.CHECKS.map(([k]) => [k, LEAKG.checkWord(r[k])])) };
+    return reply(io, d, 200, { 'cache-control': cache }, x => kvText([['grade', x.grade], ['vpn', x.vpn], ...lines]));
+  }
+  const desc = `${says}: ${lines.map(([l, w]) => `${l}: ${w}`).join(', ')}; ${LEAKG.vpnWord(r.vpn)}. Run yours in a few seconds; nothing is stored.`;
+  const res = await shell(io, { status: 200, path: '/leaktest/r/' + r.code, title: `${says} | ipterm`, desc, noindex: true, cache,
+    image: `/og-leak-${r.grade.toLowerCase()}.png`, initial: { kind: 'leakshare', code: r.code },
+    body: staticBlock(says, ['leaktest', 'shared result'], [['grade', r.grade], ['VPN', LEAKG.vpnWord(r.vpn)], ...lines],
+      "A result someone shared from ipterm's VPN and DNS leak test. The link holds only the grade and these lines: no IP address, provider, location or DNS resolver.",
+      '<p class="ln"><a href="/leaktest">Run yours</a>: test this browser in a few seconds; nothing is stored.</p>') });
+  res.headers.set('x-robots-tag', 'noindex');
+  return res;
 }
 
 // What the visitor probably meant, from the first part of the path.
@@ -1081,19 +1117,60 @@ async function limit(io) {
   if (!ok) throw new RateLimited();
 }
 
+/* Tor exits: leaktest says "Tor" when the visitor's address is a Tor exit. The Tor Project publishes the
+   current exits as plain text (one address a line, a couple of thousand). Each data center keeps a copy in
+   its cache for an hour, so the list costs at most one subrequest an hour per data center, and only when
+   someone there runs leaktest. The visitor's address is looked up in that copy, here: it's never sent to
+   the Tor Project. (Cloudflare also gives Tor traffic the country code T1, which the page reads too.) */
+const TOR_EXITS_URL = 'https://check.torproject.org/torbulkexitlist';
+const TOR_EXITS_TTL = 3600;
+let torExits = null, torExitsUntil = 0;                  // per-instance copy, so a warm instance skips the cache read
+async function torExitList(io) {
+  const now = Date.now();
+  if (now < torExitsUntil) return torExits;
+  const req = new Request(`${io.url.origin}/__cache/tor-exits`);
+  let body = null;
+  try { const hit = await caches.default.match(req); if (hit) body = await hit.text(); } catch { /* cache trouble: download it */ }
+  if (body == null) {
+    try {
+      const r = await fetch(TOR_EXITS_URL, { signal: AbortSignal.timeout(5000) });
+      if (!r.ok) { if (r.body) r.body.cancel(); throw new Error('HTTP ' + r.status); }
+      body = await readBody(r, 500_000);
+      io.ctx.waitUntil(caches.default.put(req, new Response(body, {
+        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': `public, max-age=${TOR_EXITS_TTL}` },
+      })));
+    } catch (e) {
+      // Don't hold up every check while it's unavailable: leaktest still runs, without the Tor line.
+      console.error(`[ipterm] Tor exit list unavailable (${String((e && e.message) || e)}); trying again in 10 minutes`);
+      torExits = null; torExitsUntil = now + 600_000;
+      return null;
+    }
+  }
+  const set = new Set();
+  for (const ln of body.split('\n')) { const q = parseIp(ln.trim()); if (q) set.add(canonIp(q)); }
+  torExits = set.size ? set : null; torExitsUntil = now + 600_000;
+  return torExits;
+}
+
 // Privacy check (leaktest): your own details from Cloudflare plus IPinfo's classification of your
-// address (VPN/proxy/Tor, hosting, mobile). Only runs when a visitor asks for the check.
+// address (VPN/proxy/Tor, hosting, mobile) and whether it's a Tor exit. Only runs when a visitor asks.
 async function checkData(io) {
   const self = await selfInfo(io);
   const p = parseIp(io.me);
   let network = null;
   if (p && !nonPublicReason(p)) {
+    const ip = canonIp(p);
+    // A slow download of the exit list doesn't hold the check up: it finishes in the background and fills
+    // the cache for the next one.
+    const exits = torExitList(io).catch(() => null);
+    io.ctx.waitUntil(exits);
     try {
       // proxycheck.io is asked every time here (not only when IPinfo is unsure): it can name the VPN.
-      const ip = canonIp(p);
       const [d, privacy] = await Promise.all([ipData(io, ip, p), privacyData(io, ip)]);
       network = { source: d.source || null, asn: d.asn || null, org: d.org || null, asType: d.asType || null, flags: d.flags || null, privacy: privacy || null };
     } catch (e) { if (e instanceof RateLimited) throw e; }   // classification is a bonus; the check still runs
+    const list = await Promise.race([exits, sleep(1500).then(() => null)]);
+    if (list && list.has(ip)) network = { ...(network || {}), tor: true };
   }
   const dns = dnsleakConf(io.env);                       // where the page sends its DNS leak test lookups, if anywhere
   return { ...self, network, ...(dns ? { dnsleak: dns.zone } : {}) };
@@ -2398,7 +2475,8 @@ async function loadShell(io) {
 // without JavaScript (and for search engines), and the data the terminal boots from. Pages other
 // than the homepage get their own h1 (the title without " | ipterm") in place of the generic one.
 // noindex: a working page that search engines should skip (ports without an explainer of their own).
-async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null, cache = null, noindex = false }) {
+// image: the share image's path (a shared leak test result uses its grade's).
+async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null, cache = null, noindex = false, image = '/og.png' }) {
   let h = await loadShell(io);
   const canonical = io.url.origin + (path === '/' ? '/' : encodePath(path));
   // Replacements use functions: with a plain string, "$`", "$'" and "$&" in page text (which can come
@@ -2414,7 +2492,7 @@ async function shell(io, { status = 200, title, desc, path = '/', body = '', ini
     `<meta property="og:title" content="${esc(ogTitle)}">`,
     `<meta property="og:description" content="${esc(ogDesc)}">`,
     `<meta property="og:url" content="${esc(canonical)}">`,
-    `<meta property="og:image" content="${esc(io.url.origin)}/og.png">`,
+    `<meta property="og:image" content="${esc(io.url.origin + image)}">`,
     `<meta name="twitter:card" content="summary_large_image">`,
     path === '/' ? homeJsonLd(io.url.origin) : status < 400 ? breadcrumbJsonLd(io.url.origin, path) : '',
     (status >= 400 && status !== 429) || noindex || selfHosted(io.env) ? `<meta name="robots" content="noindex">` : '',
@@ -2506,7 +2584,7 @@ function breadcrumbJsonLd(origin, path) {
   const tool = Object.hasOwn(TOOLS, first) ? first : null;
   const crumbs = [['ipterm', '/']];
   if (tool) crumbs.push([TOOLS[tool].heading, '/' + tool]);
-  if (!tool || rest.length) crumbs.push([tool ? (tool === 'port' ? 'port ' : '') + rest.join(tool === 'cidr' ? '/' : ' ') : first, path]);
+  if (!tool || rest.length) crumbs.push([tool === 'leaktest' ? 'shared result' : tool ? (tool === 'port' ? 'port ' : '') + rest.join(tool === 'cidr' ? '/' : ' ') : first, path]);
   const ld = {
     '@context': 'https://schema.org',
     '@type': 'BreadcrumbList',
