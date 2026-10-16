@@ -203,6 +203,8 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | Reverse DNS (hostname) | Cloudflare DNS-over-HTTPS | Free |
 | Mail checks: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI | Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file | Free |
 | Which DNS resolvers a visitor uses (leaktest) | ipterm's own DNS server for `dl.ipterm.net` (`dnsleak-server/`), plus IPinfo Lite for the resolvers' networks | The VPS, about $4 to $6 a month |
+| Whether the visitor's address is a Tor exit (leaktest) | The Tor Project's exit list, cached an hour per data center | Free; at most one subrequest an hour per data center |
+| Cloudflare WARP, TLS and HTTP versions, key exchange (leaktest) | Cloudflare's `/cdn-cgi/trace`, read by the browser | Free; the edge answers it, not the Worker |
 
 Lookups of other IPs are cached at the edge for six hours.
 
@@ -453,14 +455,20 @@ country extensions don't (.de and .io, for example), and ipterm says so instead 
 
 `leaktest` (or `dnsleak`) in the terminal, or the page `/leaktest` (which runs it on load; `/dnsleak`
 redirects there), is a VPN and DNS leak test: it checks whether the browser gives away more than its IP
-address. Each line is marked OK, LEAK or INFO:
+address, and grades the leaks A to F. Each line is marked OK, LEAK or INFO:
 
+- **Sites see:** the visitor's IP, with its network and rough location: their provider's without a VPN,
+  the VPN's with one. Always INFO, and never graded: every connection without a VPN shows these, and the
+  grade is about leaks, not about whether someone uses a VPN.
 - **VPN detection:** IPinfo Core's classification of the visitor's IP (VPN/proxy/Tor, hosting
   flag, or a network whose type is hosting), plus proxycheck.io's when `PROXYCHECK_KEY` is set
-  (which can name the VPN service). Without either, this line says it wasn't checked. An
-  unflagged address on a home or mobile provider's network (IPinfo type "isp", a mobile network,
-  or proxycheck.io's "Residential" / "Wireless") is reported plainly as "no VPN", since commercial
-  VPN servers run in data centers. Any other unflagged address stays hedged. An
+  (which can name the VPN service). Two services are named outright: **Cloudflare WARP**, when
+  Cloudflare's edge says the request came through it (`warp=on` or `warp=plus` in `/cdn-cgi/trace`, which
+  the page reads itself), and **Tor**, when the address is on the Tor Project's exit list (see "Tor exits"
+  below) or Cloudflare gives it the country code `T1`. Both count as a VPN. Without any of these, this line
+  says it wasn't checked. An unflagged address on a home or mobile provider's network (IPinfo type "isp",
+  a mobile network, or proxycheck.io's "Residential" / "Wireless") is reported plainly as "no VPN", since
+  commercial VPN servers run in data centers. Any other unflagged address stays hedged. An
   unlisted IP isn't treated as proof of no VPN: mismatches below still carry "(a leak if you use
   a VPN)", just marked INFO instead of LEAK. proxycheck.io's `anonymous` or `compromised` flag
   alone (see the table above) doesn't count as a VPN: on a hosting network the address counts as
@@ -473,23 +481,97 @@ address. Each line is marked OK, LEAK or INFO:
   NXDOMAIN, but by then the visitor's resolvers have asked that server. Then `/api/dnsleak` asks which
   resolvers those were, and names each one's network with IPinfo Lite. On a VPN, resolvers outside the
   VPN's network (another AS number and name) are a LEAK, called "your ISP" when they belong to the network
-  the other IP version leaked to; resolvers inside it are OK. Without a VPN they're named, as INFO:
+  the other IP version leaked to; resolvers inside it are OK. Through Tor the exit relay picks the
+  resolver, so there only the visitor's own provider's is a LEAK. Without a VPN they're named, as INFO:
   `Cloudflare (1.1.1.1)`, `your ISP: Verizon Business`, a private address, or "your own address" for a
   resolver the visitor runs themselves. Until the DNS test server is set up, or when it doesn't answer, or
   no lookup reached it, the check says "Not tested: DNS leaks" instead. See "DNS leak test server" below.
 - **WebRTC:** asks Cloudflare's public STUN server (`stun.cloudflare.com:3478`) which public
-  addresses the browser reveals, and flags any that differ from the IP websites see.
+  addresses the browser reveals, and flags any that differ from the IP websites see. A local network
+  address WebRTC shows (current browsers hide it) is INFO: it says nothing about where the visitor is.
 - **IPv6 / IPv4:** compares the network of the visitor's other IP version (via ipify) with the one
   they connected over. On a VPN, a different network means that traffic bypasses the VPN.
-- **Time zone:** the device's time zone versus the IP's location (compared by UTC offset).
+- **Time zone:** the device's time zone versus the IP's location (compared by UTC offset). A device that
+  reports UTC (Tor Browser, Firefox's `privacy.resistFingerprinting`) is OK: it gives nothing away.
+- **Language (INFO only):** the country in the browser's preferred language (`en-US` → United States)
+  next to the IP's country. Sites can compare the two, but expats and travelers differ for good reasons,
+  so it's never a LEAK and never graded.
+- **Connection (INFO only):** badges for TLS 1.3, HTTP/3 and post-quantum key exchange (`tls=`, `http=`
+  and `kex=` in `/cdn-cgi/trace`; a `kex` with ML-KEM or Kyber in it is post-quantum). They describe how
+  the browser reaches ipterm, so they're never a plus on the grade. The line is left out when the trace
+  isn't there (under `wrangler dev`).
 
 Findings count as LEAK only when the visitor appears to be on a VPN; otherwise the same facts are
-shown as INFO. (WebRTC, IPv6 and the time zone also count when the check can't tell whether a VPN is
+shown as INFO. (WebRTC, IPv6 and the time zone also show LEAK when the check can't tell whether a VPN is
 on, with the "if you use a VPN" caveat. DNS doesn't: without a VPN's network there is nothing to compare
 the resolvers with.) Nothing is stored. The visitor's own IP is sent to IPinfo only when they run the
 check (it uses the Core daily budget), and the privacy policy says so. When no VPN is detected, the
 verdict is always followed by the sponsored line (any sponsor with `"check"` in its `on` list in
-`sponsors.json`, currently Proton VPN). A DNS LEAK only happens on a VPN, so it never brings the line.
+`sponsors.json`, currently Proton VPN). A run that detects a VPN never shows it, including a second run
+after the visitor turned a VPN on, and a DNS LEAK only happens on a VPN, so it never brings the line.
+
+#### The grade
+
+One grade, "Leaks: A" to "F", for what leaks past a VPN. The rubric lives in `public/leakgrade.js`
+(shared by the page and the Worker), and the same words are in `man leaktest` and on the `/leaktest` page:
+
+| Grade | When |
+| --- | --- |
+| A | no leaks |
+| B | only the time zone leaks: it gives away the region, not the address |
+| C | DNS leaks (sites are looked up outside the VPN), but neither WebRTC nor IPv6 does |
+| D | WebRTC or IPv6 shows an address outside the VPN (one of the two), and DNS doesn't leak |
+| F | WebRTC or IPv6 leaks and DNS does too, or WebRTC and IPv6 both leak |
+
+- Only four checks count: DNS, WebRTC, IPv6 (the other IP version) and the time zone, and each only when
+  a VPN is detected (a known VPN, proxy or Tor address, a hosting network, or Cloudflare WARP).
+- **Not using a VPN never lowers the grade.** With no VPN detected nothing can leak past one, so the grade
+  is A; what sites see (the provider and rough location) is its own line, never graded.
+- When the check can't tell whether a VPN is on, there's no grade if a line would be a leak with one
+  ("Leaks: –, not graded"), and A if none would.
+- Checks that couldn't run don't count (the tally says which). INFO lines never count: connection
+  security, browser language, a local address.
+
+#### Before and after
+
+The last result stays in the tab's memory (a variable, never `localStorage`; a reload forgets it). Run
+`leaktest` again, after turning a VPN on or off or after a fix, and it prints each line before → after,
+with unchanged lines folded into one row (a leak that's still there is always shown). Between a run with a
+VPN and one without, the run without it shows what a leak would give away, so "a leak if you use a VPN"
+becomes a verdict: "confirmed leak: it's the address you have without the VPN" (WebRTC), "it's your
+network without the VPN" (IPv6), "the same resolvers as without the VPN" (DNS), or "not a leak with the VPN
+on". With the VPN in the same state both times it says "fixed", "still leaks" or "new leak".
+
+#### Shared results (/leaktest/r/<code>)
+
+`share` after `leaktest` copies a link like `/leaktest/r/1bjp`. The page makes the code (`encode()` in
+`public/leakgrade.js`): version `1`, the grade letter, then two characters of Crockford base32 holding 10
+bits, whether a VPN was detected and, for each graded check, passed, leaked or not tested. That's all:
+no IP address, provider, location or resolver, so every browser with the same result gets the same link
+(113 codes are valid in all), and a link can't be traced back to anyone. The Worker only decodes it, and
+rejects a code whose letter doesn't match its checks (a 404 page).
+
+- The page says "this browser got a B on ipterm's leak test", lists the lines, and offers **run yours**
+  (a link to `/leaktest`). It never runs the test by itself: opening someone's link mustn't test the
+  visitor's browser, so the terminal shows `leaktest --result <code>` instead, and Back and Forward do the
+  same.
+- Link previews use one of five static images, `public/og-leak-a.png` to `-f.png` (1200×630). They're made
+  by `node tools/build_og_leak.mjs` with headless Chrome or Edge (set `CHROME` if it isn't found); commit
+  the PNGs after changing it.
+- Result pages are `noindex` (meta tag and `X-Robots-Tag`), cached for a day like static pages, and not
+  in the sitemap. Command-line clients get the decoded result as JSON (`?format=text` for lines).
+- A run that can't be graded has no code: `share` then copies `/leaktest` and says why.
+
+#### Tor exits
+
+To say "Tor", the Worker checks the visitor's address against the Tor Project's exit list
+(`https://check.torproject.org/torbulkexitlist`, about 1,200 IPv4 addresses, 17 KB). Each Cloudflare data
+center keeps a copy in its cache for an hour, and each Worker instance remembers it for ten minutes, so
+the list costs at most one subrequest an hour per data center, and only when someone there runs leaktest.
+The visitor's address is looked up in that copy, never sent to the Tor Project. A slow download doesn't
+hold the check up (it waits 1.5 seconds, then finishes in the background and fills the cache); if the
+list can't be had, leaktest runs without it and tries again ten minutes later. iCloud Private Relay isn't
+named: its list of egress ranges is too big to fetch for this.
 
 ### DNS leak test server (dnsleak-server/)
 
@@ -631,7 +713,7 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   (`/github.com`) redirects to its DNS page. Invalid lookups (`/whois/not-a-domain!`) show the error
   in the terminal instead of raw JSON. None of these pages are indexed by search engines.
 - Inside the terminal, every lookup updates the address bar, Back/Forward replay results, ASNs and
-  prefixes are clickable, and the `share` command copies the current link. Prefixes on ASN pages
+  prefixes are clickable, and the `share` command copies the current link (after `leaktest`, a link to the grade: see "Shared results"). Prefixes on ASN pages
   open the subnet calculator (`/cidr/<prefix>`), which makes no outside calls, so crawlers following
   them don't spend the IPinfo budget.
 - `/robots.txt` and `/sitemap.xml` are generated. Add popular pages to `SITEMAP_PATHS` in
@@ -647,7 +729,7 @@ Network data comes from [RIPEstat](https://stat.ripe.net/) (free, no key). Resul
 - **Homepage section:** plain HTML below the terminal (in `public/index.html`) explains ipterm and links to
   popular lookups and the guides, so search engines see real text and links. Clicking a lookup there runs it
   in the terminal.
-- **Share image:** `public/og.png` (1200×630) is used when any page is shared.
+- **Share image:** `public/og.png` (1200×630) is used when any page is shared, except a shared leak test result, which uses its grade's `public/og-leak-<a-f>.png` (made by `tools/build_og_leak.mjs`).
 - **Placeholders:** static pages use `%ORIGIN%`, which the Worker replaces with your site's address.
 - **Sitemap:** generated at `/sitemap.xml` from `SITEMAP_PATHS` in `src/worker.js` (guides, router addresses,
   public DNS resolvers, major networks and the most searched port pages).
@@ -728,7 +810,7 @@ headers from `public/_headers`. A first visit costs 1 Worker request (the homepa
 address, so the terminal doesn't call the API) and each further lookup or page 1, so the free plan's 100,000
 requests a day covers up to about 100,000 visits. Every curl call (`/help`, `/asn`, `/8.8.8.8/org`, a
 `?format=text` lookup) is one request too; `/openapi.json` and `/llms.txt` are not. A `leaktest` costs two (`/api/check`
-and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
+and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one; its `/cdn-cgi/trace` read and a shared result page's images are free. A shared result page (`/leaktest/r/<code>`) is one request. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
 which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
 requests. `/me`, `/line` and `/expect/...` are one request each, with no other cost: no subrequest, no Durable
 Object call, no rate-limiter call.
@@ -743,6 +825,7 @@ so it doesn't count against the limit. Watch usage under **Workers & Pages → i
 | Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them | `[[ratelimits]]` in `wrangler.toml` | Edit `limit` (period must be 10 or 60 seconds) |
 | Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
 | DNS leak test: `/api/dnsleak` only from the ipterm page or a command-line tool, well-formed tokens only, rate limited; the VPS's API needs the `DNSLEAK_KEY` secret (compared in constant time), listens on 127.0.0.1 behind Caddy, hands each token's resolvers over once and forgets them; non-public resolver addresses never go to IPinfo | `dnsleakRoute()` in `src/worker.js`, `dnsleak-server/` | See "DNS leak test server" |
+| Shared leak test results: the code is made in the browser and holds only the grade and per-check flags (no IP, provider, location or resolver); the Worker decodes it strictly (a letter that doesn't match its checks is a 404); the page never runs the test, and isn't indexed | `public/leakgrade.js`, `leakShareRoute()` in `src/worker.js` | See "Shared results" |
 | Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
 | Plain-text answers (`?format=text`, one-value endpoints, `/line`, `/expect`, the `/me` card) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal. The `/me` card's only escape sequences are its own colors | `plain()` in `src/worker.js`, `meRoute()` | |
 | Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |

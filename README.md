@@ -62,7 +62,7 @@ its own page to share (`ipterm.net/8.8.8.8`, `ipterm.net/AS13335`, `ipterm.net/d
 | Command | What it does |
 | --- | --- |
 | `whoami` | your IP, network and approximate location |
-| `leaktest` | a VPN and DNS leak test: which DNS servers look up sites for you, WebRTC and IPv6 leaks, your time zone, VPN detection |
+| `leaktest` | a VPN and DNS leak test, graded A to F on leaks only: which DNS servers look up sites for you, WebRTC and IPv6 leaks, your time zone, VPN detection (Cloudflare WARP and Tor by name). `share` copies an IP-free link to the grade |
 | `lookup <ip, domain or ASN>` | owner, network and location of any address; a domain's DNS records |
 | `dig <name> [type]` | one DNS record type, with TTLs |
 | `whois <ip, ASN or domain>` | the registry record, over RDAP |
