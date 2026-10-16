@@ -259,7 +259,7 @@ Edit `public/sponsors.json` and run `npx wrangler deploy` to change it:
     {
       "text": "Hide your real IP with ExampleVPN: 3 months free",
       "url": "https://example.com/?ref=ipterm",
-      "on": ["whoami", "ip"],
+      "on": ["check"],
       "weight": 2
     }
   ]

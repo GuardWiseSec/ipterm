@@ -5,7 +5,7 @@
     {
       "text": "Every site you visit sees this IP. Hide it with Proton VPN, from the team behind Proton Mail.",
       "url": "https://go.getproton.me/aff_c?offer_id=26&aff_id=20826",
-      "on": ["whoami", "check"],
+      "on": ["check"],
       "weight": 1
     }
   ]
