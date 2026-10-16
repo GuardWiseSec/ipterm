@@ -802,6 +802,7 @@
   const [NOT_TESTED, PASS, LEAKED] = [0, 1, 2];        // a graded check's flag, as in leakgrade.js
   const GRADED = ['dns', 'webrtc', 'ipv6', 'tz'];
   let lastLeak = null;                                  // the previous run in this tab, for the compare
+  let vpnSeen = false;                                  // a run in this tab found a VPN: no VPN offer after that
   let leakCode = null;                                  // the latest run's share code ('' = nothing to share)
 
   // DNS leak test: look up a few random, single-use names under the test zone (/api/check says which).
@@ -1097,8 +1098,12 @@
       ips: known, asns: new Set([d.asn, otherInfo && !otherInfo.error ? otherInfo.asn : null].filter(Boolean).map(up)), dnsAsns: new Set(dnsAsns) };
     if (lastLeak) await compareLeaks(lastLeak, run);
     lastLeak = run;
+    // The VPN offer follows a no-VPN verdict only, and not even that once this tab has seen a VPN on: someone
+    // who turned theirs off to compare already has one. (Memory only, like the compare: a reload forgets it.)
+    const offer = !vpn && !vpnSeen;
+    vpnSeen = vpnSeen || vpn;
 
-    if (!vpn) await sponsor('check');            // only after a no-VPN verdict: never after a LEAK on a VPN, or any run on one
+    if (offer) await sponsor('check');
     next(['leaktest', 'leaktest', n ? 'run it again after a fix, to compare' : 'turn your VPN on or off, then run it again to compare'],
       ['share', 'share', leakCode ? 'copy a link to your grade (no IP address or location in it)' : 'copy a link to this check, so others can run it'],
       ['man leaktest', 'man leaktest', 'what each check means and how the grade works'], ['whoami', 'whoami', 'your IP, network and location']);

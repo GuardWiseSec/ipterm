@@ -507,8 +507,9 @@ on, with the "if you use a VPN" caveat. DNS doesn't: without a VPN's network the
 the resolvers with.) Nothing is stored. The visitor's own IP is sent to IPinfo only when they run the
 check (it uses the Core daily budget), and the privacy policy says so. When no VPN is detected, the
 verdict is always followed by the sponsored line (any sponsor with `"check"` in its `on` list in
-`sponsors.json`, currently Proton VPN). A run that detects a VPN never shows it, including a second run
-after the visitor turned a VPN on, and a DNS LEAK only happens on a VPN, so it never brings the line.
+`sponsors.json`, currently Proton VPN). A run that detects a VPN never shows it, and neither does any later
+run in the same tab: someone who turns their VPN off to compare already has one. (That's kept in memory with
+the last result, so a reload forgets it.) A DNS LEAK only happens on a VPN, so it never brings the line.
 
 #### The grade
 
@@ -768,7 +769,7 @@ Edit `public/sponsors.json` and run `npx wrangler deploy` to change it:
 
 Targeting by result type works without tracking: a VPN offer fits `check`, a hosting offer fits `asn`.
 `whoami` has no VPN signal, so a VPN offer on `whoami` is also shown to visitors who are already on a VPN;
-`check` only appears when leaktest finds no VPN.
+`check` only appears when leaktest finds no VPN, and not after an earlier run in the same tab found one.
 Affiliate programs (VPNs, hosting, dev tools) and direct sponsors both work: put the referral link in `url`.
 In the US, the FTC requires affiliate and sponsored links to be disclosed; the `sponsored` tag does that.
 
