@@ -7,7 +7,11 @@ A terminal-style IP lookup site that runs on a single Cloudflare Worker.
   [Natural Earth](https://www.naturalearthdata.com/), public domain, via world-atlas)
 - Fonts: `public/fonts/` (self-hosted, SIL Open Font License, licenses included)
 - The API, routing and security headers: `src/worker.js`
+- The `curl ipterm.net/me` card: `src/me.js`, with its world map in `src/landmask.js` (generated, see "The map")
 - Settings: `wrangler.toml`
+- Scripts: `tools/` (deploy, land mask, guides, link-preview checks)
+
+Open source under the MIT license (`LICENSE`); the fonts and map data keep their own licenses (see "License").
 
 ## Deploy
 
@@ -16,12 +20,27 @@ You need Node 18+ and a free Cloudflare account.
 ```sh
 npm install
 npx wrangler login
-npx wrangler deploy
+npm run deploy
 ```
 
 Wrangler prints your URL, something like `https://ipterm.<you>.workers.dev`.
 To use your own domain, add it under the Worker's **Settings → Domains & Routes**
 in the Cloudflare dashboard.
+
+**Which code is running.** `npm run deploy` runs `tools/deploy.mjs`, which calls `wrangler deploy --tag <git short SHA>`
+(plain Node, no shell substitution, so it works the same in PowerShell, cmd and sh). The Worker reads the tag back
+through the `CF_VERSION_METADATA` binding (`[version_metadata]` in `wrangler.toml`) and shows it as "the code we deploy:
+3b77978" in the page footer, at the end of `about` and in `/help`. Set `SOURCE_URL` in `wrangler.toml` to the
+repository's address and the SHA links to that commit (`<SOURCE_URL>/commit/<sha>`), so anyone can read the exact
+code behind the site.
+
+- It refuses to deploy while `src/`, `public/`, `wrangler.toml` or `package.json` differ from the commit (untracked
+  files there count too), since the SHA would then be wrong. `npm run deploy -- --dirty` deploys anyway, tagged
+  `<sha>-dirty`.
+- It warns when the commit isn't on any remote branch yet: the footer's link only works once it's pushed.
+- Anything after `--` goes to `wrangler deploy` (`npm run deploy -- --dry-run`). The version message is the commit's
+  subject line unless you pass `--message`.
+- A plain `npx wrangler deploy` still works; the version just has no tag, so no SHA is shown.
 
 ### Recommended: add a free IPinfo token
 
@@ -181,6 +200,25 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 
 Lookups of other IPs are cached at the edge for six hours.
 
+## Self-hosting
+
+ipterm is MIT-licensed, so you can run your own copy. Follow "Deploy" above, then:
+
+1. In `wrangler.toml`, set `SELF_HOSTED = "true"`. Every page then carries `noindex` (an `X-Robots-Tag` header on
+   everything the Worker answers, and a robots meta tag in the pages), `/sitemap.xml` is empty, `public/sponsors.json`
+   is ignored so no sponsored line appears, and the footer, `about` and `/help` say the site is a copy of ipterm,
+   not ipterm.net. Copies shouldn't compete with ipterm.net in search or carry its affiliate links.
+2. Set `SOURCE_URL` to your fork (or leave it empty), so the footer links the code you actually run.
+3. Change the two `namespace_id`s under `[[ratelimits]]` if your account already uses 1001 or 1002.
+4. Edit what names ipterm.net: the contact address in `public/privacy.html` (and anything in the policy your copy
+   does differently) and the URLs in `public/openapi.json` and `public/llms.txt`. Canonical and share links use your
+   own address automatically.
+5. Optional: `npx wrangler secret put IPINFO_TOKEN` (and `PROXYCHECK_KEY`, `STATUS_KEY`), as described above. Your
+   copy uses your own IPinfo and proxycheck.io allowances, and keeps IPinfo's attribution in the footer.
+
+Everything else (the budgets, the rate limits, the CSP) works the same. `workers_dev = false` means the copy only
+answers on a custom domain; set it to `true` to try it on `*.workers.dev` first.
+
 ### The map
 
 Each result with a location gets a dot-matrix map drawn on a canvas, with no map service involved.
@@ -192,6 +230,17 @@ It marks the reported point and draws a ring for the uncertainty:
 
 Change the 50 km default with `CITY_KM` near the top of the map section in `public/app.js`.
 
+**The command-line map** (`curl ipterm.net/me`) is drawn with Braille characters from `src/landmask.js`: a 1-degree
+land grid (360 × 180 bits, base64) made from the same `public/land.js` outlines. There's no build step, so the
+generated file is checked in. After changing `public/land.js`, regenerate it and commit both:
+
+```sh
+npm run landmask        # or: node tools/build_landmask.mjs
+```
+
+The generator unwraps outlines that cross the 180° meridian before filling them (even-odd, like the page): Eurasia's
+outline jumps from 180° to -180° and back, and filled as it is that flips land and sea between 65°N and 69°N.
+
 Private, loopback, CGNAT and documentation ranges are detected in the browser and never hit the API.
 
 ## Routes
@@ -200,6 +249,7 @@ Every IP and network has its own address. Browsers get a full page; curl and scr
 
 ```sh
 curl https://your-domain              # your IP as plain text
+curl https://your-domain/me           # your IP, network and place as a card with a world map
 curl https://your-domain/json         # your details as JSON
 curl https://your-domain/8.8.8.8      # any IP as JSON
 curl https://your-domain/AS13335      # any network (ASN) as JSON
@@ -236,7 +286,19 @@ proxycheck.io's allowance, however hard a script hits them. `city` and `tz` for 
 with a short explanation, since Lite has country and network only. Private addresses get HTTP 400.
 
 A missing value is an empty line with HTTP 404, so `curl -fs ipterm.net/city` exits non-zero and
-`$(curl -s ...)` is empty. Because a second line would break `$(curl ...)`, the IPinfo credit for these rides in
+`$(curl -s ...)` is empty.
+
+**Your own address as a card, a line or a check.** Also from `request.cf` only: no outside call, no reverse DNS, no
+rate limit, and every value passes through `plain()` first.
+
+| Path | What it gives |
+| --- | --- |
+| `/me` | A card: IP, network, city/region/country, time zone with the local time, and the Cloudflare data center, under a Braille world map with your approximate location lit (`src/me.js`). ANSI colors for command-line clients (`CLI_UA`); `?color=0` turns them off and `?color=1` on for anything else. `?w=<columns>` sets the width, frame included (32 to 120, default 64; `curl "ipterm.net/me?w=$COLUMNS"` fits the terminal). `?redact` replaces the IP with x's for screenshots. Browsers are redirected to `/`, whose terminal shows the same. Sent `private, no-store` |
+| `/line` | `203.0.113.4 AS64500 Example ISP · US · EWR`: IP, AS number, network name, country code and data center, for shell prompts and tmux status bars. Parts that aren't known are left out |
+| `/expect/<ASN or cc>` | HTTP 200 and the value when the request comes from that network (`AS13335`, or `13335`) or country (`CH`; `T1` is Tor), 412 with a line saying what it came from when it doesn't. Up to 10, comma-separated, any one matching: `/expect/AS13335,AS209242`. A malformed value is 400. Meant for kill switches: `curl -fs ipterm.net/expect/AS13335 \|\| pkill -f my-private-job` |
+
+The map's location is Cloudflare's guess for the address, usually the provider's hub; the card says so under the map.
+ Because a second line would break `$(curl ...)`, the IPinfo credit for these rides in
 an `x-attribution` response header instead (it is in `/help`, `/api`, the OpenAPI file and `llms.txt` too).
 
 **Aligned text instead of JSON:** add `?format=text` to `/`, `/json`, `/<ip>`, `/AS<number>`, `/dns/...`,
@@ -621,7 +683,8 @@ address, so the terminal doesn't call the API) and each further lookup or page 1
 requests a day covers up to about 100,000 visits. Every curl call (`/help`, `/asn`, `/8.8.8.8/org`, a
 `?format=text` lookup) is one request too; `/openapi.json` and `/llms.txt` are not. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
 which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
-requests.
+requests. `/me`, `/line` and `/expect/...` are one request each, with no other cost: no subrequest, no Durable
+Object call, no rate-limiter call.
 
 **If you add a new static file** (an image, a script, like `cidr.js` was), add a `"!/<file>"` line to `run_worker_first`
 so it doesn't count against the limit. Watch usage under **Workers & Pages → ipterm → Metrics**.
@@ -717,7 +780,7 @@ allows (`notOlderThan` is how many seconds back you can query).
 | Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them | `[[ratelimits]]` in `wrangler.toml` | Edit `limit` (period must be 10 or 60 seconds) |
 | Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
 | Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
-| Plain-text answers (`?format=text`, one-value endpoints) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal | `plain()` in `src/worker.js` | |
+| Plain-text answers (`?format=text`, one-value endpoints, `/line`, `/expect`, the `/me` card) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal. The `/me` card's only escape sequences are its own colors | `plain()` in `src/worker.js`, `meRoute()` | |
 | Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
 | The mail check's one outside fetch, the MTA-STS policy, goes only to `https://mta-sts.<domain>/.well-known/mta-sts.txt` for a validated domain name: no redirects followed, 5-second limit, 64 KB cap. Policy lines, report addresses and logo links are checked before use (host names, plain emails, https URLs only) | `stsPolicy()`, `parseSts()`, `reportUris()`, `httpsUrl()` in `src/worker.js` | |
 | Cross-site browser access (CORS) off by default. Only the static `/openapi.json` and `/llms.txt` allow any origin | `PUBLIC_API` in `wrangler.toml`; `public/_headers` for the two documents | Set to `"true"` to offer a public browser API |
@@ -764,6 +827,13 @@ it needs Cloudflare's edge, which answers `/cdn-cgi/trace` on the deployed site.
 your address as `127.0.0.1` locally, so it answers "not tested". `wrangler dev` passes a
 `CF-Connecting-IP` header through (Cloudflare's network replaces it), so sending your own public address
 in it exercises the whole check locally.
+
+## License
+
+The code is MIT-licensed (`LICENSE`). If you'd rather it name you, change "the ipterm authors" there. Other parts
+keep their own terms: the fonts in `public/fonts/` are under the SIL Open Font License (license files alongside),
+the map outlines in `public/land.js` (and the land mask made from them) are from Natural Earth, public domain, and
+IPinfo's data comes with its own attribution condition (see "Recommended: add a free IPinfo token").
 
 ## Next steps worth considering
 

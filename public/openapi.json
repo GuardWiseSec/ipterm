@@ -54,6 +54,43 @@
         "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/Upstream" } }
       }
     },
+    "/me": {
+      "get": {
+        "tags": ["you"], "operationId": "myCard", "summary": "A terminal card for your own address, with a Braille world map",
+        "description": "Your IP, network (AS number and name), city, region and country, time zone (with the local time) and the Cloudflare data center that answered, under a small world map with your approximate location lit. From Cloudflare's edge only: no outside call, no reverse DNS, and it doesn't count toward the rate limit. ANSI colors by default for command-line clients (curl, wget, HTTPie, PowerShell). Browsers are redirected to the terminal page (/).",
+        "parameters": [
+          { "name": "w", "in": "query", "schema": { "type": "integer", "minimum": 32, "maximum": 120, "default": 64 }, "description": "Width in columns, frame included; values outside 32 to 120 are brought within them. `curl \"ipterm.net/me?w=$COLUMNS\"` fits the terminal." },
+          { "name": "color", "in": "query", "schema": { "type": "string", "enum": ["0", "1"] }, "description": "0 for no ANSI colors, 1 to force them. Default: on for command-line clients, off for other HTTP clients." },
+          { "name": "redact", "in": "query", "allowEmptyValue": true, "schema": { "type": "string" }, "description": "Present (`?redact`): the IP address is replaced with x's, for screenshots. The rest of the card is unchanged." }
+        ],
+        "responses": {
+          "200": { "description": "The card: about 20 lines of UTF-8 text (box drawing and Braille characters).", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "302": { "description": "Browsers (Accept: text/html) are sent to /." }
+        }
+      }
+    },
+    "/line": {
+      "get": {
+        "tags": ["you"], "operationId": "myLine", "summary": "Your IP, network, country and data center on one line",
+        "description": "For shell prompts and tmux status bars. From Cloudflare's edge only: no outside call, no rate limit. Parts that aren't known are left out.",
+        "responses": { "200": { "description": "One line.", "content": { "text/plain": { "schema": { "type": "string" }, "example": "203.0.113.4 AS64500 Example ISP · US · EWR\n" } } } }
+      }
+    },
+    "/expect/{values}": {
+      "get": {
+        "tags": ["you"], "operationId": "expectNetwork", "summary": "200 if your address is on the given network or in the given country, 412 if not",
+        "description": "For scripts that must stop when a VPN drops: `curl -fs ipterm.net/expect/AS13335 || <stop something>`. Compared with Cloudflare's own data for the request (as /asn and /cc), so there is no outside call and no rate limit.",
+        "parameters": [
+          { "name": "values", "in": "path", "required": true, "schema": { "type": "string" }, "examples": { "asn": { "value": "AS13335" }, "country": { "value": "CH" }, "either": { "value": "AS13335,AS209242" } },
+            "description": "An AS number (AS13335, or just 13335) or a two-letter country code (ISO 3166-1; Cloudflare uses T1 for Tor), or up to 10 of them separated by commas: any one matching is enough. Case doesn't matter." }
+        ],
+        "responses": {
+          "200": { "description": "A match: the value that matched, in canonical form.", "content": { "text/plain": { "schema": { "type": "string" }, "example": "AS13335\n" } } },
+          "400": { "description": "Not an AS number or country code, or more than 10.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "412": { "description": "No match. The line says what the request came from.", "content": { "text/plain": { "schema": { "type": "string" }, "example": "no match: expected AS13335, but this request came from AS7922 in US\n" } } }
+        }
+      }
+    },
     "/{ip}": {
       "get": {
         "tags": ["lookup"], "operationId": "lookupIp", "summary": "Owner, network and location of any IPv4 or IPv6 address",

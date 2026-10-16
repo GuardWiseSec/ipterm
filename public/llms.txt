@@ -18,6 +18,9 @@ IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Regis
 - [Your IP](https://ipterm.net/ip): the address as plain text (`curl ipterm.net` gives the same)
 - [Your details](https://ipterm.net/json): IP, reverse DNS name, network, city, region, country, coordinates, time zone and Cloudflare data center as JSON
 - One value each, as plain text: [/asn](https://ipterm.net/asn), [/org](https://ipterm.net/org), [/cc](https://ipterm.net/cc) (country code), [/city](https://ipterm.net/city), [/tz](https://ipterm.net/tz) (time zone), [/colo](https://ipterm.net/colo) (Cloudflare data center), [/hostname](https://ipterm.net/hostname) (reverse DNS)
+- [Card](https://ipterm.net/me): `curl ipterm.net/me` draws IP, network, location, time zone and data center under a Braille world map, as text with ANSI colors for terminals. `?w=<columns>` (32 to 120) sets the width, `?color=0` drops the colors, `?redact` hides the IP. Meant for people at a terminal; use /json in code
+- [One line](https://ipterm.net/line): IP, AS number, network name, country code and data center on one line (`203.0.113.4 AS64500 Example ISP · US · EWR`), for shell prompts and status bars
+- [Expect](https://ipterm.net/expect/AS13335): `/expect/<AS number or country code>` (or several, comma-separated) answers HTTP 200 with the value when the caller's address matches and 412 when it doesn't, so `curl -fs ipterm.net/expect/AS13335 || <stop something>` works as a VPN kill switch. No outside call and no rate limit for any of these three
 
 ## Any address or network
 
