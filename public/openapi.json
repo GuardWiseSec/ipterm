@@ -3,8 +3,8 @@
   "info": {
     "title": "ipterm",
     "version": "1.0.0",
-    "summary": "IP address, network (ASN), DNS, registry (whois) and subnet lookups for curl and scripts.",
-    "description": "No key and no sign-up. Command-line clients (curl, wget, HTTPie, PowerShell...) and scripts get JSON; browsers get an HTML page at the same address, so send `?format=json` from a browser-like client to be sure of JSON. Add `?format=text` to any lookup for aligned key/value lines instead of JSON (quote the URL in a shell). One-value endpoints answer with a single line of plain text; a missing value is an empty line with HTTP 404. Uncached lookups are limited to 30 a minute per address (IPv6: per /64), after which the answer is HTTP 429 with a Retry-After header. No cookies, no tracking, and nothing about callers is stored (https://ipterm.net/privacy). Plain-text reference: `curl ipterm.net/help`.\n\nIP address data powered by IPinfo (https://ipinfo.io), used under CC BY-SA 4.0. Networks: RIPEstat. Registry records: RDAP from the regional internet registries and domain registries. DNS: Cloudflare's public resolver (1.1.1.1).",
+    "summary": "IP address, network (ASN), DNS, email security (SPF, DMARC, DKIM), registry (whois) and subnet lookups for curl and scripts.",
+    "description": "No key and no sign-up. Command-line clients (curl, wget, HTTPie, PowerShell...) and scripts get JSON; browsers get an HTML page at the same address, so send `?format=json` from a browser-like client to be sure of JSON. Add `?format=text` to any lookup for aligned key/value lines instead of JSON (quote the URL in a shell). One-value endpoints answer with a single line of plain text; a missing value is an empty line with HTTP 404. Uncached lookups are limited to 30 a minute per address (IPv6: per /64), after which the answer is HTTP 429 with a Retry-After header. No cookies, no tracking, and nothing about callers is stored (https://ipterm.net/privacy). Plain-text reference: `curl ipterm.net/help`.\n\nIP address data powered by IPinfo (https://ipinfo.io), used under CC BY-SA 4.0. Networks: RIPEstat. Registry records: RDAP from the regional internet registries and domain registries. DNS and mail checks: Cloudflare's public resolver (1.1.1.1), plus each domain's own MTA-STS policy file.",
     "contact": { "email": "contact@ipterm.net", "url": "https://ipterm.net/api" }
   },
   "servers": [{ "url": "https://ipterm.net" }],
@@ -12,7 +12,7 @@
     { "name": "you", "description": "Your own address, from Cloudflare's edge (request.cf). No third-party lookup." },
     { "name": "port", "description": "Is a TCP port open on your own address? The server connects to the address the request comes from, never any other." },
     { "name": "lookup", "description": "Any public IP address or network." },
-    { "name": "tools", "description": "DNS, registry records (whois) and the subnet calculator." },
+    { "name": "tools", "description": "DNS, email security (mail), registry records (whois) and the subnet calculator." },
     { "name": "docs", "description": "Help and machine-readable descriptions." }
   ],
   "paths": {
@@ -118,6 +118,14 @@
         "responses": { "200": { "$ref": "#/components/responses/Dns" }, "400": { "$ref": "#/components/responses/BadRequest" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/Upstream" } }
       }
     },
+    "/mail/{domain}": {
+      "get": {
+        "tags": ["tools"], "operationId": "mail", "summary": "Email security check: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, graded A to F",
+        "description": "Every finding is a line with a status (ok, warn, fail or info) and, for warn and fail, a fix. The grade counts them: A no FAIL and no WARN; B no FAIL, one or two WARN; C one FAIL, or three or more WARN; D two FAIL; F three or more FAIL, no working SPF and no DMARC, or SPF that lets any server pass (+all). INFO never counts. SPF includes and redirects are followed to count DNS lookups against RFC 7208's limit of 10. DKIM selectors can't be listed, so the common ones are tried (google, selector1, selector2, default, k1, s1), plus the one named in ?dkim=; finding none is info. The MTA-STS policy is fetched from https://mta-sts.{domain}/.well-known/mta-sts.txt (redirects are not followed). A nonexistent domain answers 200 with status NXDOMAIN and grade null. Cached for five minutes.",
+        "parameters": [{ "$ref": "#/components/parameters/mailDomain" }, { "$ref": "#/components/parameters/dkim" }, { "$ref": "#/components/parameters/format" }],
+        "responses": { "200": { "$ref": "#/components/responses/Mail" }, "400": { "$ref": "#/components/responses/BadRequest" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/Upstream" } }
+      }
+    },
     "/whois/{query}": {
       "get": {
         "tags": ["tools"], "operationId": "whois", "summary": "Registry record (RDAP) for an IP address, AS number or domain",
@@ -174,6 +182,7 @@
     },
     "/api/asn": { "get": { "tags": ["lookup"], "operationId": "apiAsn", "summary": "As /AS{number}, always JSON", "parameters": [{ "name": "asn", "in": "query", "required": true, "schema": { "type": "string" }, "example": "AS13335" }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /AS{number}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Asn" } } } } } } },
     "/api/dns": { "get": { "tags": ["tools"], "operationId": "apiDns", "summary": "As /dns/{name}[/{type}], always JSON", "parameters": [{ "name": "name", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "type", "in": "query", "schema": { "$ref": "#/components/schemas/DnsType" } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "$ref": "#/components/responses/Dns" } } } },
+    "/api/mail": { "get": { "tags": ["tools"], "operationId": "apiMail", "summary": "As /mail/{domain}, always JSON", "parameters": [{ "name": "domain", "in": "query", "required": true, "schema": { "type": "string" }, "example": "gmail.com" }, { "$ref": "#/components/parameters/dkim" }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "$ref": "#/components/responses/Mail" } } } },
     "/api/whois": { "get": { "tags": ["tools"], "operationId": "apiWhois", "summary": "As /whois/{query}, always JSON", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /whois/{query}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Whois" } } } } } } },
     "/api/cidr": { "get": { "tags": ["tools"], "operationId": "apiCidr", "summary": "As /cidr/{network}/{prefix}, always JSON; also accepts an address and netmask", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" }, "examples": { "cidr": { "value": "10.0.0.0/22" }, "netmask": { "value": "192.168.1.10 255.255.255.0" } } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /cidr/{network}/{prefix}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Cidr" } } } } } } },
     "/api/port": { "get": { "tags": ["port"], "operationId": "apiPort", "summary": "As /port/{n}, always JSON (same guards and limit)", "parameters": [{ "name": "n", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 1, "maximum": 65535 }, "example": 22 }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /port/{n}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PortCheck" } } } }, "400": { "$ref": "#/components/responses/BadRequest" }, "403": { "description": "Not a command-line client or a same-origin request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }, "429": { "description": "More than 10 port checks in a minute.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } } } },
@@ -199,6 +208,8 @@
       "format": { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["json", "text"] }, "description": "json: JSON even for browser-like clients. text: aligned key/value lines instead of JSON." },
       "formatText": { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["text"] }, "description": "text: your details as aligned key/value lines instead of the bare address." },
       "ip": { "name": "ip", "in": "path", "required": true, "schema": { "type": "string" }, "description": "IPv4 or IPv6 address", "examples": { "v4": { "value": "8.8.8.8" }, "v6": { "value": "2606:4700:4700::1111" } } },
+      "mailDomain": { "name": "domain", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Domain name (international names are converted to punycode)", "example": "gmail.com" },
+      "dkim": { "name": "dkim", "in": "query", "schema": { "type": "string" }, "description": "A DKIM selector to check as well as the common ones: the s= value in a message's DKIM-Signature header", "example": "selector1" },
       "dnsName": { "name": "name", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Domain name (international names are converted to punycode) or an IP address for reverse DNS", "example": "example.com" }
     },
     "responses": {
@@ -207,6 +218,7 @@
       "BadRequest": { "description": "Not a valid or not a public input.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
       "RateLimited": { "description": "More than 30 uncached lookups in a minute from your address.", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
       "Upstream": { "description": "A data source didn't respond. Try again in a moment.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
+      "Mail": { "description": "Mail check.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Mail" } }, "text/plain": { "schema": { "type": "string" } } } },
       "Dns": { "description": "DNS answer.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Dns" } }, "text/plain": { "schema": { "type": "string" } } } }
     },
     "schemas": {
@@ -276,6 +288,45 @@
           "cname": { "type": "array", "items": { "type": "string" } },
           "records": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "object", "properties": { "ttl": { "type": "integer" }, "value": { "type": "string", "description": "The record's data. For MX, the mail server, or \".\" for a null MX (RFC 7505: the domain accepts no mail)." }, "priority": { "type": "integer" } } } } },
           "hosting": { "type": "object", "properties": { "ip": { "type": "string" }, "asn": { "type": ["string", "null"] }, "org": { "type": ["string", "null"] }, "country": { "type": ["string", "null"] } } },
+          "source": { "type": "string", "const": "cloudflare-dns" }
+        }
+      },
+      "Mail": {
+        "type": "object",
+        "properties": {
+          "domain": { "type": "string" },
+          "status": { "type": "string", "enum": ["NOERROR", "NXDOMAIN", "SERVFAIL", "FORMERR", "NOTIMP", "REFUSED", "ERROR"], "description": "The resolver's answer to the domain's MX query; only NOERROR is graded" },
+          "grade": { "type": ["string", "null"], "enum": ["A", "B", "C", "D", "F", null] },
+          "counts": { "type": "object", "properties": { "ok": { "type": "integer" }, "warn": { "type": "integer" }, "fail": { "type": "integer" }, "info": { "type": "integer" } } },
+          "checks": { "type": "array", "items": { "type": "object", "required": ["check", "status", "text"], "properties": {
+            "check": { "type": "string", "enum": ["MX", "SPF", "DMARC", "DKIM", "MTA-STS", "TLS-RPT", "BIMI", "other"] },
+            "status": { "type": "string", "enum": ["ok", "warn", "fail", "info"] },
+            "text": { "type": "string" }, "fix": { "type": "string", "description": "On warn and fail only" } } } },
+          "selector": { "type": ["string", "null"], "description": "The DKIM selector named in ?dkim=" },
+          "nullMx": { "type": "boolean", "description": "The domain accepts no mail (RFC 7505)" },
+          "mx": { "type": "object", "properties": {
+            "records": { "type": "array", "items": { "type": "object", "properties": { "priority": { "type": ["integer", "null"] }, "host": { "type": "string", "description": "\".\" for a null MX" } } } },
+            "providers": { "type": "array", "items": { "type": "string" }, "description": "Recognized from the MX host names, e.g. Google Workspace, Microsoft 365" },
+            "mixedNull": { "type": "boolean" } } },
+          "spf": { "type": "object", "properties": {
+            "records": { "type": "integer" }, "record": { "type": ["string", "null"] }, "all": { "type": ["string", "null"], "enum": ["+all", "-all", "~all", "?all", null] },
+            "redirect": { "type": ["string", "null"] }, "lookups": { "type": "integer" }, "counted": { "type": "boolean", "description": "false: counting stopped once past the limit" },
+            "overLimit": { "type": "boolean" }, "includes": { "type": "array", "items": { "type": "string" } },
+            "errors": { "type": "array", "items": { "type": "object", "properties": { "text": { "type": "string" }, "fix": { "type": "string" } } } } } },
+          "dmarc": { "type": ["object", "null"], "properties": {
+            "record": { "type": "string" }, "policy": { "type": ["string", "null"], "enum": ["none", "quarantine", "reject", null] }, "subdomainPolicy": { "type": ["string", "null"] },
+            "pct": { "type": ["integer", "null"] }, "rua": { "type": "array", "items": { "type": "string" } }, "ruf": { "type": "array", "items": { "type": "string" } },
+            "from": { "type": "string", "description": "The domain whose _dmarc record applies" }, "inherited": { "type": "boolean" } } },
+          "dkim": { "type": ["object", "null"], "properties": {
+            "selectors": { "type": "array", "items": { "type": "string" } },
+            "keys": { "type": "array", "items": { "type": "object", "properties": { "selector": { "type": "string" }, "keyType": { "type": "string" }, "bits": { "type": ["integer", "null"] }, "revoked": { "type": "boolean" }, "testing": { "type": "boolean" } } } } } },
+          "mtaSts": { "type": ["object", "null"], "properties": {
+            "record": { "type": "string" }, "id": { "type": ["string", "null"] },
+            "policy": { "type": ["object", "null"], "properties": { "url": { "type": "string" }, "error": { "type": "string" }, "mode": { "type": ["string", "null"] }, "mx": { "type": "array", "items": { "type": "string" } }, "maxAge": { "type": ["integer", "null"] } } } } },
+          "tlsRpt": { "type": ["object", "null"], "properties": { "record": { "type": "string" }, "rua": { "type": "array", "items": { "type": "string" } } } },
+          "bimi": { "type": ["object", "null"], "properties": { "record": { "type": "string" }, "logo": { "type": ["string", "null"] }, "vmc": { "type": ["string", "null"] } } },
+          "unread": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Records the resolver couldn't read (e.g. SPF: SERVFAIL): reported, not graded as missing" },
+          "subrequests": { "type": "integer", "description": "DNS queries and fetches the check took" },
           "source": { "type": "string", "const": "cloudflare-dns" }
         }
       },

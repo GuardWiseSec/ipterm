@@ -81,7 +81,7 @@ is paused for a minute; if Core refuses the token or quota, it's paused for ten.
 raise the number to about your monthly allowance divided by 31.
 
 Only fresh lookups count: lookups of other addresses, and `leaktest`'s check of the visitor's own address. Cached results (six hours), `whoami` (your visitors'
-own location comes from Cloudflare), DNS, whois, the subnet calculator and the command line's one-value
+own location comes from Cloudflare), DNS, mail checks, whois, the subnet calculator and the command line's one-value
 endpoints (`/asn`, `/8.8.8.8/org` and the rest, which use IPinfo Lite) never use the quota. If
 the monthly quota runs out anyway, or the token is refused, or the counter can't be reached,
 lookups fall back to IPinfo Lite rather than failing.
@@ -177,6 +177,7 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | Other IPs: city, coordinates, time zone, connection type (optional) | IPinfo Core, with `IPINFO_PLAN = "core"` | Paid, monthly quota; falls back to Lite |
 | VPN / proxy / Tor second opinion, VPN service name (optional) | proxycheck.io, with the `PROXYCHECK_KEY` secret | Free, 1,000 a day; falls back to IPinfo alone |
 | Reverse DNS (hostname) | Cloudflare DNS-over-HTTPS | Free |
+| Mail checks: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI | Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file | Free |
 
 Lookups of other IPs are cached at the edge for six hours.
 
@@ -202,6 +203,7 @@ curl https://your-domain              # your IP as plain text
 curl https://your-domain/json         # your details as JSON
 curl https://your-domain/8.8.8.8      # any IP as JSON
 curl https://your-domain/AS13335      # any network (ASN) as JSON
+curl https://your-domain/mail/gmail.com  # a domain's email security (SPF, DMARC, DKIM), graded
 curl -4 https://your-domain/port/22   # is TCP port 22 open on your own IP? (see "Port checker")
 curl https://your-domain/help         # the command-line reference as plain text
 ```
@@ -238,7 +240,7 @@ A missing value is an empty line with HTTP 404, so `curl -fs ipterm.net/city` ex
 an `x-attribution` response header instead (it is in `/help`, `/api`, the OpenAPI file and `llms.txt` too).
 
 **Aligned text instead of JSON:** add `?format=text` to `/`, `/json`, `/<ip>`, `/AS<number>`, `/dns/...`,
-`/whois/...`, `/cidr/...` (and their `/api/...` forms) for key/value lines like the terminal draws.
+`/mail/...`, `/whois/...`, `/cidr/...` (and their `/api/...` forms) for key/value lines like the terminal draws.
 Browsers get the text too. Results that include IPinfo data end with `IP address data powered by IPinfo
 (https://ipinfo.io)`, as IPinfo's free-data terms ask. JSON stays the default for command-line clients,
 and `curl ipterm.net` still prints the bare address. Shells such as zsh treat `?` as a wildcard, so the
@@ -291,6 +293,72 @@ reverse lookup. A null MX (`0 .`, RFC 7505: the domain accepts no mail, as on ex
 `/dns/<domain>/<TYPE>`; curl gets JSON. Answers come from
 Cloudflare's public resolver (1.1.1.1) and are cached for five minutes. International domain names are
 converted to their punycode form automatically.
+
+A DNS result for a domain with MX records or an SPF record links to its mail check (a `mail check` row and the
+`next:` line in the terminal, a link on the `/dns/...` page), and so does a domain's whois `next:` line.
+
+### Email security check (mail)
+
+`mail gmail.com` in the terminal, `/mail/<domain>` as a page, `curl …/mail/gmail.com` for JSON (`?format=text` for
+aligned lines). It reads a domain's mail records through Cloudflare's resolver and grades them A to F:
+
+- **MX**: the mail servers, and the provider behind them when the host names say (Google Workspace, Microsoft 365,
+  Proofpoint, Fastmail …, `MAIL_PROVIDERS` in `src/worker.js`). A null MX (`0 .`, RFC 7505) means the domain accepts
+  no mail; see below.
+- **SPF**: exactly one `v=spf1` record. `include:` and `redirect=` are followed to count DNS lookups against RFC 7208's
+  limit of 10 (include, a, mx, ptr, exists and redirect each cost one, and so does everything inside an include).
+  Flags `+all` (anywhere it lets any server pass, including inside an include), `?all`, no `all`, `ptr`, syntax
+  errors, includes without an SPF record, and two or more records.
+- **DMARC**: the policy, `pct`, `sp`, `t=y` and the report addresses (`rua`). A subdomain without its own record
+  gets its organizational domain's (`sp=`, or `p=`): without a public-suffix list, ipterm asks up to three parent
+  names and takes the shortest one with a record, as DMARCbis's tree walk does.
+- **DKIM**: selectors can't be listed, so only `google`, `selector1`, `selector2`, `default`, `k1` and `s1` are
+  tried, plus one you name: `mail example.com --dkim <selector>` (or `?dkim=<selector>`), the `s=` value in a
+  message's DKIM-Signature header. A named selector is checked as well as the common ones, never instead, so naming
+  a good key can't hide a weak one. Not finding a key is INFO, not a failure. RSA key sizes are read from the key
+  itself (its modulus).
+- **MTA-STS**: the `_mta-sts` TXT record, then the policy file at `https://mta-sts.<domain>/.well-known/mta-sts.txt`,
+  matched against the MX hosts. That fetch is the only request that doesn't go to Cloudflare's resolver: HTTPS only,
+  to that exact host, redirects not followed (RFC 8461 forbids them), a 5-second limit and a 64 KB cap.
+- **TLS-RPT** (`_smtp._tls`) and **BIMI** (`default._bimi`): present or not, and where reports and the logo point.
+
+Every finding is a line marked OK, WARN, FAIL or INFO, with a `fix:` line under each WARN and FAIL, like
+`leaktest`'s. The grade counts them (`MAIL_GRADES` in `src/worker.js`; the same rubric is in `man mail` and on the
+`/mail` page):
+
+| Grade | When |
+| --- | --- |
+| A | no FAIL and no WARN |
+| B | no FAIL, one or two WARN |
+| C | one FAIL, or three or more WARN |
+| D | two FAIL |
+| F | three or more FAIL, or no working SPF and no DMARC (nothing stops anyone sending as the domain), or SPF that lets any server pass (`+all`) |
+
+INFO lines never count. What each check reports:
+
+| | FAIL | WARN | INFO |
+| --- | --- | --- | --- |
+| MX | a null MX beside other MX records | no MX records | |
+| SPF | no record; two or more; over 10 lookups; `+all` (also inside an include); syntax errors; an include or redirect with no SPF record | `?all` or no `all`; `ptr`; an include that didn't answer | macros (`%{…}`), counted but not followed |
+| DMARC | no record; two or more; no valid `p=` | `p=none`; `pct` below 100; `t=y`; `sp=none`; no `rua` | |
+| DKIM | | an RSA key under 2048 bits | no key at the selectors tried; a revoked key |
+| MTA-STS | two records or no `id`; the policy can't be fetched or is invalid; `mode: enforce` leaving out an MX host | `mode: testing` leaving out an MX host; `max_age` under a day; not served as `text/plain` | not set up; `mode: testing` or `none` |
+| TLS-RPT | | no record while MTA-STS is set up; no valid `rua`; two records | not set up |
+| BIMI | | a logo while DMARC isn't at quarantine or reject; no valid `l=` | no record; a declined logo (empty `l=`) |
+
+A domain with a null MX accepts no mail and, since nobody could bounce it, can't really send any either. Its
+SPF should be `v=spf1 -all` and its DMARC `p=reject` (anything weaker is a WARN, a missing record a FAIL, and a
+missing `rua` only INFO). DKIM, MTA-STS, TLS-RPT and BIMI don't apply and aren't checked. `example.com` is one.
+
+**Cost.** A fresh check makes about 12 to 22 fetches (6 record queries, the SPF includes, up to 3 DMARC parents,
+the policy fetch, 6 DKIM selectors) plus 4 to 6 cache reads and writes, which count toward the Workers limit of 50
+subrequests too. Each part has a budget, retries included: 22 fetches for the records, 7 for the common selectors
+and 2 for a named one, so even the worst case stays at 37.
+The records, the common selectors and a named selector are cached separately for five minutes, like DNS, so a new
+selector costs one query and can't be used to make ipterm fetch a domain's MTA-STS policy again and again. A fresh
+check counts as two or three of the visitor's 30 lookups a minute. When the resolver can't read a record
+(SERVFAIL, even after one retry), the line says so instead of calling it missing, and that answer is kept for a
+minute. No IPinfo or proxycheck.io budget is ever used.
 
 ### Registry records (whois)
 
@@ -417,8 +485,8 @@ shared by the page and the Worker, like `cidr.js`; add a port by adding a line t
   name (`PREVIEW_UA` in `src/worker.js`); curl, scripts and other clients still get JSON.
 - Private addresses like `/192.168.1.1` get a page explaining the range and how to reach a router,
   a popular search topic, without any upstream lookup.
-- `/whois`, `/dns` and `/cidr` on their own are landing pages for each tool (what it does, usage and
-  example links), and typing `whois`, `dig` or `cidr` with nothing after it shows the same thing.
+- `/whois`, `/dns`, `/mail` and `/cidr` on their own are landing pages for each tool (what it does, usage and
+  example links), and typing `whois`, `dig`, `mail` or `cidr` with nothing after it shows the same thing.
   `/api` is the API docs page (the terminal runs `api`; the plain-text reference stays in the HTML for
   visitors without JavaScript), and it is in the sitemap.
 - Addresses that don't exist get a 404 page in the terminal's style with a "did you mean" link when
@@ -627,6 +695,7 @@ allows (`notOlderThan` is how many seconds back you can query).
 | Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
 | Plain-text answers (`?format=text`, one-value endpoints) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal | `plain()` in `src/worker.js` | |
 | Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
+| The mail check's one outside fetch, the MTA-STS policy, goes only to `https://mta-sts.<domain>/.well-known/mta-sts.txt` for a validated domain name: no redirects followed, 5-second limit, 64 KB cap. Policy lines, report addresses and logo links are checked before use (host names, plain emails, https URLs only) | `stsPolicy()`, `parseSts()`, `reportUris()`, `httpsUrl()` in `src/worker.js` | |
 | Cross-site browser access (CORS) off by default. Only the static `/openapi.json` and `/llms.txt` allow any origin | `PUBLIC_API` in `wrangler.toml`; `public/_headers` for the two documents | Set to `"true"` to offer a public browser API |
 | Private, loopback, CGNAT, multicast and documentation addresses rejected before any upstream call | `nonPublicReason()` in `src/worker.js` | |
 | Strict Content-Security-Policy (no inline scripts or styles; the only outside host is ipify, for the visitor's other IP version), nosniff, no framing, HSTS, no referrer, locked-down browser permissions | `secure()` in `src/worker.js` | Loosen the CSP if you add ads or analytics |
