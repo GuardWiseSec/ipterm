@@ -588,13 +588,21 @@
     return out.join(' · ');
   }
 
-  // VPN / proxy verdict for a lookup. Only Core checks for it, and a clean result is not proof:
-  // VPN providers keep adding fresh addresses that no list knows yet. Matches vpnText() in worker.js.
-  function vpnKind(pc) { return pc && pc.anonymous ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy || pc.compromised ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor'; }
+  // VPN / proxy verdict for a lookup. Only Core and proxycheck.io check for it, and a clean result is
+  // not proof: VPN providers keep adding fresh addresses that no list knows yet. Matches worker.js.
+  // "yes" needs Core's flag or a specific proxycheck.io finding (VPN, proxy, Tor or a named service).
+  // proxycheck.io's own "anonymous" is a catch-all, also set on addresses that are none of those
+  // (Google Public DNS, 8.8.8.8), and "compromised" means seen performing attacks: alone, each gets
+  // a hedged line, and leaktest doesn't count them as a VPN.
+  const pcKnown = pc => !!(pc && pc.anonymous && (pc.vpn || pc.proxy || pc.tor || pc.operator));
+  const pcFlag = pc => (pc.compromised ? 'flagged by proxycheck.io as compromised (seen performing attacks)' : 'flagged as anonymizing by proxycheck.io') +
+    ', but not as a known VPN, proxy or Tor service';
+  const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
   function vpnText(d) {
     const core = d && d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = (d && d.privacy) || null;
     if (!core && !pc) return 'not checked (detailed data unavailable for this lookup)';
-    if ((core && core.anonymous) || (pc && pc.anonymous)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
+    if ((core && core.anonymous) || pcKnown(pc)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
+    if (pc && pc.anonymous) return pcFlag(pc);
     const hosting = (core && core.hosting) || d.asType === 'hosting' || (pc && pc.hosting);
     return 'not on known VPN or proxy lists' + (hosting
       ? ', but it is a hosting network, which VPN servers usually use'
@@ -788,17 +796,22 @@
 
     const net = d.network || {}, f = net.flags || {}, pc = net.privacy || null;
     const vpnKnown = net.source === 'ipinfo-core' || !!pc;
-    const anon = !!(f.anonymous || (pc && pc.anonymous));
+    const anon = !!(f.anonymous || pcKnown(pc));
+    // proxycheck.io's catch-all flag alone (see vpnText) doesn't say a VPN is on, so it doesn't count
+    // as one here. On a hosting network the hosting check below still counts it; anywhere else the
+    // check is unsure, and treats it like an address it couldn't classify.
+    const flagged = !anon && !!(pc && pc.anonymous);
     const vpn = !!(anon || f.hosting || net.asType === 'hosting' || (pc && pc.hosting));
     // If we can't tell whether a VPN is on, a mismatch might be a leak: flag it, with a caveat.
     // An unlisted IP isn't proof there's no VPN (new VPN servers are often unlisted), so those
     // lines keep the caveat too, just without the LEAK label.
     // A home or mobile provider's network is different: commercial VPN servers run in data centers,
     // so an unflagged address there means no VPN, and the lines below can say so plainly.
-    const homeNet = !vpn && vpnKnown && !!(net.asType === 'isp' || f.mobile || (pc && (pc.netType === 'residential' || pc.netType === 'wireless')));
+    const homeNet = !vpn && !flagged && vpnKnown && !!(net.asType === 'isp' || f.mobile || (pc && (pc.netType === 'residential' || pc.netType === 'wireless')));
     // Mismatches below still carry the caveat there: a VPN to your own home or office, or one using
     // home addresses, would look like a home connection too.
-    const strict = vpn || !vpnKnown, ifVpn = !vpn ? ' (a leak if you use a VPN)' : '';
+    const unsure = !vpnKnown || (flagged && !vpn);
+    const strict = vpn || unsure, ifVpn = !vpn ? ' (a leak if you use a VPN)' : '';
     const results = [];                         // [status, label, node or text]
     const add = (st, label, v, fix) => results.push([st, label, v, fix]);   // fix: shown under LEAK lines
     const ipLink = ip => cmdLink(ip, 'lookup ' + ip, '/' + ip);
@@ -811,7 +824,8 @@
     // 2. VPN / proxy detection
     if (!vpnKnown) add('info', 'VPN detection', "unavailable for this check, so the lines below can't tell whether you use a VPN");
     else if (anon) add('ok', 'VPN detection', `your IP is a known ${vpnKind(pc)} address${pc && pc.operator ? ' (' + pc.operator + ')' : ''}: sites see that, not your provider`);
-    else if (vpn) add('ok', 'VPN detection', 'your IP belongs to a hosting network, as VPN servers usually do');
+    else if (vpn) add('ok', 'VPN detection', 'your IP belongs to a hosting network, as VPN servers usually do' + (flagged ? ` (${pcFlag(pc)})` : ''));
+    else if (flagged) add('info', 'VPN detection', `your IP is ${pcFlag(pc)}, so this check can't tell whether you use a VPN. Without one, sites see your provider${d.org ? ' (' + d.org + ')' : ''} and rough location`);
     else if (homeNet) add('info', 'VPN detection', `no VPN service: your IP belongs to ${d.org || 'your internet provider'}, a home or mobile internet provider, so sites see your provider and rough location`);
     else add('info', 'VPN detection', `not on known VPN lists. Without a VPN, sites see your provider${d.org ? ' (' + d.org + ')' : ''} and rough location. If you are using one, it's a newer or unlisted server, and sites may not spot it either`);
 
@@ -852,7 +866,7 @@
     }
 
     const head = el('div', 'head');
-    head.append(el('span', 'hip', 'leaktest'), el('span', 'tag pub', 'privacy check'), el('span', 'tag', vpn ? 'vpn on' : homeNet ? 'no vpn' : vpnKnown ? 'no vpn detected' : 'vpn unknown'));
+    head.append(el('span', 'hip', 'leaktest'), el('span', 'tag pub', 'privacy check'), el('span', 'tag', vpn ? 'vpn on' : homeNet ? 'no vpn' : flagged ? 'vpn unclear' : vpnKnown ? 'no vpn detected' : 'vpn unknown'));
     out.appendChild(head);
     const STATUS = { ok: 'ok', warn: 'leak', info: 'info' };
     await kv(results.flatMap(([st, label, v, fix]) => {
@@ -860,7 +874,7 @@
       return st === 'warn' && fix ? [[label, x], ['', 'fix: ' + fix, 'plain']] : [[label, x]];
     }));
     const leaks = results.filter(r => r[0] === 'warn').length;
-    const verdict = leaks ? `${leaks} possible leak${leaks > 1 ? 's' : ''} found. The lines marked LEAK show what gives you away` + (vpnKnown ? '.' : ' if you use a VPN.')
+    const verdict = leaks ? `${leaks} possible leak${leaks > 1 ? 's' : ''} found. The lines marked LEAK show what gives you away` + (unsure ? ' if you use a VPN.' : '.')
       : vpn ? 'No leaks found: sites see your VPN, not you.'
       : homeNet ? "Nothing leaks beyond your IP address, but that address shows your provider and rough location. A VPN would hide them."
       : "Nothing leaks beyond your IP address. Without a VPN, that address still shows your provider and rough location; a VPN would hide it.";
@@ -1142,6 +1156,8 @@
     await renderDns(d, single);
   }
 
+  // An MX record pointing at "." is a null MX (RFC 7505): the domain accepts no mail. Matches worker.js.
+  const nullMx = r => r.value === '.' || r.value === '';
   async function renderDns(d, single) {
     const head = el('div', 'head');
     head.append(el('span', 'hip', (single ? `dig ${d.name} ${single}` : d.name)), el('span', 'tag pub', 'dns'));
@@ -1167,7 +1183,7 @@
       list.forEach((r, i) => {
         const f = frag();
         if (t === 'A' || t === 'AAAA') f.append(ipLink(r.value));
-        else if (t === 'MX') { f.append(`${r.priority}  `); f.append(nameLink(r.value)); }
+        else if (t === 'MX') { f.append(`${r.priority}  `); f.append(nullMx(r) ? '. (accepts no mail: null MX)' : nameLink(r.value)); }
         else if (t === 'NS' || t === 'CNAME' || t === 'PTR') f.append(nameLink(r.value));
         else if (t === 'SOA' && r.admin) f.append(`${r.value}  ${r.admin}  serial ${r.serial}`);
         else if (t === 'SRV' && r.port != null) { f.append(`${r.priority} ${r.weight} ${r.port}  `); f.append(nameLink(r.value)); }
@@ -1187,7 +1203,7 @@
     if (!parseIp(d.name) && !single) rows.push(['registration', cmdLink(`whois ${d.name}`, `whois ${d.name}`, `/whois/${d.name}`)]);
     await kv(rows);
     if (d.sample) line('Sample data with documentation addresses. The live version queries DNS directly.', 'sys');
-    const A = (R.A || []).map(r => r.value), MX = (R.MX || []).map(r => r.value), PTR = (R.PTR || []).map(r => r.value);
+    const A = (R.A || []).map(r => r.value), MX = (R.MX || []).filter(r => !nullMx(r)).map(r => r.value), PTR = (R.PTR || []).map(r => r.value);
     const share = live && !d.sample && ['share', 'share', 'copy a link to these records'];
     if (parseIp(d.name)) next([`lookup ${d.name}`, `lookup ${d.name}`, 'owner and approximate location'], [`whois ${d.name}`, `whois ${d.name}`, 'registry record'],
       PTR[0] && looksLikeDomain(PTR[0]) && [`dig ${PTR[0]}`, `dig ${PTR[0]}`, 'look the name up the other way']);
@@ -1197,7 +1213,7 @@
       [`dig ${d.name} SOA`, `dig ${d.name} SOA`, 'the zone: primary name server and serial'], share);
     announce(parseIp(d.name) ? `${d.name}: reverse DNS ${PTR[0] || 'none'}.`
       : single ? `${d.name} ${single}: ${(R[single] || []).length} record(s).`
-      : `${d.name}: ` + (A.length ? `resolves to ${A.slice(0, 2).join(', ')}` : 'no IPv4 address') + (MX.length ? `, mail by ${MX[0]}` : '') +
+      : `${d.name}: ` + (A.length ? `resolves to ${A.slice(0, 2).join(', ')}` : 'no IPv4 address') + (MX.length ? `, mail by ${MX[0]}` : R.MX && R.MX.length ? ', accepts no mail' : '') +
         (d.hosting && d.hosting.org ? `, hosted by ${d.hosting.org}` : '') + '.');
   }
 

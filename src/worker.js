@@ -437,7 +437,7 @@ function asnText(d) {
 
 function dnsText(d) {
   const single = d.types && d.types.length === 1 ? d.types[0] : null, R = d.records || {};
-  const val = (t, r) => (t === 'MX' ? `${r.priority} ${r.value}` : t === 'SOA' && r.admin ? `${r.value} ${r.admin} serial ${r.serial}`
+  const val = (t, r) => (t === 'MX' ? mxText(r) : t === 'SOA' && r.admin ? `${r.value} ${r.admin} serial ${r.serial}`
     : t === 'SRV' && r.port != null ? `${r.priority} ${r.weight} ${r.port} ${r.value}` : r.value) + (single && r.ttl != null ? `  (ttl ${r.ttl}s)` : '');
   const rows = [['name', d.name], ['status', d.status], ['alias of', (d.cname || []).join(' -> ')]];
   for (const t of d.types || []) {
@@ -873,7 +873,9 @@ function parseProxycheck(j, ip) {
   return {
     source: 'proxycheck',
     netType: ['residential', 'business', 'wireless', 'hosting'].includes(nt) ? nt : null,
-    anonymous: yes('anonymous') || vpn || proxy || tor || compromised,   // compromised: a hijacked machine relaying traffic
+    // proxycheck.io's own flag, or any VPN, proxy, Tor or compromised finding. It picks the cache time,
+    // but isn't a VPN verdict on its own: see pcKnown() and vpnText().
+    anonymous: yes('anonymous') || vpn || proxy || tor || compromised,
     vpn, proxy, tor, compromised, hosting: yes('hosting'),
     operator: op && /^[\p{L}\p{N} .,&'()+\-]+$/u.test(op) ? op : null,
     risk: risk != null && risk >= 0 && risk <= 100 ? Math.round(risk) : null,
@@ -1020,10 +1022,14 @@ async function doh(name, type) {
 
 const short = (s, n = 500) => String(s).slice(0, n);
 const host = s => short(String(s).replace(/\.$/, ''), 255);
+// An MX record pointing at "." is a null MX (RFC 7505): the domain accepts no mail. ('' is the same
+// record as parsed before the "." was kept, still possible in a cached answer.) Matches app.js.
+const nullMx = r => r.value === '.' || r.value === '';
+const mxText = r => `${r.priority} ` + (nullMx(r) ? '. (accepts no mail: null MX)' : r.value);
 function parseRecord(type, data) {
   data = String(data);
   switch (type) {
-    case 'MX': { const m = /^(\d+)\s+(\S+)$/.exec(data); return m ? { priority: Number(m[1]), value: host(m[2]) } : { value: short(data) }; }
+    case 'MX': { const m = /^(\d+)\s+(\S+)$/.exec(data); return m ? { priority: Number(m[1]), value: m[2] === '.' ? '.' : host(m[2]) } : { value: short(data) }; }
     case 'NS': case 'CNAME': case 'PTR': return { value: host(data) };
     case 'TXT': {                                          // one record may be split into several quoted strings
       const parts = data.match(/"((?:[^"\\]|\\.)*)"/g);
@@ -1486,15 +1492,23 @@ function connectionText(d) {
   return out.length ? out.join(' · ') : null;
 }
 
-// VPN / proxy verdict. Only Core checks for it, and a clean result is not proof: VPN providers
-// keep adding fresh addresses that no list knows yet. Kept in step with vpnText() in app.js.
+// VPN / proxy verdict. Only Core and proxycheck.io check for it, and a clean result is not proof:
+// VPN providers keep adding fresh addresses that no list knows yet. Kept in step with app.js
+// (pcKnown, pcFlag, vpnKind, vpnText there).
+// "yes" needs Core's flag or a specific proxycheck.io finding: VPN, proxy, Tor or a named service.
+// proxycheck.io's own "anonymous" is a catch-all ("any kind of anonymising service (proxy, VPN,
+// TOR, etc.)" in its API reference) that is also set on addresses that are none of those, such as
+// Google Public DNS (8.8.8.8). Alone, it gets a hedged line, and so does "compromised" (seen
+// performing attacks, which doesn't by itself mean the address relays anyone's traffic).
+const pcKnown = pc => !!(pc && pc.anonymous && (pc.vpn || pc.proxy || pc.tor || pc.operator));
+const pcFlag = pc => (pc.compromised ? 'flagged by proxycheck.io as compromised (seen performing attacks)' : 'flagged as anonymizing by proxycheck.io') +
+  ', but not as a known VPN, proxy or Tor service';
+const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
 function vpnText(d) {
   const core = d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = d.privacy || null;
   if (!core && !pc) return 'not checked (detailed data unavailable for this lookup)';
-  if ((core && core.anonymous) || (pc && pc.anonymous)) {
-    const kind = pc && pc.anonymous ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor';
-    return `yes: a known ${kind} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
-  }
+  if ((core && core.anonymous) || pcKnown(pc)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
+  if (pc && pc.anonymous) return pcFlag(pc);
   const hosting = (core && core.hosting) || d.asType === 'hosting' || (pc && pc.hosting);
   return 'not on known VPN or proxy lists' + (hosting
     ? ', but it is a hosting network, which VPN servers usually use'
@@ -1568,7 +1582,8 @@ function dnsPage(io, d, status) {
     return shell(io, { status, path, title: `${name} DNS | ipterm`, initial: { kind: 'dns', query: name, qtype: single, ...(d.status ? { data: d } : { error: msg }) },
       body: staticBlock(`DNS: ${name}`, ['dns'], [], msg) });
   }
-  const R = d.records || {}, vals = t => (R[t] || []).map(r => (t === 'MX' ? `${r.priority} ${r.value}` : r.value));
+  const R = d.records || {}, vals = t => (R[t] || []).map(r => (t === 'MX' ? mxText(r) : r.value));
+  const mail = (R.MX || []).filter(r => !nullMx(r)).map(r => r.value);
   const list = (a, n = 3) => a.slice(0, n).join(', ') + (a.length > n ? ` and ${a.length - n} more` : '');
   let summary;
   if (parseIp(name)) summary = R.PTR ? `The reverse DNS (PTR) name for ${name} is ${list(vals('PTR'))}.` : `${name} has no reverse DNS (PTR) record.`;
@@ -1576,7 +1591,7 @@ function dnsPage(io, d, status) {
     const parts = [];
     if (R.A || R.AAAA) parts.push(`${name} resolves to ${list([...vals('A'), ...vals('AAAA')])}`);
     if (d.cname && d.cname.length) parts.push(`it is an alias of ${d.cname[0]}`);
-    if (R.MX) parts.push(`mail is handled by ${list((R.MX || []).map(r => r.value), 2)}`);
+    if (R.MX) parts.push(mail.length ? `mail is handled by ${list(mail, 2)}` : 'it accepts no mail (null MX)');
     if (R.NS) parts.push(`name servers are ${list(vals('NS'), 2)}`);
     summary = (parts.length ? parts.join('; ') : `${name} has no ${single || 'common'} records`) + '.' +
       (d.hosting && d.hosting.org ? ` Hosted by ${d.hosting.org}${d.hosting.asn ? ` (${d.hosting.asn})` : ''}.` : '') +

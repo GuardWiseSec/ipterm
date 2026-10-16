@@ -43,7 +43,7 @@ hosting or data center, anycast) to lookups of other IPs, and the map zooms to t
 public lookup also gets a **vpn / proxy** row: "yes" when Core flags the address as VPN/proxy/Tor;
 otherwise "not on known lists", with a note that hosting networks are where VPN servers usually
 live, or that a clean result is not a guarantee (new VPN servers are often unlisted). Lookups
-answered without Core say "not checked". To switch:
+answered without Core (and without proxycheck.io, below) say "not checked". To switch:
 
 1. Upgrade your IPinfo account to Core. The token stays the same, so there is no need to run
    `wrangler secret put` again.
@@ -105,7 +105,19 @@ npx wrangler secret put PROXYCHECK_KEY
   The page and the JSON API show only a few fields (VPN / proxy / Tor / hosting, the service's
   name, a risk score), as proxycheck.io's terms require, never the full response.
 
-The verdict on the **vpn / proxy** line combines both sources: flagged by either one means "yes".
+The verdict on the **vpn / proxy** line combines both sources (`vpnText()` in `src/worker.js` and
+`public/app.js`, kept in step):
+
+| What the sources say | The line says |
+| --- | --- |
+| Core flags it, or proxycheck.io finds a VPN, proxy or Tor exit, or names the service | `yes: a known VPN address (Proton VPN)` (or proxy, Tor, or "VPN, proxy or Tor" when it isn't specific) |
+| proxycheck.io's `anonymous` flag alone, with no VPN, proxy, Tor or service name | `flagged as anonymizing by proxycheck.io, but not as a known VPN, proxy or Tor service` |
+| proxycheck.io's `compromised` flag alone (seen performing attacks) | `flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service` |
+| Neither flags it | `not on known VPN or proxy lists`, plus the hosting-network note or the "not a guarantee" note |
+
+proxycheck.io's API reference defines `anonymous` as "any kind of anonymising service (proxy, VPN,
+TOR, etc.)", and it's also set on addresses that are none of those: Google Public DNS (8.8.8.8) has
+it, with only `hosting` besides. So on its own it isn't reported as a VPN, here or in `leaktest`.
 
 ## How the data works
 
@@ -190,6 +202,9 @@ so a hostile record can't send escape sequences to the reader's terminal (`plain
 **Machine-readable descriptions:** `public/openapi.json` (OpenAPI 3.1) and `public/llms.txt` are static files,
 listed in `run_worker_first`'s exclusions so they don't count as Worker requests. Their links are written
 for `https://ipterm.net`; change them if you deploy elsewhere. Edit them whenever a route changes.
+`public/_headers` sends both with `Access-Control-Allow-Origin: *`, so browser-based OpenAPI tools and
+agents on other sites can load them. That covers only these two public documents: the API's own
+cross-site access still follows `PUBLIC_API` (off by default).
 
 The homepage itself carries the visitor's address: the Worker writes their IP, network and location into the
 HTML (`homePage()` in `src/worker.js`), so the number is there on first paint and without JavaScript, and the
@@ -222,7 +237,9 @@ Worker, and makes no outside calls.
 `lookup example.com` (or just type a domain, or paste a URL) shows A, AAAA, MX, NS, TXT and CAA records, any
 CNAME alias, who hosts the first address, and whether DNSSEC validates. `dig example.com MX` shows one record
 type with TTLs (A, AAAA, CNAME, MX, NS, TXT, CAA, SOA, SRV, PTR, DS, DNSKEY, HTTPS); `dig 8.8.8.8` does a
-reverse lookup. Pages live at `/dns/<domain>` and `/dns/<domain>/<TYPE>`; curl gets JSON. Answers come from
+reverse lookup. A null MX (`0 .`, RFC 7505: the domain accepts no mail, as on example.com) shows as
+`0 . (accepts no mail: null MX)`, and its JSON `value` is `"."`. Pages live at `/dns/<domain>` and
+`/dns/<domain>/<TYPE>`; curl gets JSON. Answers come from
 Cloudflare's public resolver (1.1.1.1) and are cached for five minutes. International domain names are
 converted to their punycode form automatically.
 
@@ -255,7 +272,11 @@ browser gives away more than its IP address. Each line is marked OK, LEAK or INF
   or proxycheck.io's "Residential" / "Wireless") is reported plainly as "no VPN", since commercial
   VPN servers run in data centers. Any other unflagged address stays hedged. An
   unlisted IP isn't treated as proof of no VPN: mismatches below still carry "(a leak if you use
-  a VPN)", just marked INFO instead of LEAK.
+  a VPN)", just marked INFO instead of LEAK. proxycheck.io's `anonymous` or `compromised` flag
+  alone (see the table above) doesn't count as a VPN: on a hosting network the address counts as
+  one anyway, as any hosting address does; elsewhere the tag says "vpn unclear" and the check
+  treats it like an address it couldn't classify (mismatches marked LEAK, with the "if you use a
+  VPN" caveat), and the sponsored line shows, since no VPN was detected.
 - **WebRTC:** asks Cloudflare's public STUN server (`stun.cloudflare.com:3478`) which public
   addresses the browser reveals, and flags any that differ from the IP websites see.
 - **IPv6 / IPv4:** compares the network of the visitor's other IP version (via ipify) with the one
@@ -401,7 +422,7 @@ so it doesn't count against the limit. Watch usage under **Workers & Pages → i
 | Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
 | Plain-text answers (`?format=text`, one-value endpoints) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal | `plain()` in `src/worker.js` | |
 | Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
-| Cross-site browser access (CORS) off by default | `PUBLIC_API` in `wrangler.toml` | Set to `"true"` to offer a public browser API |
+| Cross-site browser access (CORS) off by default. Only the static `/openapi.json` and `/llms.txt` allow any origin | `PUBLIC_API` in `wrangler.toml`; `public/_headers` for the two documents | Set to `"true"` to offer a public browser API |
 | Private, loopback, CGNAT, multicast and documentation addresses rejected before any upstream call | `nonPublicReason()` in `src/worker.js` | |
 | Strict Content-Security-Policy (no inline scripts or styles; the only outside host is ipify, for the visitor's other IP version), nosniff, no framing, HSTS, no referrer, locked-down browser permissions | `secure()` in `src/worker.js` | Loosen the CSP if you add ads or analytics |
 | Only GET and HEAD accepted | `route()` in `src/worker.js` | |

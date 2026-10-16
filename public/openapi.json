@@ -77,7 +77,7 @@
         "responses": {
           "200": { "$ref": "#/components/responses/OneValue" },
           "400": { "description": "Not a public address.", "content": { "text/plain": { "schema": { "type": "string" } } } },
-          "404": { "description": "No value for this address (an empty line), or an unknown field (a message listing the fields).", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "No value for this address (an empty line), or an unknown field (a message listing the fields).", "headers": { "x-attribution": { "$ref": "#/components/headers/Attribution" } }, "content": { "text/plain": { "schema": { "type": "string" } } } },
           "429": { "$ref": "#/components/responses/RateLimited" },
           "502": { "$ref": "#/components/responses/Upstream" }
         }
@@ -174,6 +174,9 @@
     }
   },
   "components": {
+    "headers": {
+      "Attribution": { "description": "The IPinfo credit, on /{ip}/{field} answers that come from IPinfo (every field except hostname; not on the answers about your own address, which come from Cloudflare). Sent as a header so the body stays one line for $(curl ...).", "schema": { "type": "string" }, "example": "IP address data powered by IPinfo (https://ipinfo.io)" }
+    },
     "parameters": {
       "format": { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["json", "text"] }, "description": "json: JSON even for browser-like clients. text: aligned key/value lines instead of JSON." },
       "formatText": { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["text"] }, "description": "text: your details as aligned key/value lines instead of the bare address." },
@@ -181,7 +184,7 @@
       "dnsName": { "name": "name", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Domain name (international names are converted to punycode) or an IP address for reverse DNS", "example": "example.com" }
     },
     "responses": {
-      "OneValue": { "description": "One line: the value and a newline.", "content": { "text/plain": { "schema": { "type": "string" }, "example": "AS13335\n" } } },
+      "OneValue": { "description": "One line: the value and a newline.", "headers": { "x-attribution": { "$ref": "#/components/headers/Attribution" } }, "content": { "text/plain": { "schema": { "type": "string" }, "example": "AS13335\n" } } },
       "NoValue": { "description": "No value is known: an empty line.", "content": { "text/plain": { "schema": { "type": "string" }, "example": "\n" } } },
       "BadRequest": { "description": "Not a valid or not a public input.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
       "RateLimited": { "description": "More than 30 uncached lookups in a minute from your address.", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
@@ -235,7 +238,7 @@
           "status": { "type": "string", "enum": ["NOERROR", "NXDOMAIN", "SERVFAIL", "FORMERR", "NOTIMP", "REFUSED", "ERROR"] },
           "dnssec": { "type": "boolean" },
           "cname": { "type": "array", "items": { "type": "string" } },
-          "records": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "object", "properties": { "ttl": { "type": "integer" }, "value": { "type": "string" }, "priority": { "type": "integer" } } } } },
+          "records": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "object", "properties": { "ttl": { "type": "integer" }, "value": { "type": "string", "description": "The record's data. For MX, the mail server, or \".\" for a null MX (RFC 7505: the domain accepts no mail)." }, "priority": { "type": "integer" } } } } },
           "hosting": { "type": "object", "properties": { "ip": { "type": "string" }, "asn": { "type": ["string", "null"] }, "org": { "type": ["string", "null"] }, "country": { "type": ["string", "null"] } } },
           "source": { "type": "string", "const": "cloudflare-dns" }
         }
