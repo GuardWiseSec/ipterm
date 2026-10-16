@@ -167,6 +167,11 @@ button.cmd:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
 .sponsor a{color:var(--fg);text-decoration-color:var(--dim)}
 .sponsor a:hover{color:var(--hi)}
 
+/* a shared leak test result's "run yours": the one action on the page, drawn as a button */
+.run-yours{margin-top:8px;color:var(--dim)}
+.run-yours a.cmd{display:inline-block;border:1px solid currentColor;border-radius:4px;padding:3px 14px;text-decoration:none;letter-spacing:.04em}
+.run-yours a.cmd:hover{color:var(--hi)}
+
 /* content pages (privacy policy) */
 .doc{max-width:760px;margin:0 auto;padding-inline:16px;padding-block:16px 56px}
 .doc .bar{padding-bottom:12px;border-bottom:1px dashed var(--rule)}
