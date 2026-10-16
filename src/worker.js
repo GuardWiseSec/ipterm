@@ -18,13 +18,16 @@
 //   GET /api/whois?q=       the same as JSON, used by the terminal
 //   GET /dns/<name>[/TYPE]  DNS records for a domain (summary, or one record type) via Cloudflare's resolver
 //   GET /api/dns?name=&type= the same as JSON, used by the terminal
+//   GET /mail/<domain>      email security check: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, graded A-F
+//                           (?dkim=<selector> checks that DKIM selector as well as the common ones)
+//   GET /api/mail?domain=&dkim= the same as JSON, used by the terminal
 //   GET /cidr/<ip>/<prefix> subnet calculator page (also /api/cidr?q=); pure calculation, no outside calls
-//   GET /whois, /dns, /cidr, /leaktest, /api  landing page for each tool (usage and examples); /api is the
-//                           API docs, and command-line clients get the /help text there instead
+//   GET /whois, /dns, /mail, /cidr, /leaktest, /api  landing page for each tool (usage and examples); /api is
+//                           the API docs, and command-line clients get the /help text there instead
 //   GET /api/check          your own IP plus how IPinfo classifies it (VPN, hosting...), for the privacy check
 //   GET /robots.txt, /sitemap.xml
-//   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /whois/..., /cidr/... and their /api/
-//                           forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
+//   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /mail/..., /whois/..., /cidr/... and their
+//                           /api/ forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
 //   /openapi.json, /llms.txt  static files describing the API (served without running the Worker)
 //   anything else: a static file if one exists, a domain-shaped path (/example.com) redirects to its
 //   DNS page, and the rest gets a 404 page in the terminal's style
@@ -39,6 +42,7 @@
 //   Registry records (whois): RDAP from the regional internet registries (addresses, networks) and the
 //   domain registries and registrars (domains), all found via IANA's bootstrap files.
 //   Reverse DNS: Cloudflare DNS-over-HTTPS.
+//   Mail check: Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file (https://mta-sts.<domain>).
 //
 // Hardening
 //   - Upstream lookups are cached; cache misses are rate limited per visitor IP (LOOKUP_LIMITER).
@@ -101,13 +105,15 @@ async function route(request, env, ctx) {
   if (path.startsWith('/cidr/')) return cidrRoute(io, path.slice(6), html);
   if (path === '/api/dns') return dnsRoute(io, url.searchParams.get('name'), url.searchParams.get('type'), false);
   if (path.startsWith('/dns/')) { const [n, t] = path.slice(5).split('/'); return dnsRoute(io, n, t, html); }
+  if (path === '/api/mail') return mailRoute(io, url.searchParams.get('domain'), url.searchParams.get('dkim'), false);
+  if (path.startsWith('/mail/')) return mailRoute(io, path.slice(6), url.searchParams.get('dkim'), html);
 
   const bare = path.slice(1);
   if (bare && parseIp(bare)) return ipRoute(io, bare, html);
   if (ASN_RE.test(bare)) return asnRoute(io, bare, html);
   const field = /^([0-9a-f.:]{2,45})\/([a-z]{1,20})$/i.exec(bare);   // /8.8.8.8/asn
   if (field && parseIp(field[1])) return ipField(io, field[1], field[2].toLowerCase());
-  if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/cidr. See /help.' }, 404);
+  if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/mail, /api/cidr. See /help.' }, 404);
 
   const res = await env.ASSETS.fetch(request);
   if (res.status !== 404) return withOrigin(res, url);
@@ -135,6 +141,18 @@ const TOOLS = {
     desc: "Free DNS lookup for any domain: addresses (A and AAAA), mail servers (MX), name servers, TXT and CAA records, who hosts the site and whether DNSSEC validates. Enter an IP address for reverse DNS. Answers come from Cloudflare's public resolver.",
     usage: 'dig <domain> [type]',
     examples: [['dig example.com', '/dns/example.com'], ['dig gmail.com MX', '/dns/gmail.com/MX'], ['dig github.com TXT', '/dns/github.com/TXT'], ['dig 8.8.8.8', '/dns/8.8.8.8']],
+  },
+  mail: {
+    title: 'Email security check: SPF, DMARC, DKIM and MX records | ipterm', heading: 'Email security check',
+    desc: "Free SPF, DMARC and DKIM checker for any domain: its mail servers and provider, SPF with its DNS lookups counted against the limit of 10, the DMARC policy and report addresses, DKIM keys, MTA-STS, TLS-RPT and BIMI, graded A to F with a fix for each problem.",
+    usage: 'mail <domain> [--dkim <selector>]',
+    checks: ['MX: the mail servers and the provider behind them, or a null MX (the domain accepts no mail)',
+      'SPF: one record, ending in ~all or -all, within the limit of 10 DNS lookups (includes are followed and counted)',
+      'DMARC: the policy (none, quarantine or reject), its coverage, and where reports go',
+      "DKIM: keys at common selectors (google, selector1, selector2, default, k1, s1), or the one you name; selectors can't be listed, so a miss is only INFO",
+      'MTA-STS: the _mta-sts record and the policy file at https://mta-sts.<domain>, matched against the MX hosts',
+      'TLS-RPT and BIMI: where TLS failure reports go, and the brand logo'],
+    examples: [['mail gmail.com', '/mail/gmail.com'], ['mail outlook.com', '/mail/outlook.com'], ['mail github.com', '/mail/github.com'], ['mail example.com', '/mail/example.com']],
   },
   leaktest: {
     title: 'VPN leak test: WebRTC, IPv6 and time zone check | ipterm', heading: 'VPN and privacy leak test',
@@ -171,6 +189,8 @@ function toolRoute(io, tool, html) {
   const extra = (list ? `<p class="ln sys">Examples:</p><ul class="static-list">${list}</ul>` : '') +
     (t.checks ? `<p class="ln sys">What it checks:</p><ul class="static-list">${t.checks.map(c => `<li>${esc(c)}</li>`).join('')}</ul>` : '') +
     (tool === 'cidr' ? `<p class="ln sys">Guide: <a href="/guides/subnet-cheat-sheet">Subnet mask cheat sheet</a></p>` : '') +
+    (tool === 'mail' ? `<p class="ln sys">How the grade works (each line is OK, WARN, FAIL or INFO; INFO never counts):</p>` +
+      MAIL_GRADES.map(([g, t]) => `<p class="ln">${esc(g)}: ${esc(t)}</p>`).join('') : '') +
     // The full reference for visitors without JavaScript and for crawlers; the terminal prints its own (`api`).
     (tool === 'api' ? `<pre class="doc-pre api-ref"><code>${esc(helpBody(io.url.host))}</code></pre>` +
       `<p class="ln sys">Machine-readable: <a href="/openapi.json">OpenAPI description</a> · <a href="/llms.txt">llms.txt</a> · plain text: <code>curl ${esc(io.url.host)}/help</code></p>` +
@@ -289,6 +309,32 @@ async function dnsRoute(io, rawName, rawType, html) {
     // A nonexistent domain is a valid DNS answer: JSON says so with 200; the HTML page uses 404 so it isn't indexed.
     d => html ? dnsPage(io, d, d.status === 'NXDOMAIN' ? 404 : 200) : reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, dnsText),
     (msg, status) => html ? dnsPage(io, { name, types, error: msg }, status) : reply(io, { error: msg }, status),
+  );
+}
+
+// The mail records, the common DKIM selectors and a named selector are cached separately, so naming a
+// selector costs one DNS query, not a whole new check (and can't be used to make ipterm fetch a domain's
+// MTA-STS policy over and over). A named selector is checked as well as the common ones, never instead:
+// naming a good key can't hide a weak one.
+async function mailRoute(io, rawName, rawSel, html) {
+  const name = normalizeDomain(rawName);
+  const sel = rawSel == null || rawSel === '' ? null : dkimSelector(rawSel);
+  const bad = error => html ? mailPage(io, { domain: clip(rawName), error }, 400) : reply(io, { error }, 400);
+  if (!name) return bad(parseIp(String(rawName || '').trim()) ? 'The mail check needs a domain name, not an IP address. Example: mail gmail.com' : 'Not a valid domain name. Example: mail gmail.com');
+  if (rawSel != null && rawSel !== '' && !sel) return bad("Not a valid DKIM selector. It is the s= value in a message's DKIM-Signature header, like google or selector1.");
+  return guard(
+    async () => {
+      const base = await cached(io, 'mail/' + name, 300, () => mailRecords(name));
+      if (base.status !== 'NOERROR' || base.nullMx) return mailResult(base, null, sel);
+      const extra = sel && !DKIM_SELECTORS.includes(sel);
+      const [common, named] = await Promise.all([cached(io, `mail-dkim/${name}/*`, 300, () => dkimProbe(name, DKIM_SELECTORS)),
+        extra ? cached(io, `mail-dkim/${name}/${sel}`, 300, () => dkimProbe(name, [sel])) : null]);
+      return mailResult(base, named ? { selectors: [...common.selectors, sel], keys: [...common.keys, ...named.keys],
+        subrequests: common.subrequests + named.subrequests } : common, sel);
+    },
+    // A nonexistent domain is a valid answer: JSON says so with 200; the HTML page uses 404 so it isn't indexed.
+    d => html ? mailPage(io, d, d.status === 'NOERROR' ? 200 : 404) : reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, mailText),
+    (msg, status) => html ? mailPage(io, { domain: name, selector: sel, error: msg }, status) : reply(io, { error: msg }, status),
   );
 }
 
@@ -450,6 +496,39 @@ function dnsText(d) {
   return kvText(rows, host ? [IPINFO_CREDIT] : []);
 }
 
+// The mail check as lines like leaktest's: one per finding with its status, and a fix: under each
+// problem, then the records it read. Shared by ?format=text and the page's static summary.
+const MAIL_STATUS = { ok: 'OK', warn: 'WARN', fail: 'FAIL', info: 'INFO' };
+const mailTally = c => (c.fail || c.warn ? [c.fail && `${c.fail} FAIL`, c.warn && `${c.warn} WARN`].filter(Boolean).join(', ') : 'no problems found');
+function mailRows(d, asText) {
+  const rows = [['grade', `${d.grade}  (${mailTally(d.counts)})`]];
+  let prev = null;
+  for (const c of d.checks) {          // text lines up the fixes under the findings; HTML can't keep the spaces
+    rows.push([c.check === prev ? '' : c.check, asText ? `${MAIL_STATUS[c.status].padEnd(4)}  ${c.text}` : `${MAIL_STATUS[c.status]} · ${c.text}`]);
+    if (c.fix) rows.push(['', (asText ? '      ' : '') + `fix: ${c.fix}`]);
+    prev = c.check;
+  }
+  const mx = d.mx.records, spf = d.spf || {}, dm = d.dmarc, m = d.mtaSts, p = m && m.policy;
+  rows.push(['MX records', mx.length ? mx.map(r => mxText({ priority: r.priority, value: r.host })) : 'none']);
+  if (spf.record) rows.push([spf.records > 1 ? 'SPF records' : 'SPF record', [spf.record, ...(spf.others || [])]]);
+  if (spf.includes && spf.includes.length) rows.push(['SPF includes', spf.includes.slice(0, 12).join(' ') + (spf.includes.length > 12 ? ` and ${spf.includes.length - 12} more` : '')]);
+  if (dm) rows.push(['DMARC record', dm.record + (dm.inherited ? `  (at _dmarc.${dm.from})` : '')]);
+  if (d.dkim) rows.push(['DKIM selectors', d.dkim.selectors.join(', ') + (d.dkim.keys.length ? `  (found: ${d.dkim.keys.map(k => k.selector).join(', ')})` : '  (none found)')]);
+  if (m) rows.push(['MTA-STS record', m.record]);
+  if (p) rows.push(['MTA-STS policy', p.error ? `${p.url} ${p.error}` : `mode ${p.mode || '?'}, mx ${p.mx.join(' ') || 'none'}, max_age ${p.maxAge ?? '?'}`]);
+  if (d.tlsRpt) rows.push(['TLS-RPT record', d.tlsRpt.record]);
+  if (d.bimi) rows.push(['BIMI record', d.bimi.record]);
+  return rows;
+}
+
+function mailText(d) {
+  if (d.status !== 'NOERROR') return mailProblem(d) + '\n';
+  return kvText([['domain', d.domain], ...mailRows(d, true)],
+    ['Grades: ' + MAIL_GRADES.map(([g, t]) => `${g} ${t}`).join('; ') + '. INFO lines never count.']);
+}
+const mailProblem = d => (d.status === 'NXDOMAIN' ? `${d.domain} does not exist (NXDOMAIN), so it has no mail records.`
+  : `The mail check for ${d.domain} could not run: the resolver answered ${d.status}.`);
+
 function whoisText(d) {
   if (!d.found) return (d.message || `No registry record was found for ${d.query}.`) + '\n';
   const date = s => (s ? String(s).slice(0, 10) : null), abuse = d.abuse || {};
@@ -523,9 +602,11 @@ function helpBody(h) {
       [`curl ${h}/8.8.8.8/country`, 'one value: asn, org, cc, country,'],
       ['', 'continent or hostname'],
     ]),
-    block('NETWORKS, DNS, REGISTRY RECORDS, SUBNETS', [
+    block('NETWORKS, DNS, MAIL, REGISTRY RECORDS, SUBNETS', [
       [`curl ${h}/AS13335`, 'a network and its address blocks'],
       [`curl ${h}/dns/example.com`, 'DNS records; add /MX for one type'],
+      [`curl ${h}/mail/gmail.com`, 'email security: SPF, DMARC, DKIM, MTA-STS,'],
+      ['', 'graded A-F (?dkim=<selector> for your DKIM key)'],
       [`curl ${h}/whois/github.com`, 'registry record: domain, IP or ASN'],
       [`curl ${h}/cidr/10.0.0.0/22`, 'subnet calculator'],
     ]),
@@ -1028,16 +1109,18 @@ const host = s => short(String(s).replace(/\.$/, ''), 255);
 // record as parsed before the "." was kept, still possible in a cached answer.) Matches app.js.
 const nullMx = r => r.value === '.' || r.value === '';
 const mxText = r => `${r.priority} ` + (nullMx(r) ? '. (accepts no mail: null MX)' : r.value);
+// A TXT record's text. One record may be split into several quoted strings, joined here.
+function txtData(data, n = 1000) {
+  data = String(data);
+  const parts = data.match(/"((?:[^"\\]|\\.)*)"/g);
+  return short(parts ? parts.map(x => x.slice(1, -1).replace(/\\(.)/g, '$1')).join('') : data, n);
+}
 function parseRecord(type, data) {
   data = String(data);
   switch (type) {
     case 'MX': { const m = /^(\d+)\s+(\S+)$/.exec(data); return m ? { priority: Number(m[1]), value: m[2] === '.' ? '.' : host(m[2]) } : { value: short(data) }; }
     case 'NS': case 'CNAME': case 'PTR': return { value: host(data) };
-    case 'TXT': {                                          // one record may be split into several quoted strings
-      const parts = data.match(/"((?:[^"\\]|\\.)*)"/g);
-      const v = parts ? parts.map(x => x.slice(1, -1).replace(/\\(.)/g, '$1')).join('') : data;
-      return { value: short(v, 1000) };
-    }
+    case 'TXT': return { value: txtData(data) };
     case 'SOA': {
       const f = data.split(/\s+/);
       return f.length >= 7 ? { value: host(f[0]), admin: host(f[1]), serial: Number(f[2]) || f[2], refresh: Number(f[3]), retry: Number(f[4]), expire: Number(f[5]), minimum: Number(f[6]) } : { value: short(data) };
@@ -1074,6 +1157,523 @@ async function dnsData(io, name, types, forIp) {
     } catch (e) { /* hosting is a nice-to-have */ }
   }
   return d;
+}
+
+/* ---------- mail check ----------
+   mail <domain>: MX and the provider behind it, SPF (its DNS lookups counted against RFC 7208's limit
+   of 10), DMARC, DKIM at a few common selectors, MTA-STS (the TXT record plus the policy file the domain
+   serves at https://mta-sts.<domain>), TLS-RPT and BIMI, graded A to F. Everything comes from
+   Cloudflare's resolver except the MTA-STS policy. Each part has its own budget of subrequests
+   (MAIL_BUDGET for the records, the selectors plus one retry for DKIM). Cache reads and writes count
+   toward the Workers limit of 50 too, so the worst case, every retry firing for a named selector, is
+   22 + 7 + 2 fetches and 6 cache calls: 37. A typical fresh check takes 15 to 30. */
+
+const DKIM_SELECTORS = ['google', 'selector1', 'selector2', 'default', 'k1', 's1'];
+const MAIL_BUDGET = 22;            // 6 record queries, up to 3 DMARC parents, 1 policy fetch, 10 SPF includes, 2 retries
+const SPF_MAX_FETCH = 10;          // past 10 includes the record is over the limit anyway
+const MAIL_GRADES = [
+  ['A', 'no FAIL and no WARN'],
+  ['B', 'no FAIL, one or two WARN'],
+  ['C', 'one FAIL, or three or more WARN'],
+  ['D', 'two FAIL'],
+  ['F', 'three or more FAIL, no working SPF and no DMARC, or SPF that lets any server pass (+all)'],
+];
+
+// Who runs the mail servers, from the MX host names (the first match wins).
+const MAIL_PROVIDERS = [
+  [/(^|\.)gmail-smtp-in\.l\.google\.com$/, 'Gmail'], [/(^|\.)(aspmx\.l\.google|smtp\.google|googlemail)\.com$/, 'Google Workspace'],
+  [/(^|\.)google\.com$/, 'Google'], [/\.mail\.protection\.outlook\.com$/, 'Microsoft 365'], [/(^|\.)(outlook|hotmail)\.com$/, 'Microsoft (Outlook.com)'],
+  [/(^|\.)(pphosted|ppe-hosted)\.com$/, 'Proofpoint'], [/(^|\.)mimecast(-offshore)?\.com$|(^|\.)mimecast\.co\.za$/, 'Mimecast'],
+  [/(^|\.)iphmx\.com$/, 'Cisco Secure Email'], [/(^|\.)barracudanetworks\.com$/, 'Barracuda'], [/(^|\.)messagelabs\.com$/, 'Broadcom Email Security.cloud'],
+  [/(^|\.)mx\.cloudflare\.net$/, 'Cloudflare Email Routing'], [/(^|\.)yahoodns\.net$/, 'Yahoo'], [/(^|\.)mail\.icloud\.com$/, 'iCloud Mail'],
+  [/(^|\.)protonmail\.ch$/, 'Proton Mail'], [/(^|\.)messagingengine\.com$/, 'Fastmail'], [/(^|\.)zoho(mail)?\.(com|eu|in|jp|com\.au)$/, 'Zoho Mail'],
+  [/(^|\.)secureserver\.net$/, 'GoDaddy'], [/(^|\.)emailsrvr\.com$/, 'Rackspace Email'], [/(^|\.)(amazonaws|awsapps)\.com$/, 'Amazon (SES or WorkMail)'],
+  [/(^|\.)mailgun\.org$/, 'Mailgun'], [/(^|\.)sendgrid\.net$/, 'SendGrid'], [/(^|\.)yandex\.(net|ru)$/, 'Yandex'], [/(^|\.)mail\.ru$/, 'Mail.ru'],
+  [/(^|\.)qq\.com$/, 'Tencent'], [/(^|\.)ovh\.net$/, 'OVHcloud'], [/(^|\.)(ionos|1and1)\.[a-z.]+$/, 'IONOS'], [/(^|\.)migadu\.com$/, 'Migadu'],
+  [/(^|\.)improvmx\.com$/, 'ImprovMX'], [/(^|\.)forwardemail\.net$/, 'Forward Email'], [/(^|\.)hornetsecurity\.com$/, 'Hornetsecurity'],
+  [/(^|\.)trendmicro\.(com|eu)$/, 'Trend Micro'], [/(^|\.)tutanota\.de$/, 'Tuta'],
+];
+const mxProvider = h => { const m = MAIL_PROVIDERS.find(([re]) => re.test(h)); return m ? m[1] : null; };
+// The include a provider documents for its customers' SPF, for the fix line when a domain has none.
+const PROVIDER_SPF = { Gmail: '_spf.google.com', 'Google Workspace': '_spf.google.com', Google: '_spf.google.com', 'Microsoft 365': 'spf.protection.outlook.com',
+  Fastmail: 'spf.messagingengine.com', 'Proton Mail': '_spf.protonmail.ch', 'iCloud Mail': 'icloud.com', 'Cloudflare Email Routing': '_spf.mx.cloudflare.net' };
+
+// One DNS query within a check's budget: a time limit, and one retry while the budget allows, also
+// after SERVFAIL (the resolver couldn't reach the domain's name servers in time, which is often brief).
+async function mailDoh(b, name, type) {
+  if (name.length > 253) return { Status: 1 };          // too long to be a name (a long domain plus _dmarc.)
+  let last = null, answer = null;
+  for (let attempt = 0; attempt < 2 && b.left > 0; attempt++) {
+    if (attempt) await sleep(300);
+    b.left--; b.used++;
+    try {
+      const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`,
+        { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(4000) });
+      if (r.ok) {
+        answer = await r.json();
+        if (!answer || answer.Status !== 2) return answer;
+        continue;
+      }
+      if (r.body) r.body.cancel();
+      last = new Error('HTTP ' + r.status);
+      if (r.status < 500 && r.status !== 429) break;
+    } catch (e) { last = e; }
+  }
+  if (answer) return answer;                             // still SERVFAIL: the caller says what couldn't be read
+  throw new Error(last ? 'dns: ' + (last.message || last) : 'mail check: subrequest budget used up');
+}
+// An answer that says nothing about the record: anything but NOERROR, or NXDOMAIN (which means "none").
+const dnsFailed = r => r && r.Status != null && r.Status !== 0 && r.Status !== 3;
+// The TXT records of an answer that pass a test (big domains keep dozens of verification records beside SPF).
+const txtOf = (r, test, n = 2000) => (r && Array.isArray(r.Answer) ? r.Answer : []).slice(0, 300)
+  .filter(a => a && a.type === 16).map(a => txtData(a.data, n)).filter(test).slice(0, 10);
+const isSpf = v => /^v=spf1(\s|$)/i.test(v);
+const isDmarc = v => /^v\s*=\s*DMARC1\s*(;|$)/i.test(v);
+const isDkim = v => /^v\s*=\s*DKIM1\s*(;|$)/i.test(v) || (!/^\s*v\s*=/i.test(v) && /(^|;)\s*p\s*=/i.test(v));
+
+// "v=DMARC1; p=reject; rua=mailto:..." as { v, p, rua } (names lowercased; the first of a repeated tag wins).
+function tagList(rec) {
+  const t = Object.create(null);
+  for (const part of String(rec).split(';').slice(0, 40)) {
+    const m = /^\s*([a-z][a-z0-9_]*)\s*=\s*([\s\S]*?)\s*$/i.exec(part);
+    if (m && !(m[1].toLowerCase() in t)) t[m[1].toLowerCase()] = m[2];
+  }
+  return t;
+}
+const httpsUrl = v => { try { const u = new URL(String(v || '').trim()); return u.protocol === 'https:' && !u.username && !u.password ? short(u.href, 200) : null; } catch { return null; } };
+// Report addresses from rua= or ruf=: plain email addresses (from mailto:, without a !size suffix) and
+// https URLs. Anything else is dropped.
+function reportUris(v) {
+  const out = [];
+  for (const raw of String(v || '').split(',').slice(0, 10)) {
+    const u = raw.trim().replace(/!\d+[kmgt]?$/i, ''), m = /^mailto:(.+)$/i.exec(u);
+    const x = m ? (validEmail(m[1]) ? m[1] : null) : httpsUrl(u);
+    if (x && out.length < 5) out.push(x);
+  }
+  return out;
+}
+// A DKIM selector as typed after --dkim: DNS labels, at most 100 characters. A pasted
+// "selector1._domainkey.example.com" is cut back to the selector.
+function dkimSelector(v) {
+  const s = String(v).trim().toLowerCase().replace(/\._domainkey(\..*)?$/, '');
+  const label = '[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?';
+  return s.length <= 100 && new RegExp(`^${label}(?:\\.${label})*$`).test(s) ? s : null;
+}
+
+/* SPF (RFC 7208). Receivers give up with an error (permerror) once evaluating a record takes more than
+   10 DNS lookups: include, a, mx, ptr, exists and redirect each cost one, and so does everything inside
+   an include. Includes and redirects are followed to count them, at most SPF_MAX_FETCH of them. */
+const SPF_LOOKUP = new Set(['include', 'a', 'mx', 'ptr', 'exists']);
+const SPF_MECH = new Set([...SPF_LOOKUP, 'all', 'ip4', 'ip6']);
+const spfTerm = t => (t.length > 60 ? t.slice(0, 60) + '…' : t);
+
+// One record's terms: the lookups it costs by itself, what it includes or redirects to, its "all",
+// and anything RFC 7208 calls an error. Terms after "all" are never evaluated, so they cost nothing.
+function spfParse(rec) {
+  const p = { lookups: 0, all: null, includes: [], redirect: null, errors: [], ptr: false, macros: false, mechs: 0 };
+  for (const t of String(rec).trim().split(/\s+/).slice(1, 80)) {
+    const mod = /^([a-z][a-z0-9_.-]*)=(.*)$/i.exec(t);
+    if (mod) {                                           // modifiers: redirect= and exp= (unknown ones are allowed)
+      if (mod[1].toLowerCase() !== 'redirect') continue;
+      if (p.redirect !== null) p.errors.push({ text: 'has more than one redirect=', fix: 'keep a single redirect=' });
+      else p.redirect = String(mod[2]).toLowerCase().replace(/\.$/, '');
+      continue;
+    }
+    const m = /^([+\-~?]?)([a-z][a-z0-9]*)(.*)$/i.exec(t);
+    const mech = m ? m[2].toLowerCase() : null, q = m ? m[1] || '+' : null, rest = m ? m[3] : '';
+    if (!mech || !SPF_MECH.has(mech)) {
+      p.errors.push({ text: `has an unknown term "${spfTerm(t)}", which receivers treat as an error (permerror)`, fix: `correct or remove "${spfTerm(t)}"` });
+      continue;
+    }
+    p.mechs++;
+    if (mech === 'all') {
+      if (rest) p.errors.push({ text: `has an invalid "${spfTerm(t)}"`, fix: 'end the record with a plain ~all or -all' });
+      else if (!p.all) p.all = q + 'all';
+      continue;
+    }
+    if (p.all) continue;
+    if (SPF_LOOKUP.has(mech)) p.lookups++;
+    if (mech === 'ptr') p.ptr = true;
+    else if (mech === 'include' || mech === 'exists') {
+      const target = rest.startsWith(':') ? rest.slice(1) : '';
+      if (!target) p.errors.push({ text: `has "${spfTerm(t)}" without a domain`, fix: `add the domain (${mech}:example.com) or remove it` });
+      else if (target.includes('%')) p.macros = true;
+      else if (mech === 'include') {
+        const dom = normalizeDomain(target);
+        if (dom) p.includes.push({ q, domain: dom });
+        else p.errors.push({ text: `includes "${spfTerm(target)}", which is not a domain name`, fix: `correct or remove "${spfTerm(t)}"` });
+      }
+    } else if (mech === 'ip4' || mech === 'ip6') {
+      const v = /^:([^/]+)(?:\/(\d{1,3}))?$/.exec(rest), ip = v && parseIp(v[1]);
+      if (!ip || ip.v !== (mech === 'ip4' ? 4 : 6) || (v[2] && Number(v[2]) > (ip.v === 4 ? 32 : 128))) {
+        p.errors.push({ text: `has an invalid range "${spfTerm(t)}"`, fix: `correct it (${mech}:${mech === 'ip4' ? '192.0.2.0/24' : '2001:db8::/32'}) or remove it` });
+      }
+    }
+  }
+  if (p.redirect && !p.all) p.lookups++;                 // redirect= only applies (and costs) without an "all"
+  return p;
+}
+
+async function spfAnalyze(b, rec) {
+  const st = { lookups: 0, fetches: 0, walks: 0, capped: false, includes: [], errors: [], unresolved: [], passAll: [], ptr: false, macros: false };
+  const memo = new Map();
+  const getSpf = dom => {                                // an included domain's record, fetched once per check
+    if (!memo.has(dom)) memo.set(dom, (async () => {
+      if (st.fetches >= SPF_MAX_FETCH) { st.capped = true; return { skipped: true }; }
+      st.fetches++;
+      let r;
+      try { r = await mailDoh(b, dom, 'TXT'); } catch { return { unresolved: true }; }
+      if (r.Status && r.Status !== 3) return { unresolved: true };
+      const recs = txtOf(r, isSpf);
+      return recs.length === 1 ? { rec: recs[0] } : { count: recs.length };
+    })());
+    return memo.get(dom);
+  };
+  const follow = async (dom, label, depth) => {          // returns the "all" of the record it reaches
+    // Records are fetched once but may be walked many times (an include loop, or ten includes that each include
+    // the same ten): 40 walks and 10 levels are far past any record that works, and keep the CPU time small.
+    if (depth > 9 || ++st.walks > 40) { st.capped = true; return null; }
+    const r = await getSpf(dom);
+    if (r.skipped) return null;
+    if (r.unresolved) { if (st.unresolved.length < 3 && !st.unresolved.includes(label)) st.unresolved.push(label); return null; }
+    if (!r.rec) {
+      if (st.errors.length < 5) st.errors.push(r.count
+        ? { text: `${label} points at ${r.count} SPF records, which receivers treat as an error (permerror)`, fix: `ask whoever runs ${dom} to merge them, or remove ${label}` }
+        : { text: `${label} has no SPF record, which receivers treat as an error (permerror)`, fix: `remove ${label}, or check its spelling` });
+      return null;
+    }
+    return walk(r.rec, depth + 1, label);
+  };
+  async function walk(rec, depth, via) {
+    const p = spfParse(rec);
+    st.lookups += p.lookups;
+    st.ptr = st.ptr || p.ptr; st.macros = st.macros || p.macros;
+    for (const e of p.errors) {
+      if (st.errors.length < 5) st.errors.push(via ? { text: `the record behind ${via} ${e.text}`, fix: `remove ${via}, or ask whoever runs it to fix it` } : e);
+    }
+    await Promise.all(p.includes.map(async ({ q, domain }) => {
+      if (st.includes.length < 40 && !st.includes.includes(domain)) st.includes.push(domain);
+      const all = await follow(domain, 'include:' + domain, depth);
+      if (all === '+all' && q === '+' && st.passAll.length < 3 && !st.passAll.includes(domain)) st.passAll.push(domain);
+    }));
+    const redirected = p.redirect && !p.all ? await follow(p.redirect, 'redirect=' + p.redirect, depth) : null;
+    return p.all || redirected;
+  }
+  const top = spfParse(rec), all = await walk(rec, 0, null);
+  return {
+    records: 1, record: short(rec, 1000), all: all || null, redirect: top.redirect && !top.all ? top.redirect : null,
+    lookups: st.lookups, overLimit: st.lookups > 10 || st.capped, counted: !st.capped,
+    includes: st.includes, errors: st.errors, unresolved: st.unresolved, passAll: st.passAll, ptr: st.ptr, macros: st.macros,
+    onlyFail: top.mechs === 1 && top.all === '-all',     // "v=spf1 -all": no server may send
+  };
+}
+
+function dmarcParse(rec) {
+  const t = tagList(rec), pol = v => { const x = String(v ?? '').trim().toLowerCase(); return ['none', 'quarantine', 'reject'].includes(x) ? x : null; };
+  const pct = t.pct == null ? 100 : /^\s*\d{1,3}\s*$/.test(t.pct) && Number(t.pct) <= 100 ? Number(t.pct) : null;
+  return {
+    record: short(rec, 600), policy: pol(t.p), subdomainPolicy: pol(t.sp), nonexistentPolicy: pol(t.np), pct,
+    testing: String(t.t || '').trim().toLowerCase() === 'y', rua: reportUris(t.rua), ruf: reportUris(t.ruf),
+    adkim: String(t.adkim || '').trim().toLowerCase() === 's' ? 'strict' : 'relaxed',
+    aspf: String(t.aspf || '').trim().toLowerCase() === 's' ? 'strict' : 'relaxed',
+  };
+}
+// A subdomain without its own record gets the parent's sp= (or p=, without one).
+const dmarcEffective = dm => (dm.inherited ? dm.subdomainPolicy || dm.policy : dm.policy);
+
+// The MTA-STS policy file. RFC 8461: HTTPS with a valid certificate, and redirects must not be
+// followed, so the only URL ever fetched is https://mta-sts.<domain>/.well-known/mta-sts.txt. The time
+// limit and the 64 KB cap are ipterm's own.
+async function stsPolicy(b, name) {
+  const url = `https://mta-sts.${name}/.well-known/mta-sts.txt`;
+  if (b.left <= 0) return { url, error: "wasn't fetched: this check's lookup budget ran out" };
+  b.left--; b.used++;
+  let r;
+  try { r = await fetch(url, { redirect: 'manual', headers: { accept: 'text/plain' }, signal: AbortSignal.timeout(5000) }); }
+  catch (e) { return { url, error: e && e.name === 'TimeoutError' ? "didn't answer within 5 seconds" : "couldn't be fetched (no such host, no HTTPS, or a certificate problem)" }; }
+  if (r.status !== 200) {
+    if (r.body) r.body.cancel();
+    return { url, error: r.status >= 300 && r.status < 400 ? `redirects (HTTP ${r.status}), and RFC 8461 says senders must not follow redirects` : `answered HTTP ${r.status}` };
+  }
+  let body;
+  try { body = await readBody(r, 65536); } catch (e) { return { url, error: e && e.message === 'response too large' ? 'is larger than 64 KB' : "couldn't be read" }; }
+  const ct = (r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  return { url, ...parseSts(body), contentType: ct && ct !== 'text/plain' ? short(ct, 60) : null };
+}
+
+function parseSts(body) {
+  const p = { version: null, mode: null, mx: [], maxAge: null, errors: [] };
+  for (const line of String(body).split(/\r?\n/).slice(0, 200)) {
+    const m = /^([A-Za-z0-9_]{1,32}):\s*(.*?)\s*$/.exec(line.trim());
+    if (!m) continue;
+    const k = m[1].toLowerCase(), v = m[2];
+    if (k === 'version' && p.version === null) p.version = short(v, 20);
+    else if (k === 'mode' && p.mode === null) p.mode = short(v.toLowerCase(), 20);
+    else if (k === 'max_age' && p.maxAge === null) p.maxAge = /^\d{1,10}$/.test(v) ? Number(v) : -1;
+    else if (k === 'mx' && p.mx.length < 20) {
+      const h = v.toLowerCase().replace(/\.$/, '');
+      if (h.length <= 253 && /^(\*\.)?[a-z0-9_-]+(\.[a-z0-9_-]+)+$/.test(h)) p.mx.push(h);
+      else if (p.errors.length < 3) p.errors.push(`"mx: ${short(v, 60)}" is not a host name`);
+    }
+  }
+  if (p.version !== 'STSv1') p.errors.push('the version line is missing or not STSv1');
+  if (!['enforce', 'testing', 'none'].includes(p.mode)) p.errors.push('the mode line is missing or not enforce, testing or none');
+  if (p.maxAge === null || p.maxAge < 0 || p.maxAge > 31557600) p.errors.push('max_age is missing or out of range');
+  if (p.mode !== 'none' && !p.mx.length) p.errors.push('there are no mx lines');
+  if (p.maxAge !== null && p.maxAge < 0) p.maxAge = null;
+  return p;
+}
+// RFC 8461 section 4.1: "*.example.com" covers exactly one more label (mx1.example.com, not a.b.example.com).
+const stsMatch = (h, pat) => (pat.startsWith('*.') ? h.endsWith(pat.slice(1)) && /^[^.]+$/.test(h.slice(0, -(pat.length - 1))) : h === pat);
+const ageText = s => (s >= 86400 ? `${Math.round(s / 86400)} day${Math.round(s / 86400) === 1 ? '' : 's'}` : s >= 3600 ? `${Math.round(s / 3600)} hours` : `${s} seconds`);
+
+// DKIM keys can't be listed: only selectors someone names can be checked.
+async function dkimProbe(name, selectors) {
+  const b = { left: selectors.length + 1, used: 0 };
+  const res = await Promise.all(selectors.map(async s => {
+    let r;
+    try { r = await mailDoh(b, `${s}._domainkey.${name}`, 'TXT'); } catch { return { selector: s, unanswered: true }; }
+    const rec = txtOf(r, isDkim, 3000)[0];
+    return rec ? { selector: s, ...dkimKey(rec) } : { selector: s };
+  }));
+  return { selectors, keys: res.filter(x => x.keyType), unanswered: res.filter(x => x.unanswered).map(x => x.selector), subrequests: b.used };
+}
+
+function dkimKey(rec) {
+  const t = tagList(rec), k = String(t.k || 'rsa').trim().toLowerCase(), p = String(t.p ?? '').replace(/\s+/g, '');
+  const keyType = k === 'rsa' || k === 'ed25519' ? k : short(k, 20);
+  const testing = String(t.t || '').split(':').some(f => f.trim().toLowerCase() === 'y');
+  if (!p) return { keyType, revoked: true, bits: null, testing, record: short(rec, 300) };
+  return { keyType, revoked: false, bits: keyType === 'rsa' ? rsaBits(p) : keyType === 'ed25519' ? 256 : null, testing, record: short(rec, 300) };
+}
+
+// The size of an RSA key in bits: the length of its modulus, read from the DER encoding
+// (SubjectPublicKeyInfo, or a bare RSAPublicKey). null if it can't be read.
+function rsaBits(b64) {
+  let a;
+  try { a = Uint8Array.from(atob(b64.slice(0, 4000)), c => c.charCodeAt(0)); } catch { return null; }
+  let i = 0;
+  const next = () => {                                   // one DER header: tag and length
+    if (i + 2 > a.length) throw new Error('short');
+    const tag = a[i++]; let len = a[i++];
+    if (len & 0x80) {
+      const n = len & 0x7f; if (n < 1 || n > 3) throw new Error('length');
+      len = 0; for (let j = 0; j < n; j++) len = len * 256 + a[i++];
+    }
+    if (i + len > a.length) throw new Error('short');
+    return { tag, len };
+  };
+  try {
+    let h = next(); if (h.tag !== 0x30) return null;                      // SEQUENCE
+    h = next();
+    if (h.tag === 0x30) {                                // SubjectPublicKeyInfo: skip the algorithm, open the BIT STRING
+      i += h.len; h = next(); if (h.tag !== 0x03) return null;
+      i++;                                               // the BIT STRING's unused-bits byte
+      h = next(); if (h.tag !== 0x30) return null;
+      h = next();
+    }
+    if (h.tag !== 0x02) return null;                     // INTEGER: the modulus
+    let s = i, len = h.len;
+    while (len > 0 && a[s] === 0) { s++; len--; }
+    return len ? (len - 1) * 8 + (32 - Math.clz32(a[s])) : null;
+  } catch { return null; }
+}
+
+// Everything except DKIM: two rounds of queries (the records, then SPF includes, the MTA-STS policy and,
+// when the domain has no DMARC record of its own, its parents').
+async function mailRecords(name) {
+  const b = { left: MAIL_BUDGET, used: 0 }, q = (n, t) => mailDoh(b, n, t);
+  const [mxR, txtR, dmarcR, stsR, rptR, bimiR] = await Promise.all([q(name, 'MX'), q(name, 'TXT'),
+    q('_dmarc.' + name, 'TXT'), q('_mta-sts.' + name, 'TXT'), q('_smtp._tls.' + name, 'TXT'), q('default._bimi.' + name, 'TXT')]);
+  const st = mxR.Status ?? 0;
+  if (st !== 0) return { ...(st !== 3 ? { _ttl: 60 } : {}), domain: name, status: RCODES[st] || 'ERROR', source: 'cloudflare-dns', subrequests: b.used };
+  const mx = (mxR.Answer || []).filter(a => a && a.type === 15).slice(0, 20).map(a => parseRecord('MX', a.data))
+    .sort((x, y) => (x.priority ?? 0) - (y.priority ?? 0));
+  const real = mx.filter(r => !nullMx(r));
+  const spfRecs = txtOf(txtR, isSpf), dmarcRecs = txtOf(dmarcR, isDmarc, 1000);
+  const stsRecs = txtOf(stsR, v => /^v\s*=\s*STSv1\s*(;|$)/i.test(v), 500);
+  const rptRecs = txtOf(rptR, v => /^v\s*=\s*TLSRPTv1\s*(;|$)/i.test(v), 500);
+  const bimiRecs = txtOf(bimiR, v => /^v\s*=\s*BIMI1\s*(;|$)/i.test(v), 500);
+  const nullOnly = mx.length > 0 && !real.length;
+  // Without a record of its own, a subdomain falls under its organizational domain's. Without a list of
+  // public suffixes, ask the (up to three) shortest parents and take the shortest one with a record that
+  // isn't a public suffix's own (psd=y), as DMARCbis's tree walk does.
+  const labels = name.split('.');
+  const parents = dmarcRecs.length || dnsFailed(dmarcR) ? [] : labels.slice(1, -1).map((_, i) => labels.slice(i + 1).join('.')).slice(-3);
+  const [spf, policy, up] = await Promise.all([
+    spfRecs.length === 1 ? spfAnalyze(b, spfRecs[0]) : null,
+    stsRecs.length && !nullOnly ? stsPolicy(b, name) : null,
+    Promise.all(parents.map(p => q('_dmarc.' + p, 'TXT').then(r => ({ from: p, recs: txtOf(r, isDmarc, 1000) }), () => ({ from: p, recs: [] })))),
+  ]);
+  const own = dmarcRecs.length ? { from: name, recs: dmarcRecs } : up.filter(x => x.recs.length && !/(^|;)\s*psd\s*=\s*y/i.test(x.recs[0])).pop();
+  const sts = stsRecs.length ? tagList(stsRecs[0]) : null, rpt = rptRecs.length ? tagList(rptRecs[0]) : null, bimi = bimiRecs.length ? tagList(bimiRecs[0]) : null;
+  const stsId = sts && String(sts.id || '').trim();
+  // Records the resolver couldn't read (SERVFAIL even after a retry) are reported as unread, not as
+  // missing, and the answer is kept for a minute instead of five.
+  const unread = Object.fromEntries([['SPF', txtR], ['DMARC', own ? null : dmarcR], ['MTA-STS', stsR], ['TLS-RPT', rptR], ['BIMI', bimiR]]
+    .filter(([, r]) => dnsFailed(r)).map(([k, r]) => [k, RCODES[r.Status] || 'an error']));
+  return {
+    ...(Object.keys(unread).length ? { _ttl: 60 } : {}),
+    domain: name, status: 'NOERROR', nullMx: nullOnly, unread,
+    mx: { records: mx.map(r => ({ priority: r.priority ?? null, host: r.value })), providers: [...new Set(real.map(r => mxProvider(r.value)).filter(Boolean))],
+      mixedNull: real.length > 0 && real.length < mx.length },
+    spf: spf || { records: spfRecs.length, record: spfRecs.length ? short(spfRecs[0], 1000) : null, others: spfRecs.slice(1, 4).map(v => short(v, 1000)) },
+    dmarc: own ? { ...dmarcParse(own.recs[0]), records: own.recs.length, from: own.from, inherited: own.from !== name } : null,
+    mtaSts: sts ? { record: short(stsRecs[0], 300), records: stsRecs.length, id: /^[A-Za-z0-9]{1,32}$/.test(stsId) ? stsId : null, policy } : null,
+    tlsRpt: rpt ? { record: short(rptRecs[0], 300), records: rptRecs.length, rua: reportUris(rpt.rua) } : null,
+    bimi: bimi ? { record: short(bimiRecs[0], 300), logo: httpsUrl(bimi.l), vmc: httpsUrl(bimi.a), declined: bimi.l != null && !bimi.l.trim() } : null,
+    source: 'cloudflare-dns', subrequests: b.used,
+  };
+}
+
+// One line per finding: { check, status: ok | warn | fail | info, text, fix }, with a fix on every WARN
+// and FAIL. The grade counts them (MAIL_GRADES). Every value from DNS stays a plain string here; pages
+// escape it with esc() and text answers with plain().
+function mailChecks(d, k, sel) {
+  const out = [], name = d.domain, noMail = d.nullMx;
+  const add = (check, status, text, fix) => out.push({ check, status, text, ...(fix && (status === 'warn' || status === 'fail') ? { fix } : {}) });
+  const hosts = d.mx.records.filter(r => !nullMx({ value: r.host })).map(r => r.host), providers = d.mx.providers;
+  const two = a => a.slice(0, 2).join(', ') + (a.length > 2 ? ` and ${a.length - 2} more` : '');
+  const unread = d.unread || {};
+  const notRead = (check, status, where) => add(check, status, `couldn't be read: Cloudflare's resolver answered ${unread[check]} for ${where} (its name servers didn't answer in time), so it wasn't checked`,
+    `check that every name server for ${name} answers; receivers that get no answer treat ${check} as a temporary error`);
+
+  if (d.mx.mixedNull) add('MX', 'fail', 'a null MX (0 .) sits beside other MX records, which RFC 7505 forbids', "remove the null MX if the domain takes mail, or the other MX records if it doesn't");
+  else if (noMail) add('MX', 'ok', `null MX: ${name} accepts no mail (RFC 7505)`);
+  else if (!hosts.length) add('MX', 'warn', `no MX records, so senders try ${name}'s own address (its A or AAAA record) instead`, 'add MX records for your mail provider, or a null MX (0 .) if the domain takes no mail');
+  else add('MX', 'ok', (providers.length ? providers.join(' + ') + ': ' : '') + two(hosts));
+
+  const spf = d.spf, inc = providers.map(p => PROVIDER_SPF[p]).find(Boolean);
+  if (unread.SPF) notRead('SPF', 'warn', name);
+  else if (!spf.records) {
+    add('SPF', 'fail', `no SPF record, so nothing says which servers may send mail as ${name}`, noMail
+      ? `publish a TXT record at ${name}: "v=spf1 -all" (no server may send as it)`
+      : `publish one TXT record at ${name}, such as "v=spf1 include:${inc || "<your provider's SPF domain>"} ~all", or "v=spf1 -all" if it sends no mail`);
+  } else if (spf.records > 1) add('SPF', 'fail', `${spf.records} SPF records: receivers treat that as an error (permerror) and ignore them all`, 'merge them into one v=spf1 record');
+  else {
+    const before = out.length, via = spf.redirect ? ` via redirect=${spf.redirect}` : '';
+    const count = spf.counted ? String(spf.lookups) : 'more than 10';
+    const lk = spf.overLimit ? '' : `; ${spf.lookups} of 10 DNS lookups`;   // over the limit has its own line
+    if (spf.all === '+all') add('SPF', 'fail', `ends in +all${via}, so any server on the internet passes SPF as ${name}`, 'change +all to ~all, or to -all once every sender is listed');
+    for (const x of spf.passAll) add('SPF', 'fail', `include:${x} ends in +all, so any server on the internet passes SPF as ${name}`, `remove include:${x}`);
+    for (const e of spf.errors) add('SPF', 'fail', e.text, e.fix);
+    if (spf.overLimit) add('SPF', 'fail', `needs ${count} DNS lookups, over the limit of 10, so receivers treat it as an error (permerror) and SPF fails for all your mail`,
+      'remove includes you no longer use, or replace some with the ip4: and ip6: ranges they list');
+    if (noMail) {
+      if (spf.onlyFail) add('SPF', 'ok', `v=spf1 -all: no server may send as ${name}`);
+      else if (out.length === before) add('SPF', 'warn', "lists senders, but a domain with a null MX can't send mail (receivers reject mail they couldn't bounce)", 'replace it with "v=spf1 -all"');
+    } else {
+      if (spf.all === '?all') add('SPF', 'warn', `ends in ?all${via} (neutral), so mail from unlisted servers isn't marked as failing${lk}`, 'end it with ~all, or -all once every sender is listed');
+      else if (!spf.all) add('SPF', 'warn', `doesn't end in ~all or -all, so mail from unlisted servers gets a neutral result${lk}`, 'add ~all at the end, or -all once every sender is listed');
+      if (spf.ptr) add('SPF', 'warn', 'uses the ptr mechanism, which RFC 7208 says not to use: it is slow, and some receivers skip it', 'replace ptr with the ip4: and ip6: ranges (or a and mx) it stands for');
+      for (const x of spf.unresolved) add('SPF', 'warn', `${x} didn't answer, so it couldn't be checked (receivers may delay your mail when that happens)`, `check that ${x.replace(/^[a-z]+[:=]/, '')} resolves and has one SPF record`);
+      if (!out.slice(before).length) add('SPF', 'ok', `ends in ${spf.all}${via}${lk}${spf.lookups >= 9 ? ' (close to the limit)' : ''}`);
+      if (spf.macros) add('SPF', 'info', 'uses macros (%{...}), which depend on the sender: those lookups are counted but not followed');
+    }
+  }
+
+  const dm = d.dmarc;
+  if (unread.DMARC) notRead('DMARC', 'warn', '_dmarc.' + name);
+  else if (!dm) {
+    add('DMARC', 'fail', 'no DMARC record, so receivers have no policy for mail that fails SPF and DKIM', noMail
+      ? `add a TXT record at _dmarc.${name}: "v=DMARC1; p=reject"`
+      : `add a TXT record at _dmarc.${name}: "v=DMARC1; p=none; rua=mailto:dmarc-reports@${name}" to collect reports, then move to p=quarantine and p=reject`);
+  } else if (dm.records > 1) add('DMARC', 'fail', `${dm.records} DMARC records at _dmarc.${dm.from}: receivers ignore DMARC when there is more than one`, 'keep a single v=DMARC1 record');
+  else if (!dm.policy) add('DMARC', 'fail', 'the policy (p=) is missing or not none, quarantine or reject', 'set p=none, p=quarantine or p=reject');
+  else {
+    const eff = dmarcEffective(dm), tag = dm.inherited && dm.subdomainPolicy ? 'sp' : 'p';
+    const from = dm.inherited ? `inherited from ${dm.from}, ` : '', rep = dm.rua.length ? `; reports go to ${two(dm.rua)}` : '';
+    const strict = noMail ? 'use p=reject: the domain sends no mail, so nothing real can fail' : null;
+    if (eff === 'reject') add('DMARC', 'ok', `${from}${tag}=reject: mail that fails is refused${rep}`);
+    else if (eff === 'quarantine') add('DMARC', noMail ? 'warn' : 'ok', `${from}${tag}=quarantine: mail that fails goes to spam${rep}`, strict);
+    else add('DMARC', 'warn', `${from}${tag}=none: monitoring only, so mail that fails is still delivered${rep}`, strict || 'once the reports show your own mail passes, move to p=quarantine, then p=reject');
+    if (eff !== 'none' && dm.pct != null && dm.pct < 100) add('DMARC', 'warn', `pct=${dm.pct}: the policy covers only ${dm.pct}% of the mail that fails`, 'remove pct (it defaults to 100)');
+    if (eff !== 'none' && dm.testing) add('DMARC', 'warn', 't=y (testing): receivers apply a policy one step weaker', 'remove t=y once your own mail passes');
+    if (!dm.inherited && dm.policy !== 'none' && dm.subdomainPolicy === 'none') add('DMARC', 'warn', `sp=none: subdomains of ${name} aren't protected`, 'remove sp (subdomains then follow p), or set it to quarantine or reject');
+    if (!dm.rua.length) add('DMARC', noMail ? 'info' : 'warn', `no report address (rua), so nobody hears about mail sent as ${name}`, `add rua=mailto:dmarc-reports@${dm.from} (or a DMARC report service's address)`);
+  }
+
+  if (noMail) {
+    add('other', 'info', "DKIM, MTA-STS, TLS-RPT and BIMI don't apply: a domain with a null MX sends and receives no mail");
+    return out;
+  }
+
+  const keys = k ? k.keys : [], usable = keys.filter(x => !x.revoked);
+  const what = x => (x.keyType === 'ed25519' ? 'Ed25519' : x.keyType === 'rsa' ? (x.bits ? `${x.bits}-bit RSA` : 'RSA') : x.keyType) + (x.testing ? ', testing' : '');
+  if (usable.length) {
+    add('DKIM', 'ok', `key${usable.length > 1 ? 's' : ''} at ${usable.map(x => `${x.selector} (${what(x)})`).join(', ')}`);
+    for (const x of usable.filter(x => x.keyType === 'rsa' && x.bits && x.bits < 2048)) {
+      add('DKIM', 'warn', `the key at ${x.selector} is ${x.bits}-bit RSA, too short to count on`, 'publish a 2048-bit key under a new selector, sign with it, then remove the old one');
+    }
+  } else if (keys.length) add('DKIM', 'info', `only a revoked key (empty p=) at ${keys.map(x => x.selector).join(', ')}`);
+  if (sel && !keys.some(x => x.selector === sel)) {
+    add('DKIM', 'info', `no key at ${sel}._domainkey.${name}` + (keys.length ? '' : `, nor at the common selectors (${DKIM_SELECTORS.filter(s => s !== sel).join(', ')})`) +
+      ". The selector is the s= value in a message's DKIM-Signature header");
+  } else if (!sel && !keys.length) {
+    add('DKIM', 'info', `no key at the common selectors (${DKIM_SELECTORS.join(', ')}). Selectors can't be listed, so this doesn't mean DKIM is off: ` +
+      "name yours with --dkim <selector> (?dkim= in a URL), the s= value in a message's DKIM-Signature header");
+  }
+
+  const m = d.mtaSts, p = m && m.policy;
+  if (unread['MTA-STS']) notRead('MTA-STS', 'info', '_mta-sts.' + name);
+  else if (!m) add('MTA-STS', 'info', 'not set up (optional: it makes sending servers insist on an encrypted connection to your mail servers)');
+  else if (m.records > 1) add('MTA-STS', 'fail', `${m.records} _mta-sts records: senders ignore MTA-STS when there is more than one`, 'keep one v=STSv1 record');
+  else if (!m.id) add('MTA-STS', 'fail', `the _mta-sts record has no valid id`, 'add id= with up to 32 letters and digits, and change it whenever the policy changes');
+  else if (!p || p.error) add('MTA-STS', 'fail', `the _mta-sts record is there, but the policy at ${p ? p.url : 'mta-sts.' + name} ${p ? p.error : 'was not read'}`,
+    'serve the policy file over HTTPS with a valid certificate at that address, or remove the _mta-sts record');
+  else if (p.errors.length) add('MTA-STS', 'fail', `the policy file is invalid: ${p.errors.join('; ')}`, 'fix the file: it needs version: STSv1, mode, one mx line per mail server and max_age (RFC 8461)');
+  else {
+    const miss = hosts.filter(h => !p.mx.some(pat => stsMatch(h, pat)));
+    const missText = miss.length ? `${miss[0]}${miss.length > 1 ? ` and ${miss.length - 1} more MX host${miss.length > 2 ? 's' : ''}` : ''} ${miss.length > 1 ? "aren't" : "isn't"} in the policy's mx lines` : '';
+    const addMx = miss.length ? `add "mx: ${miss[0]}" to the policy (a wildcard such as *.${miss[0].split('.').slice(1).join('.')} works too), then change the id in _mta-sts.${name}` : null;
+    if (p.mode === 'enforce') {
+      if (miss.length) add('MTA-STS', 'fail', `mode enforce, but ${missText}, so senders that honor MTA-STS won't deliver there`, addMx);
+      else add('MTA-STS', 'ok', `mode enforce, max_age ${ageText(p.maxAge)}, and every MX host is covered`);
+      if (p.maxAge < 86400) add('MTA-STS', 'warn', `max_age is ${ageText(p.maxAge)}, so senders forget the policy quickly`, 'raise max_age to at least 604800 (a week); RFC 8461 suggests weeks');
+    } else if (p.mode === 'testing') add('MTA-STS', miss.length ? 'warn' : 'info', `mode testing: problems are reported, not enforced${miss.length ? `, and ${missText}` : ''}`, addMx);
+    else add('MTA-STS', 'info', 'mode none: the policy is switched off');
+    if (p.contentType) add('MTA-STS', 'warn', `the policy is served as ${p.contentType}, not text/plain as RFC 8461 requires`, 'serve mta-sts.txt with Content-Type: text/plain');
+  }
+
+  const r = d.tlsRpt;
+  if (unread['TLS-RPT']) notRead('TLS-RPT', 'info', '_smtp._tls.' + name);
+  else if (r && r.records > 1) add('TLS-RPT', 'warn', `${r.records} records at _smtp._tls.${name}, so reporters may ignore them`, 'keep one v=TLSRPTv1 record');
+  else if (r && !r.rua.length) add('TLS-RPT', 'warn', 'the record has no valid rua address', `add rua=mailto:tls-reports@${name}`);
+  else if (r) add('TLS-RPT', 'ok', `reports go to ${two(r.rua)}`);
+  else if (m) add('TLS-RPT', 'warn', "MTA-STS is set up, but there is no TLS-RPT record, so you won't hear when senders can't deliver securely", `add a TXT record at _smtp._tls.${name}: "v=TLSRPTv1; rua=mailto:tls-reports@${name}"`);
+  else add('TLS-RPT', 'info', 'not set up (optional: daily reports from senders about TLS problems reaching you)');
+
+  const bi = d.bimi, enforcing = !!(dm && dm.records === 1 && ['quarantine', 'reject'].includes(dmarcEffective(dm)) && (dm.pct ?? 100) === 100);
+  if (unread.BIMI) notRead('BIMI', 'info', 'default._bimi.' + name);
+  else if (!bi) add('BIMI', 'info', 'no logo (optional: some inboxes show a brand logo next to your mail)');
+  else if (bi.declined) add('BIMI', 'info', 'the record declines a logo (empty l=)');
+  else if (!bi.logo) add('BIMI', 'warn', 'the record has no valid https logo address (l=)', 'point l= at an https:// SVG logo (the SVG Tiny PS profile)');
+  else if (!enforcing) add('BIMI', 'warn', 'a logo is published, but inboxes only show it when DMARC is at p=quarantine or p=reject', 'move DMARC to p=quarantine or p=reject, covering all mail');
+  else add('BIMI', 'ok', `logo at ${bi.logo}` + (bi.vmc ? ', with a mark certificate (a=)' : ' (no certificate in a=, which Gmail requires)'));
+  return out;
+}
+
+function mailGrade(checks, d) {
+  const n = s => checks.filter(c => c.status === s).length, fail = n('fail'), warn = n('warn');
+  const spf = d.spf, dm = d.dmarc;
+  const spfWorks = spf.records === 1 && !spf.errors.length && !spf.overLimit;
+  const dmarcWorks = !!(dm && dm.records === 1 && dm.policy);
+  const anyone = spf.records === 1 && (spf.all === '+all' || spf.passAll.length > 0);
+  const unread = d.unread || {}, open = !spfWorks && !dmarcWorks && !unread.SPF && !unread.DMARC;   // nothing stops spoofing
+  if (fail >= 3 || open || anyone) return 'F';
+  return fail === 2 ? 'D' : fail === 1 || warn >= 3 ? 'C' : warn ? 'B' : 'A';
+}
+
+function mailResult(base, probe, sel) {
+  if (base.status !== 'NOERROR') return { domain: base.domain, status: base.status, grade: null, selector: sel, source: base.source, subrequests: base.subrequests };
+  const checks = mailChecks(base, probe, sel), n = s => checks.filter(c => c.status === s).length;
+  return {
+    domain: base.domain, status: base.status, grade: mailGrade(checks, base), counts: { ok: n('ok'), warn: n('warn'), fail: n('fail'), info: n('info') },
+    checks, selector: sel, nullMx: base.nullMx, mx: base.mx, spf: base.spf, dmarc: base.dmarc,
+    dkim: probe ? { selectors: probe.selectors, keys: probe.keys } : null,
+    mtaSts: base.mtaSts, tlsRpt: base.tlsRpt, bimi: base.bimi, unread: base.unread || {},
+    source: base.source, subrequests: base.subrequests + (probe ? probe.subrequests : 0),
+  };
 }
 
 /* ---------- RDAP (whois) ---------- */
@@ -1155,20 +1755,23 @@ function contact(e) {                                    // { email, phone, hand
 }
 const eventDate = (o, a) => { const e = (Array.isArray(o && o.events) ? o.events : []).find(x => x && x.eventAction === a); return e && typeof e.eventDate === 'string' ? e.eventDate.slice(0, 40) : null; };
 async function readJson(r, max = 1_000_000) {           // registries are trusted, but not that trusted
+  return JSON.parse(await readBody(r, max));
+}
+async function readBody(r, max) {                     // the text of a response, refused past max bytes
   const declared = Number(r.headers.get('content-length'));
-  if (declared > max) { if (r.body) r.body.cancel(); throw new Error('rdap response too large'); }
-  if (!r.body) return JSON.parse(await r.text());
+  if (declared > max) { if (r.body) r.body.cancel(); throw new Error('response too large'); }
+  if (!r.body) return r.text();
   const reader = r.body.getReader(), parts = []; let n = 0;
   for (;;) {                                             // stop reading as soon as the cap is passed
     const { done, value } = await reader.read();
     if (done) break;
     n += value.byteLength;
-    if (n > max) { reader.cancel(); throw new Error('rdap response too large'); }
+    if (n > max) { reader.cancel(); throw new Error('response too large'); }
     parts.push(value);
   }
   const buf = new Uint8Array(n); let off = 0;
   for (const p of parts) { buf.set(p, off); off += p.byteLength; }
-  return JSON.parse(new TextDecoder().decode(buf));
+  return new TextDecoder().decode(buf);
 }
 
 async function rdapLookup(target, origin) {
@@ -1609,8 +2212,10 @@ function dnsPage(io, d, status) {
   for (const t of d.types) if (R[t]) rows.push([t, vals(t).join(' · ')]);
   if (d.hosting && d.hosting.org) rows.push(['hosted by', `${d.hosting.org}${d.hosting.asn ? ' (' + d.hosting.asn + ')' : ''}`]);
   rows.push(['DNSSEC', d.dnssec ? 'validated' : 'not validated']);
+  const takesMail = !parseIp(name) && ((R.MX || []).length > 0 || (R.TXT || []).some(r => isSpf(r.value)));
   const links = (d.hosting ? `<p class="ln sys">First address: <a href="/${esc(d.hosting.ip)}">${esc(d.hosting.ip)}</a> · <a href="/whois/${esc(d.hosting.ip)}">whois</a></p>` : '') +
-    (!parseIp(name) ? `<p class="ln sys">Registration: <a href="/whois/${esc(name)}">whois ${esc(name)}</a> (registrar, dates, status)</p>` : '');
+    (!parseIp(name) ? `<p class="ln sys">Registration: <a href="/whois/${esc(name)}">whois ${esc(name)}</a> (registrar, dates, status)</p>` : '') +
+    (takesMail ? `<p class="ln sys">Email security: <a href="/mail/${esc(name)}">mail check for ${esc(name)}</a> (SPF, DMARC, DKIM, MTA-STS, graded A to F)</p>` : '');
   const typesTitle = single ? `${single} record` : 'DNS records';
   return shell(io, { status, path, title: `${name} ${typesTitle}` + (R.A ? ` · ${R.A[0].value}` : '') + ' | ipterm', desc: summary,
     initial: { kind: 'dns', query: name, qtype: single, data: d },
@@ -1668,7 +2273,33 @@ function domainWhoisPage(io, d, status) {
   return shell(io, { status, path, title: `whois ${q}` + (reg ? ` · ${reg}` : '') + (d.expires ? ` · expires ${date(d.expires)}` : '') + ' | ipterm', desc: summary,
     initial: { kind: 'whois', query: q, data: d },
     body: staticBlock(`whois ${q}`, ['whois', 'domain', d.registry || 'rdap'], rows, summary,
-      `<p class="ln sys">See also: <a href="/dns/${esc(q)}">DNS records for ${esc(q)}</a></p>`) });
+      `<p class="ln sys">See also: <a href="/dns/${esc(q)}">DNS records for ${esc(q)}</a> · <a href="/mail/${esc(q)}">mail check for ${esc(q)}</a></p>`) });
+}
+
+function mailPage(io, d, status) {
+  const name = d.domain, path = '/mail/' + name;
+  const initial = { kind: 'mail', query: name, dkim: d.selector || null };
+  if (d.error || d.status !== 'NOERROR') {
+    const msg = d.error || mailProblem(d);
+    return shell(io, { status, path, title: `${name} mail check | ipterm`, initial: { ...initial, ...(d.status ? { data: d } : { error: msg }) },
+      body: staticBlock(`Mail check: ${name}`, ['mail'], [], msg) });
+  }
+  const rows = mailRows(d, false).map(([k, v]) => [k, Array.isArray(v) ? v.join(' · ') : v]);
+  const dm = d.dmarc, spf = d.spf, sts = d.mtaSts && d.mtaSts.policy;
+  const hosts = d.mx.records.filter(r => !nullMx({ value: r.host })).map(r => r.host);
+  // The summary is what search engines show for "<domain> dmarc" and "<domain> spf record".
+  const summary = [`${name} gets a ${d.grade} for email security (${mailTally(d.counts)})`,
+    d.nullMx ? 'it accepts no mail (null MX)' : d.mx.providers.length ? `mail is handled by ${d.mx.providers.join(' and ')}` : hosts.length ? `mail goes to ${hosts[0]}` : 'it has no MX records',
+    dm && dm.policy ? `its DMARC policy${dm.inherited ? ` (from ${dm.from})` : ''} is p=${dmarcEffective(dm)}` + (dm.rua.length ? ` with reports to ${dm.rua[0]}` : '') : 'it has no working DMARC policy',
+    spf.records === 1 ? (spf.overLimit ? `its SPF record needs ${spf.counted ? spf.lookups : 'more than 10'} DNS lookups, over the limit of 10`
+      : `SPF ends in ${spf.all || 'no all'} with ${spf.lookups} of 10 DNS lookups`) : spf.records ? `it has ${spf.records} SPF records` : 'it has no SPF record',
+    ...(sts && !sts.error && !sts.errors.length && sts.mode === 'enforce' ? ['MTA-STS is enforced'] : []),
+  ].join('; ') + '.';
+  const links = `<p class="ln sys">Records: <a href="/dns/${esc(name)}/MX">dig ${esc(name)} MX</a> · <a href="/dns/${esc(name)}/TXT">dig ${esc(name)} TXT</a>` +
+    ` · <a href="/dns/_dmarc.${esc(name)}/TXT">dig _dmarc.${esc(name)} TXT</a> · <a href="/whois/${esc(name)}">whois ${esc(name)}</a></p>` +
+    `<p class="ln sys">How the grade works: <a href="/mail">email security check</a></p>`;
+  return shell(io, { status, path, title: `${name} SPF, DMARC and DKIM check: grade ${d.grade} | ipterm`, desc: summary,
+    initial: { ...initial, data: d }, body: staticBlock(`Mail check: ${name}`, ['mail', `grade ${d.grade}`], rows, summary, links) });
 }
 
 function asnPage(io, d, status) {
@@ -1709,7 +2340,7 @@ function staticBlock(heading, tags, rows, summary, extra = '') {
 
 const SITEMAP_PATHS = [
   // pages, tools and guides
-  '/', '/whois', '/dns', '/cidr', '/leaktest', '/api', '/guides', '/guides/find-router-ip', '/guides/private-ip-ranges', '/guides/what-your-ip-reveals',
+  '/', '/whois', '/dns', '/mail', '/cidr', '/leaktest', '/api', '/guides', '/guides/find-router-ip', '/guides/private-ip-ranges', '/guides/what-your-ip-reveals',
   '/guides/ipv4-vs-ipv6', '/guides/what-is-an-asn', '/privacy',
   // router and other private addresses people search for
   '/192.168.1.1', '/192.168.0.1', '/10.0.0.1', '/192.168.1.254', '/192.168.100.1', '/192.168.2.1', '/192.168.0.254',
@@ -1726,6 +2357,8 @@ const SITEMAP_PATHS = [
   '/cidr/172.16.0.0/12', '/cidr/100.64.0.0/10', '/cidr/10.0.0.0/22', '/cidr/192.168.1.0/25', '/cidr/192.168.1.0/30', '/cidr/2001:db8::/32', '/cidr/2001:db8::/48',
   // DNS pages
   '/dns/google.com', '/dns/cloudflare.com', '/dns/github.com', '/dns/wikipedia.org', '/dns/example.com', '/dns/gmail.com/MX',
+  // mail checks (SPF, DMARC, DKIM)
+  '/mail/gmail.com', '/mail/outlook.com', '/mail/github.com',
   // registry (whois) pages
   '/whois/google.com', '/whois/github.com', '/whois/cloudflare.com', '/whois/wikipedia.org', '/whois/example.com',
   '/whois/8.8.8.8', '/whois/1.1.1.1', '/whois/9.9.9.9', '/whois/208.67.222.222', '/whois/AS15169', '/whois/AS13335', '/whois/AS16509', '/whois/AS8075',

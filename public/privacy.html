@@ -25,7 +25,7 @@
   <main class="doc-body">
     <p class="ln echo"><span class="ps1">guest@ipterm:~$</span> cat privacy.txt</p>
     <h1>Privacy policy</h1>
-    <p class="doc-meta">Last updated: October 15, 2026</p>
+    <p class="doc-meta">Last updated: October 16, 2026</p>
 
     <p class="doc-lede">ipterm has no accounts, sets no cookies and runs no analytics or tracking. This page explains the small amount of information it has to handle to work.</p>
 
@@ -39,6 +39,8 @@
       <dd>A connection uses either IPv4 or IPv6, so ipterm only sees one of your addresses. To show the other one, your browser asks <a href="https://www.ipify.org/" rel="noopener" target="_blank">ipify</a>, a free, open-source service that states it logs no visitor information, which address you have on the other protocol. ipify receives your IP address as part of that request and nothing else. ipterm does not store the result.</dd>
       <dt>addresses you look up</dt>
       <dd>When you look up an IP address, that address is sent to IPinfo to find its owner and location, and, unless IPinfo already recognizes it as a VPN or proxy, to proxycheck.io to check whether it is one. When you look up a network (ASN), its number is sent to RIPEstat, and registry (whois) lookups go to the regional internet registries. When you look up a domain, its name is sent to Cloudflare's DNS resolver (1.1.1.1), which is also used to find hostnames; a domain whois lookup sends the name to that domain's registry and registrar. Your own IP address is not passed to these services as part of a lookup, with two exceptions: when you open the homepage or run <code>whoami</code>, Cloudflare's resolver is asked for your address's hostname (reverse DNS), and the privacy check described below sends it to IPinfo and proxycheck.io. ipterm stores none of it.</dd>
+      <dt>mail checks</dt>
+      <dd>When you run a mail check (<code>mail</code>, or a <code>/mail/</code> page), the domain name is sent to Cloudflare's DNS resolver (1.1.1.1) to read its mail records (MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI). If the domain publishes an MTA-STS record, ipterm also fetches its policy file from <code>https://mta-sts.&lt;domain&gt;</code>, a server run by whoever runs that domain. That request comes from ipterm's servers at Cloudflare, not from your browser, so it carries neither your IP address nor anything else about you. The result is cached for five minutes, keyed by the domain, with no record of who asked.</dd>
       <dt>privacy check (leaktest)</dt>
       <dd>Only if you run the <code>leaktest</code> command or open the leak test page: your IP address, and your address on the other IP version if you have one, is looked up with IPinfo and proxycheck.io to see whether it is recognized as a VPN, proxy or data-center address (and which VPN service, if known), your browser contacts a STUN server run by Cloudflare (stun.cloudflare.com) to see which public addresses WebRTC reveals, and your device's time zone is compared with your IP's location inside your browser. The check's results are shown to you and not saved. As with any lookup, IPinfo's answer for an address is cached for up to six hours, and proxycheck.io's for up to one hour, so repeat lookups are fast; those cache entries contain only the address and its network details, nothing about you or your browser. ipterm asks proxycheck.io not to keep these queries in its log.</dd>
       <dt>cached results</dt>

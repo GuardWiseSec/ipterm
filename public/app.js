@@ -447,6 +447,7 @@
   const api = ip => getJson('/api/lookup' + (ip ? '?ip=' + encodeURIComponent(ip) : ''));
   const apiDns = (name, type) => getJson('/api/dns?name=' + encodeURIComponent(name) + (type ? '&type=' + encodeURIComponent(type) : ''));
   const apiWhois = q => getJson('/api/whois?q=' + encodeURIComponent(q));
+  const apiMail = (name, sel) => getJson('/api/mail?domain=' + encodeURIComponent(name) + (sel ? '&dkim=' + encodeURIComponent(sel) : ''));
   const apiAsn = n => getJson('/api/asn?asn=' + n);
 
   /* ---------- links and URLs ----------
@@ -456,18 +457,20 @@
   let navPush = true;
   function setUrl(path, title) {
     document.title = title;
-    if (!live || !navPush || location.pathname === path) return;
+    if (!live || !navPush || location.pathname + location.search === path) return;
     try { history.pushState({ path }, '', path); } catch {}
   }
-  function cmdFor(pathname) {
+  function cmdFor(pathname, search = '') {
     let p; try { p = decodeURIComponent(pathname).replace(/^\/+|\/+$/g, ''); } catch { return null; }
     if (!p) return 'whoami';
-    const tool = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest', api: 'api' }[p.toLowerCase()];
+    const tool = { whois: 'whois', dns: 'dig', mail: 'mail', cidr: 'cidr', leaktest: 'leaktest', api: 'api' }[p.toLowerCase()];
     if (tool) return tool;
     const cd = /^cidr\/(.+)$/i.exec(p);
     if (cd) return 'cidr ' + cd[1];
     const dn = /^dns\/([^/]+)(?:\/([a-z]+))?$/i.exec(p);
     if (dn) return 'dig ' + dn[1] + (dn[2] ? ' ' + dn[2].toUpperCase() : '');
+    const ml = /^mail\/([^/]+)$/i.exec(p);
+    if (ml) { const sel = new URLSearchParams(search).get('dkim'); return 'mail ' + ml[1] + (sel ? ' --dkim ' + sel.replace(/\s+/g, '') : ''); }
     const w = /^whois\/(.+)$/i.exec(p);
     if (w) return 'whois ' + w[1];
     if (/^as\d+$/i.test(p)) return 'asn ' + p.toUpperCase();
@@ -500,6 +503,10 @@
       case 'api': return '/api';
       case 'whois': return '/whois' + (a ? '/' + name(a) : '');
       case 'dig': return '/dns' + (a ? '/' + name(a) + (b ? '/' + b.toUpperCase() : '') : '');
+      case 'mail': {
+        const m = mailArgs(parts.slice(1));
+        return '/mail' + (m.dom ? '/' + name(m.dom) + (m.sel ? '?dkim=' + encodeURIComponent(m.sel.toLowerCase()) : '') : '');
+      }
       case 'cidr': {                                           // also "cidr 192.168.1.10 255.255.255.0"
         const rest = parts.slice(1).join(' ');
         if (!rest) return '/cidr';
@@ -1033,6 +1040,10 @@
       text: "dig looks up a domain's DNS records: addresses, mail servers, name servers, TXT and CAA. Give it an IP address for reverse DNS.",
       usage: 'usage: dig <domain> [type]   types: A AAAA CNAME MX NS TXT CAA SOA SRV PTR DS DNSKEY HTTPS',
       ex: [['dig example.com', '/dns/example.com'], ['dig gmail.com MX', '/dns/gmail.com/MX'], ['dig github.com TXT', '/dns/github.com/TXT'], ['dig 8.8.8.8', '/dns/8.8.8.8']] },
+    mail: { url: '/mail', title: 'Email security check: SPF, DMARC, DKIM and MX records | ipterm',
+      text: "mail checks a domain's email security: mail servers, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, graded A to F with a fix for each problem.",
+      usage: 'usage: mail <domain> [--dkim <selector>]',
+      ex: [['mail gmail.com', '/mail/gmail.com'], ['mail outlook.com', '/mail/outlook.com'], ['mail github.com', '/mail/github.com'], ['mail example.com', '/mail/example.com']] },
     cidr: { url: '/cidr', title: 'Subnet calculator: CIDR, netmask and usable host range | ipterm',
       text: 'cidr works out a subnet: network and broadcast addresses, netmask, wildcard, usable host range and host count. IPv6 works too.',
       usage: 'usage: cidr <range>   also accepts an address and netmask: cidr 192.168.1.10 255.255.255.0',
@@ -1201,20 +1212,104 @@
     }
     if (!parseIp(d.name)) rows.push(['DNSSEC', d.dnssec ? 'validated: answers are cryptographically signed' : 'not validated (the domain is not signed)']);
     if (!parseIp(d.name) && !single) rows.push(['registration', cmdLink(`whois ${d.name}`, `whois ${d.name}`, `/whois/${d.name}`)]);
+    // A domain with mail servers or an SPF record gets a way to the mail check (it reads live DNS, so not in the preview).
+    const hasMail = live && !d.sample && !parseIp(d.name) && ((R.MX || []).length > 0 || (R.TXT || []).some(r => /^v=spf1(\s|$)/i.test(r.value)));
+    if (hasMail) rows.push(['mail check', cmdLink(`mail ${d.name}`, `mail ${d.name}`, `/mail/${d.name}`)]);
     await kv(rows);
     if (d.sample) line('Sample data with documentation addresses. The live version queries DNS directly.', 'sys');
     const A = (R.A || []).map(r => r.value), MX = (R.MX || []).filter(r => !nullMx(r)).map(r => r.value), PTR = (R.PTR || []).map(r => r.value);
     const share = live && !d.sample && ['share', 'share', 'copy a link to these records'];
+    const mailNext = hasMail && [`mail ${d.name}`, `mail ${d.name}`, 'email security: SPF, DMARC and DKIM, graded A to F'];
     if (parseIp(d.name)) next([`lookup ${d.name}`, `lookup ${d.name}`, 'owner and approximate location'], [`whois ${d.name}`, `whois ${d.name}`, 'registry record'],
       PTR[0] && looksLikeDomain(PTR[0]) && [`dig ${PTR[0]}`, `dig ${PTR[0]}`, 'look the name up the other way']);
-    else if (single) next([`dig ${d.name}`, `dig ${d.name}`, 'all the common record types'], [`whois ${d.name}`, `whois ${d.name}`, 'registrar, dates and status'], share);
-    else next([`whois ${d.name}`, `whois ${d.name}`, 'registrar, registration and expiry dates'],
+    else if (single) next([`dig ${d.name}`, `dig ${d.name}`, 'all the common record types'], mailNext, [`whois ${d.name}`, `whois ${d.name}`, 'registrar, dates and status'], share);
+    else next([`whois ${d.name}`, `whois ${d.name}`, 'registrar, registration and expiry dates'], mailNext,
       d.hosting && d.hosting.ip && [`lookup ${d.hosting.ip}`, `lookup ${d.hosting.ip}`, 'who runs the server, and where'],
-      [`dig ${d.name} SOA`, `dig ${d.name} SOA`, 'the zone: primary name server and serial'], share);
+      !mailNext && [`dig ${d.name} SOA`, `dig ${d.name} SOA`, 'the zone: primary name server and serial'], share);
     announce(parseIp(d.name) ? `${d.name}: reverse DNS ${PTR[0] || 'none'}.`
       : single ? `${d.name} ${single}: ${(R[single] || []).length} record(s).`
       : `${d.name}: ` + (A.length ? `resolves to ${A.slice(0, 2).join(', ')}` : 'no IPv4 address') + (MX.length ? `, mail by ${MX[0]}` : R.MX && R.MX.length ? ', accepts no mail' : '') +
         (d.hosting && d.hosting.org ? `, hosted by ${d.hosting.org}` : '') + '.');
+  }
+
+  /* ---------- mail check ----------
+     mail <domain> [--dkim <selector>]: the Worker reads the records (MX, SPF, DMARC, DKIM, MTA-STS,
+     TLS-RPT, BIMI) and grades them; this draws its OK / WARN / FAIL / INFO lines, like leaktest's. */
+  function mailArgs(args) {                     // --dkim <selector> or --dkim=<selector>, before or after the domain
+    let dom = null, sel = null, err = null;
+    for (let i = 0; i < args.length; i++) {
+      const m = /^--?dkim(?:=(.*))?$/i.exec(args[i]);
+      if (m) { sel = m[1] != null ? m[1] : args[++i] || ''; if (!sel) err = 'usage: mail <domain> --dkim <selector>   example: mail outlook.com --dkim selector1'; }
+      else if (!dom) dom = args[i];
+    }
+    return { dom, sel, err };
+  }
+
+  async function mail(args, pre) {
+    const { dom, sel, err } = mailArgs(args);
+    if (err) return line(err, 'warn');
+    const q = domainOf(dom || '').toLowerCase();
+    if (parseIp(q)) return line('The mail check needs a domain name, not an IP address. Example: mail gmail.com', 'err');
+    if (!looksLikeDomain(q)) return line(`"${dom}" is not a valid domain name. Example: mail gmail.com`, 'err');
+    let d = null;
+    if (pre) {
+      if (pre.error) return line(pre.error, 'err');
+      d = pre.data;
+    } else if (live) {
+      const ql = line('checking mail records…', 'sys'); const t0 = performance.now();
+      d = await apiMail(q, sel);
+      if (d.error) { ql.textContent = d.error; ql.className = 'ln err'; announce(d.error); return; }
+      ql.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
+    } else return line('The mail check reads live DNS, so it works once the Worker is deployed.', 'warn');
+    const path = '/mail/' + d.domain + (d.selector ? '?dkim=' + encodeURIComponent(d.selector) : '');
+    if (d.status !== 'NOERROR') {
+      setUrl(path, `${d.domain} mail check | ipterm`);
+      line(d.status === 'NXDOMAIN' ? `${d.domain} does not exist (NXDOMAIN), so it has no mail records.`
+        : `The mail check for ${d.domain} could not run: the resolver answered ${d.status}.`, 'warn');
+      return next([`whois ${d.domain}`, `whois ${d.domain}`, 'is the name registered?']);
+    }
+    setUrl(path, `${d.domain} SPF, DMARC and DKIM check: grade ${d.grade} | ipterm`);
+    await renderMail(d);
+    next([`dig ${d.domain} TXT`, `dig ${d.domain} TXT`, 'every TXT record, SPF included'], [`whois ${d.domain}`, `whois ${d.domain}`, 'registrar, dates and status'],
+      ['man mail', 'man mail', 'what each check means and how the grade works'], ['share', 'share', 'copy a link to this check']);
+  }
+
+  const MAIL_TAG = { ok: 'st-ok', warn: 'st-caution', fail: 'st-fail', info: 'st-info' };
+  async function renderMail(d) {
+    const head = el('div', 'head');
+    head.append(el('span', 'hip', 'mail ' + d.domain), el('span', 'tag pub', 'email'), el('span', 'tag', 'grade ' + d.grade), el('span', 'tag', '1.1.1.1'));
+    out.appendChild(head);
+    const frag = (...parts) => { const f = document.createDocumentFragment(); parts.forEach(p => f.append(p)); return f; };
+    const c = d.counts || {};
+    const tally = c.fail || c.warn ? [c.fail && `${c.fail} FAIL`, c.warn && `${c.warn} WARN`].filter(Boolean).join(', ') : 'no problems found';
+    const rows = [['grade', d.grade, 'big'], ['', tally + (c.info ? `, plus ${c.info} INFO line${c.info > 1 ? "s that don't" : " that doesn't"} count` : ''), 'plain']];
+    let prev = null;
+    for (const x of d.checks || []) {             // one line per finding, with a fix under each problem
+      rows.push([x.check === prev ? '' : x.check, frag(el('span', 'tag ' + (MAIL_TAG[x.status] || 'st-info'), x.status), ' ', x.text)]);
+      if (x.fix) rows.push(['', 'fix: ' + x.fix, 'plain']);
+      prev = x.check;
+    }
+    rows.push('sep');
+    const nameLink = v => (looksLikeDomain(v) ? cmdLink(v, 'lookup ' + v, '/dns/' + v) : document.createTextNode(v));
+    const mx = (d.mx && d.mx.records) || [];
+    if (!mx.length) rows.push(['MX records', 'none']);
+    mx.forEach((r, i) => rows.push([i ? '' : 'MX records', frag(`${r.priority != null ? r.priority : ''}  `, nullMx({ value: r.host }) ? '. (accepts no mail: null MX)' : nameLink(r.host))]));
+    const spf = d.spf || {};
+    if (spf.record) [spf.record, ...(spf.others || [])].forEach((v, i) => rows.push([i ? '' : 'SPF record', v]));
+    if (spf.includes && spf.includes.length) {
+      const shown = spf.includes.slice(0, 12).map(x => cmdLink(x, `dig ${x} TXT`, `/dns/${x}/TXT`));
+      rows.push(['SPF includes', frag(joined(shown), spf.includes.length > 12 ? `  and ${spf.includes.length - 12} more` : '')]);
+    }
+    if (d.dmarc) rows.push(['DMARC record', frag(d.dmarc.record, d.dmarc.inherited ? el('span', 'ttl', `  at _dmarc.${d.dmarc.from}`) : '')]);
+    if (d.dkim) rows.push(['DKIM selectors', frag(d.dkim.selectors.join(', '), el('span', 'ttl', d.dkim.keys.length ? `  found: ${d.dkim.keys.map(k => k.selector).join(', ')}` : '  none found'))]);
+    const m = d.mtaSts, p = m && m.policy;
+    if (m) rows.push(['MTA-STS record', m.record]);
+    if (p) rows.push(['MTA-STS policy', p.error ? `${p.url} ${p.error}` : `mode ${p.mode || '?'} · mx ${p.mx.join(' ') || 'none'} · max_age ${p.maxAge != null ? p.maxAge : '?'}`]);
+    if (d.tlsRpt) rows.push(['TLS-RPT record', d.tlsRpt.record]);
+    if (d.bimi) rows.push(['BIMI record', d.bimi.record]);
+    await kv(rows);
+    const worst = (d.checks || []).find(x => x.status === 'fail') || (d.checks || []).find(x => x.status === 'warn');
+    announce(`mail ${d.domain}: grade ${d.grade}, ${tally}.` + (worst ? ` First problem: ${worst.check}, ${worst.text}.` : ''));
   }
 
   async function whois(raw, pre) {
@@ -1252,7 +1347,9 @@
     if (d.kind === 'domain') {
       setUrl('/whois/' + d.domain, `whois ${d.domain}` + (d.registrar && d.registrar.name ? ` · ${d.registrar.name}` : '') + ' | ipterm');
       await renderDomainWhois(d);
-      return next([`dig ${d.domain}`, `dig ${d.domain}`, 'its DNS records and who hosts it'], [`dig ${d.domain} MX`, `dig ${d.domain} MX`, 'its mail servers'], share);
+      return next([`dig ${d.domain}`, `dig ${d.domain}`, 'its DNS records and who hosts it'],
+        live && !d.sample && [`mail ${d.domain}`, `mail ${d.domain}`, 'email security: SPF, DMARC and DKIM, graded A to F'],
+        [`dig ${d.domain} MX`, `dig ${d.domain} MX`, 'its mail servers'], share);
     }
     setUrl('/whois/' + q, `whois ${q}` + (d.org ? ` · ${d.org}` : '') + ' | ipterm');
     await renderWhois(d);
@@ -1393,6 +1490,7 @@
     ['lookup <ip>', 'look up any IPv4 or IPv6 address', 'lookup 8.8.8.8'],
     ['lookup <domain>', 'DNS records, mail and name servers, hosting, DNSSEC', 'lookup example.com'],
     ['dig <name> [type]', 'one record type: A AAAA MX NS TXT CAA SOA CNAME SRV ... (dig <ip> = reverse)', 'dig gmail.com MX'],
+    ['mail <domain>', 'email security: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, graded A to F', 'mail gmail.com'],
     ['cidr <range>', 'subnet calculator: cidr 10.0.0.0/22, IP + netmask, or IPv6', 'cidr 10.0.0.0/22'],
     ['whois <ip|ASN|domain>', 'registry record: owner, registrar, dates, name servers, abuse contact', 'whois example.com'],
     ['asn <number>', 'network details and address blocks, e.g. asn AS13335', 'asn AS13335'],
@@ -1414,6 +1512,7 @@
   // Other names each command answers to (run() goes by these too).
   const ALIASES = { myip: 'whoami', me: 'whoami', leaks: 'leaktest', leak: 'leaktest', privacycheck: 'leaktest', vpntest: 'leaktest',
     vpncheck: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
+    spf: 'mail', dmarc: 'mail', dkim: 'mail', email: 'mail', mailcheck: 'mail',
     as: 'asn', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
     tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
   // man <command>: [synopsis, description, examples, see also, curl paths]
@@ -1425,7 +1524,16 @@
     lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
       ['lookup 8.8.8.8', 'lookup 2606:4700:4700::1111', 'lookup github.com'], ['whois', 'asn', 'dig'], ['/8.8.8.8', '/8.8.8.8/org', '/8.8.8.8?format=text']],
     dig: ['dig <domain> [type]   or   dig <ip>', "DNS records from Cloudflare's resolver (1.1.1.1). With a type, just that type with its TTLs: A AAAA CNAME MX NS TXT CAA SOA SRV PTR DS DNSKEY HTTPS. With an IP address, its reverse DNS name.",
-      ['dig example.com', 'dig gmail.com MX', 'dig github.com TXT', 'dig 8.8.8.8'], ['lookup', 'whois'], ['/dns/example.com', '/dns/gmail.com/MX', '/dns/example.com?format=text']],
+      ['dig example.com', 'dig gmail.com MX', 'dig github.com TXT', 'dig 8.8.8.8'], ['lookup', 'whois', 'mail'], ['/dns/example.com', '/dns/gmail.com/MX', '/dns/example.com?format=text']],
+    // The sixth entry: extra rows. The grading rubric is the same as MAIL_GRADES in worker.js and the README.
+    mail: ['mail <domain> [--dkim <selector>]', "checks a domain's email security: its mail servers and the provider behind them, SPF (following includes to count its DNS lookups against the limit of 10), the DMARC policy and where reports go, DKIM keys, MTA-STS (the record, plus the policy file fetched from https://mta-sts.<domain>), TLS-RPT and BIMI. Each finding is OK, WARN, FAIL or INFO, with a fix under every problem. Records come from Cloudflare's resolver (1.1.1.1) and are cached for five minutes.",
+      ['mail gmail.com', 'mail github.com', 'mail example.com', 'mail outlook.com --dkim selector1'], ['dig', 'whois'], ['/mail/gmail.com', '/mail/gmail.com?format=text', '/mail/outlook.com?dkim=selector1'],
+      [['GRADE', 'A: no FAIL and no WARN'], ['', 'B: no FAIL, one or two WARN'], ['', 'C: one FAIL, or three or more WARN'], ['', 'D: two FAIL'],
+        ['', 'F: three or more FAIL, no working SPF and no DMARC, or SPF that lets any server pass (+all)'], ['', 'INFO lines never count.'],
+        ['FAIL', 'no SPF or DMARC record; two of either; SPF over 10 lookups, with +all, or with errors; an MTA-STS record whose policy is missing, invalid or leaves out an MX host'],
+        ['WARN', 'DMARC p=none, pct below 100, sp=none or no report address; SPF ?all, no all, or ptr; DKIM keys under 2048 bits; no TLS-RPT beside MTA-STS; a BIMI logo without DMARC enforcement'],
+        ['DKIM', "selectors can't be listed, so only google, selector1, selector2, default, k1 and s1 are tried, and no key there is INFO. Name yours with --dkim: it is the s= value in a message's DKIM-Signature header."],
+        ['NULL MX', 'a domain that accepts no mail (MX 0 .) should have v=spf1 -all and DMARC p=reject; the other checks don\'t apply']]],
     whois: ['whois <ip | ASN | domain>', 'the registry record. For addresses and networks: owner, address block and abuse contact. For domains: registrar, registration and expiry dates, status and name servers. Straight from the registries over RDAP.',
       ['whois example.com', 'whois 8.8.8.8', 'whois AS13335'], ['lookup', 'asn', 'dig'], ['/whois/example.com', '/whois/8.8.8.8', '/whois/example.com?format=text']],
     asn: ['asn <number>', 'an autonomous system: a network such as an internet provider, a cloud or a large company. Shows its holder and registry, and how many IPv4 and IPv6 prefixes it announces, largest first.',
@@ -1452,7 +1560,7 @@
   const MAN_GUIDE = { whoami: 'what-your-ip-reveals', leaktest: 'what-your-ip-reveals', asn: 'what-is-an-asn', cidr: 'subnet-cheat-sheet' };
   const guideLink = slug => { const g = GUIDES.find(x => x[0] === slug), a = el('a', 'cmd', g ? g[1] : slug); a.href = '/guides/' + slug; return a; };
   // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup).
-  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'whois', 'cidr', 'subnet', 'dig', 'lookup', 'nslookup', 'asn', 'ping', 'traceroute',
+  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'lookup', 'nslookup', 'asn', 'ping', 'traceroute', 'dmarc',
     'share', 'copy', 'privacy', 'clear', 'history', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
   function osa(a, b) {
@@ -1503,6 +1611,7 @@
     const also = Object.keys(ALIASES).filter(a => ALIASES[a] === name && a !== '?');
     const rows = [['NAME', `${name} - ${m ? m[1] : h[1]}`], ['SYNOPSIS', m ? m[0] : h[0]]];
     if (m) rows.push(['EXAMPLES', joined(m[2].map(c => runnable(c, c)))]);
+    if (m && m[5]) rows.push(...m[5]);
     if (also.length) rows.push(['ALSO', also.join(', ')]);
     if (m && m[4]) m[4].forEach((p, i) => rows.push([i ? '' : 'CURL', curlLine(p)]));
     if (m && m[3].length) rows.push(['SEE ALSO', joined(m[3].map(c => cmdButton(c, 'man ' + c)))]);
@@ -1627,7 +1736,7 @@
 
   async function privacy() {
     await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
-      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.'], 'sys');
+      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, and a mail check also fetches the domain\'s own MTA-STS policy file. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
     const d = el('div', 'ln sys'); const a = el('a', 'cmd', 'read the full privacy policy ↗'); a.href = '/privacy';
     d.append(a); out.appendChild(d); scroll();
@@ -1648,6 +1757,7 @@
       [curlLine('/whois/example.com'), 'domain registration as JSON'],
       [curlLine('/cidr/10.0.0.0/22'), 'subnet calculation as JSON'],
       [curlLine('/dns/example.com'), 'DNS records as JSON (add /MX for one type)'],
+      [curlLine('/mail/gmail.com'), 'email security check (SPF, DMARC, DKIM, MTA-STS) and its grade as JSON'],
       [curlLine('/8.8.8.8?format=text'), 'any lookup as aligned text lines instead of JSON'],
       [curlLine('/help'), 'this reference as plain text'],
     ]);
@@ -1684,6 +1794,10 @@
         if (/^--?table$/i.test(args[0] || '') && CIDRLIB) return cidrTable();
         return cidr(args.join(' '));
       case 'dig': return args[0] ? dns(args[0], args[1]) : toolIntro('dns');
+      case 'mail':
+        if (!args.length) { await toolIntro('mail'); return next(['man mail', 'man mail', 'the checks, and how the grade works']); }
+        // `dkim example.com selector1` names the selector without --dkim
+        return mail(lc === 'dkim' && args[1] && !/^-/.test(args[1]) ? [args[0], '--dkim', args[1]] : args);
       case 'lookup': return args[0] ? lookup(args[0]) : line('usage: lookup <ip, domain or ASN>   example: lookup 8.8.8.8', 'warn');
       case 'asn': return args[0] ? asn(args[0]) : line('usage: asn <number>   example: asn AS13335', 'warn');
       case 'ping': return ping(args);
@@ -1719,7 +1833,7 @@
       case 'about':
         return lines([
           'ipterm shows who operates an IP address or network and roughly where it sits.',
-          "Your own address comes from Cloudflare's edge data. Other addresses come from IPinfo. Networks come from RIPEstat. Registry records (whois) come from the regional internet registries, and for domains from the domain's registry and registrar, via RDAP. DNS answers come from Cloudflare's public resolver (1.1.1.1).",
+          "Your own address comes from Cloudflare's edge data. Other addresses come from IPinfo. Networks come from RIPEstat. Registry records (whois) come from the regional internet registries, and for domains from the domain's registry and registrar, via RDAP. DNS answers come from Cloudflare's public resolver (1.1.1.1), and so do mail checks, apart from the MTA-STS policy file, which comes from the domain's own server.",
           "IP location is approximate. It usually points at the ISP's routing hub, not a street address.",
           'The map shows that uncertainty as lit dots. Click a map to switch between world view and zoomed in.',
           'Map data: Natural Earth (public domain).',
@@ -1795,7 +1909,7 @@
   }));
   screen.addEventListener('mouseup', () => { if (!String(getSelection())) focusInput(); });
   window.addEventListener('popstate', () => {
-    const c = cmdFor(location.pathname);
+    const c = cmdFor(location.pathname, location.search);
     if (!c || !live) return;
     navPush = false;
     exec(c).finally(() => { navPush = true; });
@@ -1838,7 +1952,7 @@
     if (init && init.kind === 'notfound') { setLive(true); notFound(init); return focusInput(); }
     if (init && init.kind === 'tool' && (TOOL_INTRO[init.tool] || init.tool === 'leaktest' || init.tool === 'api')) {
       setLive(true);
-      const cmd = running = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest', api: 'api' }[init.tool];
+      const cmd = running = { whois: 'whois', dns: 'dig', mail: 'mail', cidr: 'cidr', leaktest: 'leaktest', api: 'api' }[init.tool];
       const mark = out.lastChild;
       navPush = false;
       try { await run(cmd); } finally { navPush = true; }
@@ -1846,15 +1960,19 @@
       flushNext();
       return focusInput();
     }
-    if (init && ['ip', 'asn', 'whois', 'dns', 'cidr'].includes(init.kind) && init.query) {
+    if (init && ['ip', 'asn', 'whois', 'dns', 'mail', 'cidr'].includes(init.kind) && init.query) {
       setLive(true);
+      const mailCmd = ['mail', init.query, ...(init.dkim ? ['--dkim', init.dkim] : [])];
       const cmd = init.kind === 'cidr' ? 'cidr ' + init.query : init.kind === 'dns' ? 'dig ' + init.query + (init.qtype && init.qtype !== 'PTR' ? ' ' + init.qtype : '')
-        : (init.kind === 'asn' ? 'asn ' : init.kind === 'whois' ? 'whois ' : 'lookup ') + init.query;
+        : init.kind === 'mail' ? mailCmd.join(' ') : (init.kind === 'asn' ? 'asn ' : init.kind === 'whois' ? 'whois ' : 'lookup ') + init.query;
       running = cmd;
       echo(cmd); hist.push(cmd); hIdx = hist.length;
       const mark = out.lastChild;
       navPush = false;
-      try { await (init.kind === 'asn' ? asn(init.query, init) : init.kind === 'whois' ? whois(init.query, init) : init.kind === 'dns' ? dns(init.query, init.qtype, init) : init.kind === 'cidr' ? cidr(init.query, init) : lookup(init.query, init)); }
+      try {
+        await (init.kind === 'asn' ? asn(init.query, init) : init.kind === 'whois' ? whois(init.query, init) : init.kind === 'dns' ? dns(init.query, init.qtype, init)
+          : init.kind === 'mail' ? mail(mailCmd.slice(1), init) : init.kind === 'cidr' ? cidr(init.query, init) : lookup(init.query, init));
+      }
       finally { navPush = true; }
       if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
       flushNext();

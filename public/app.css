@@ -93,6 +93,7 @@ body{background:var(--bg);color:var(--fg);font:400 14px/1.6 var(--f-mono)}
 .tag.pub{color:var(--accent)} .tag.priv{color:var(--warn)}
 /* privacy check status: the word (ok / leak / info) carries the meaning, color only reinforces it */
 .tag.st-ok{color:var(--accent)} .tag.st-warn{color:var(--err)} .tag.st-info{color:var(--dim)}
+.tag.st-fail{color:var(--err)} .tag.st-caution{color:var(--warn)}
 
 .kv{display:grid;grid-template-columns:max-content minmax(0,1fr);column-gap:20px;margin:6px 0 4px 2px}
 .kv dt{color:var(--dim)}
