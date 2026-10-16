@@ -867,7 +867,9 @@ function parseProxycheck(j, ip) {
   for (const [k, v] of Object.entries(e.detections)) det[k.toLowerCase()] = v;
   const yes = k => det[k] === true || det[k] === 'yes';
   const vpn = yes('vpn'), proxy = yes('proxy'), tor = yes('tor'), compromised = yes('compromised');
-  const risk = num(det.risk);
+  // v3 puts risk beside detections, on the address's own entry (only confidence is inside); detections
+  // is read too, in case an answer has it there.
+  const risk = num(e.risk ?? det.risk);
   const op = e.operator && typeof e.operator === 'object' ? txt(e.operator.name, 60) : null;
   const nt = e.network && typeof e.network === 'object' && typeof e.network.type === 'string' ? e.network.type.toLowerCase() : null;
   return {
@@ -1588,11 +1590,16 @@ function dnsPage(io, d, status) {
   let summary;
   if (parseIp(name)) summary = R.PTR ? `The reverse DNS (PTR) name for ${name} is ${list(vals('PTR'))}.` : `${name} has no reverse DNS (PTR) record.`;
   else {
-    const parts = [];
+    // The first clause names the domain (a one-type page, /dns/gmail.com/MX, has no A records to lead with).
+    const parts = [], add = (first, later) => parts.push(parts.length ? later : first);
     if (R.A || R.AAAA) parts.push(`${name} resolves to ${list([...vals('A'), ...vals('AAAA')])}`);
-    if (d.cname && d.cname.length) parts.push(`it is an alias of ${d.cname[0]}`);
-    if (R.MX) parts.push(mail.length ? `mail is handled by ${list(mail, 2)}` : 'it accepts no mail (null MX)');
-    if (R.NS) parts.push(`name servers are ${list(vals('NS'), 2)}`);
+    if (d.cname && d.cname.length) add(`${name} is an alias of ${d.cname[0]}`, `it is an alias of ${d.cname[0]}`);
+    if (R.MX) add(mail.length ? `Mail for ${name} is handled by ${list(mail, 2)}` : `${name} accepts no mail (null MX)`,
+      mail.length ? `mail is handled by ${list(mail, 2)}` : 'it accepts no mail (null MX)');
+    if (R.NS) add(`The name servers for ${name} are ${list(vals('NS'), 2)}`, `name servers are ${list(vals('NS'), 2)}`);
+    // Other one-type pages (TXT, CAA, SOA...): how many there are, rather than claiming there are none.
+    const n = single && !['A', 'AAAA', 'MX', 'NS'].includes(single) && R[single] ? R[single].length : 0;
+    if (n) add(`${name} has ${n} ${single} record${n === 1 ? '' : 's'}`, `it has ${n} ${single} record${n === 1 ? '' : 's'}`);
     summary = (parts.length ? parts.join('; ') : `${name} has no ${single || 'common'} records`) + '.' +
       (d.hosting && d.hosting.org ? ` Hosted by ${d.hosting.org}${d.hosting.asn ? ` (${d.hosting.asn})` : ''}.` : '') +
       (d.dnssec ? ' DNSSEC: validated.' : '');
