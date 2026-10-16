@@ -1,4 +1,23 @@
+# Dependencies and Wrangler's local state (it can hold cached responses and Durable Object data)
 node_modules/
 .wrangler/
+
+# Secrets for local development: never commit these. Production secrets live in Cloudflare
+# (`npx wrangler secret put`), not in files.
 .dev.vars*
 .env*
+*.pem
+*.key
+
+# Claude Code: worktrees (whole checkouts of other branches) and per-user settings stay on this machine.
+# .claude/launch.json (dev-server configs for the desktop app) is shared on purpose.
+.claude/worktrees/
+.claude/settings.local.json
+
+# Editors, operating systems and logs
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log

@@ -51,17 +51,30 @@
      land into a tiny mask canvas (one pixel per dot), then draws one dot per cell. */
   const GEO = window.IPTERM_GEO || null;
   const ASPECT = 2.2, CITY_KM = 50, ZOOM_MS = 1400, PULSE_MS = 20000;
-  let LAND_PATH = null;
+  // Some rings cross the antimeridian by jumping from 180 to -180 (Eurasia at 65°N and 69°N, Wrangel
+  // Island at 71°N). Filled as they are, the jumps flip even-odd parity across the whole band, so each
+  // ring is unwrapped into one continuous outline that may run past ±180 (paint() draws the path at
+  // -360, 0 and +360), then moved by 360 if its middle ended up outside ±180. A ring that goes all the
+  // way around (Antarctica) is closed along its pole. LAND_X is the path's longitude extent.
+  let LAND_PATH = null, LAND_X = null;
   function landPath() {
     if (LAND_PATH || !GEO) return LAND_PATH;
-    LAND_PATH = new Path2D();
+    LAND_PATH = new Path2D(); LAND_X = [Infinity, -Infinity];
     for (const f of GEO.land) {
-      let x = 0, y = 0;
+      const pts = [];
+      let x = 0, y = 0, shift = 0, lo = Infinity, hi = -Infinity;
       for (let i = 0; i < f.length; i += 2) {
+        if (i && Math.abs(f[i]) > 3600) shift -= Math.sign(f[i]) * 360;
         x += f[i]; y += f[i + 1];
-        if (i) LAND_PATH.lineTo(x / 20, y / 20); else LAND_PATH.moveTo(x / 20, y / 20);
+        const px = x / 20 + shift;
+        pts.push([px, y / 20]); lo = Math.min(lo, px); hi = Math.max(hi, px);
       }
+      if (Math.abs(f[0] - x) > 3600) shift -= Math.sign(f[0] - x) * 360;   // the closing edge
+      if (shift) { const pole = y < 0 ? -90 : 90; pts.push([pts[pts.length - 1][0], pole], [f[0] / 20, pole]); }
+      const k = lo + hi > 360 ? -360 : lo + hi < -360 ? 360 : 0;
+      pts.forEach(([px, py], i) => { if (i) LAND_PATH.lineTo(px + k, py); else LAND_PATH.moveTo(px + k, py); });
       LAND_PATH.closePath();
+      LAND_X[0] = Math.min(LAND_X[0], lo + k); LAND_X[1] = Math.max(LAND_X[1], hi + k);
     }
     return LAND_PATH;
   }
@@ -138,7 +151,7 @@
     mctx.setTransform(1, 0, 0, 1, 0, 0); mctx.clearRect(0, 0, cols, rows);
     const sx = cols / lonSpan, sy = rows / v.span, path = landPath();
     for (const off of [-360, 0, 360]) {
-      if (lon0 + lonSpan < off - 180 || lon0 > off + 180) continue;
+      if (lon0 + lonSpan < off + LAND_X[0] || lon0 > off + LAND_X[1]) continue;
       mctx.setTransform(sx, 0, 0, -sy, (off - lon0) * sx, latTop * sy);
       mctx.fill(path, 'evenodd');
     }
@@ -713,6 +726,7 @@
      always gets its line. */
   let SPONSORS = [], SPONSOR_EVERY = 3, sinceShown = -1;   // -1: none shown yet
   async function loadSponsors() {
+    if (document.querySelector('[data-copy]')) return;  // a self-hosted copy (SELF_HOSTED in wrangler.toml) shows none
     for (const path of ['/sponsors.json', 'sponsors.json']) {
       try {
         const r = await fetch(path, { headers: { accept: 'application/json' } });
@@ -1688,7 +1702,7 @@
   // man <command>: [synopsis, description, examples, see also, curl paths]
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
-      ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/json', '/city', '/?format=text']],
+      ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/me', '/json', '/city', '/line', '/?format=text']],
     leaktest: ['leaktest', "VPN and DNS leak test: is your IP a known VPN, which DNS servers look up sites for you, and does WebRTC, IPv6 or your time zone give away more than your IP? For DNS, your browser looks up a few random names under ipterm's own DNS server (which answers \"no such name\"), and the check shows which resolvers asked: on a VPN, any outside the VPN's network is a DNS leak. Runs in your browser in a few seconds; nothing is stored.",
       ['leaktest'], ['whoami']],
     lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
@@ -1720,8 +1734,8 @@
     history: ['history', 'lists the commands you ran in this tab. Up and Down recall them at the prompt. Nothing is saved after you close the tab.', ['history'], ['clear']],
     theme: ['theme [phosphor | amber | ice | contrast | paper]', 'changes the colors; with no name, moves to the next theme. Remembered on this device only.', ['theme amber', 'theme paper', 'theme contrast'], ['crt', 'access']],
     crt: ['crt [on | off]', 'turns the CRT glow, scanlines and vignette on or off; with neither, switches. Remembered on this device only.', ['crt off', 'crt on'], ['theme', 'access']],
-    api: ['api', 'how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP). One value at a time as plain text: /asn, /org, /cc, /city, /tz, /colo and /hostname for your own address, /<ip>/asn, org, cc, country, continent or hostname for any other. Add ?format=text to any lookup for aligned lines instead of JSON. curl …/help prints the whole reference.',
-      ['api'], ['whoami', 'lookup'], ['/help', '/asn', '/8.8.8.8/country', '/8.8.8.8?format=text']],
+    api: ['api', "how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP). /me draws a card of your own address with a world map (?w=<columns> to fit, ?color=0 for no colors, ?redact to hide the IP). One value at a time as plain text: /asn, /org, /cc, /city, /tz, /colo and /hostname for your own address, /<ip>/asn, org, cc, country, continent or hostname for any other. /line puts your IP, network, country and data center on one line for a shell prompt. /expect/<ASN or country code> answers HTTP 200 when your address matches and 412 when it doesn't, so curl -fs …/expect/AS13335 || <stop something> works as a VPN kill switch. Add ?format=text to any lookup for aligned lines instead of JSON. curl …/help prints the whole reference.",
+      ['api'], ['whoami', 'lookup'], ['/help', '/me', '/asn', '/line', '-fs /expect/AS13335', '/8.8.8.8/country', '/8.8.8.8?format=text']],
     man: ['man <command>', 'shows the manual for a command: what it does, examples to click and related commands. help <command> and <command> --help do the same.', ['man dig', 'man whois'], ['help']],
     help: ['help [command]', 'lists every command; click one to run it. With a command name, shows its manual.', ['help', 'help dig'], ['man']],
   };
@@ -1921,8 +1935,11 @@
     setUrl('/api', 'ipterm API: IP address lookups from curl and scripts | ipterm');
     await kv([
       [curlLine(''), 'your IP as plain text'],
+      [curlLine('/me'), 'a card with a world map: your IP, network, place and time zone (?w=40, ?color=0, ?redact)'],
       [curlLine('/json'), 'your IP details as JSON'],
       [curlLine('/asn'), 'one value for your own address: /asn /org /cc /city /tz /colo /hostname'],
+      [curlLine('/line'), 'IP, network, country and data center on one line, for shell prompts and tmux'],
+      [curlLine('/expect/AS13335', '-fs'), 'HTTP 200 if you are on that network (or /expect/CH for a country), 412 if not: a VPN kill switch'],
       [curlLine('/8.8.8.8'), 'any IP as JSON'],
       [curlLine('/8.8.8.8/country'), 'one value for any IP: asn, org, cc, country, continent or hostname'],
       [curlLine('/AS13335'), 'any network as JSON'],
@@ -1945,6 +1962,18 @@
     if (!live) line('These routes work once the Worker is deployed.', 'sys');
     announce('API reference: curl commands for your IP, one value at a time, any IP, network, DNS name, registry record or subnet.');
     next(['whoami', 'whoami', 'your own IP, as /json returns it'], ['lookup 8.8.8.8', 'lookup 8.8.8.8', 'what /8.8.8.8 returns, drawn in the terminal']);
+  }
+
+  // The end of `about`: whether this is a copy, and the deployed build, from the footer the server filled in
+  // (data-copy, data-build, data-source: footBuild() in worker.js).
+  function about() {
+    const copy = document.querySelector('[data-copy]'), b = document.querySelector('[data-build]');
+    if (copy) line(`${location.host} runs a copy of ipterm's open-source code, set up by someone else: it is not ipterm.net.`, 'sys');
+    if (!b) return;
+    const d = el('div', 'ln sys'), sha = b.dataset.build, src = b.dataset.source;
+    if (sha) d.append('the code we deploy: ' + sha + (src ? '  ' : ''));
+    if (src) { const a = el('a', 'cmd', sha ? 'read it ↗' : 'source code ↗'); a.href = src; a.target = '_blank'; a.rel = 'noopener'; d.append(a); }
+    out.appendChild(d); scroll();
   }
 
   async function run(raw) {
@@ -2013,7 +2042,7 @@
           'The map shows that uncertainty as lit dots. Click a map to switch between world view and zoomed in.',
           'Map data: Natural Earth (public domain).',
           'No cookies and no tracking. Sponsored lines are labeled and are plain links. Type privacy for details.',
-        ], 'sys');
+        ], 'sys').then(about);
       default: {
         if (parseIp(c0) || /^as\d+$/i.test(c0)) return lookup(c0);
         if (looksLikeCidr(cmd)) return cidr(cmd);

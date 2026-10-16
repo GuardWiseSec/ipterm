@@ -40,6 +40,15 @@ run_worker_first = [
 # curl and server-side scripts work either way.
 PUBLIC_API = "false"
 
+# Running your own copy? Set this to "true": every page is marked noindex (so the copy doesn't compete
+# with ipterm.net in search), the sitemap is empty, sponsors.json is ignored (no sponsored line), and the
+# footer, `about` and /help say the site is a copy of ipterm. See "Self-hosting" in the README.
+SELF_HOSTED = "false"
+
+# Where the source code lives. The footer, `about` and /help link the deployed build's commit here
+# (<SOURCE_URL>/commit/<sha>), so anyone can read the code that is running. Leave it empty for no link.
+SOURCE_URL = "https://github.com/GuardWiseSec/ipterm"
+
 # Which IPinfo plan your IPINFO_TOKEN is on: "lite" (free: country and network only) or
 # "core" (paid: adds city, region, coordinates, time zone and connection type).
 # If Core's monthly quota runs out, lookups fall back to Lite automatically.
@@ -71,6 +80,12 @@ PROXYCHECK_DAILY_BUDGET = "900"
 # first (dnsleak-server/README.md). Remove either line to turn the test off again.
 DNSLEAK_ZONE = "dl.ipterm.net"
 DNSLEAK_API = "https://dlapi.ipterm.net"
+
+# The deployed version's id and tag. `npm run deploy` (tools/deploy.mjs) tags each version with the git
+# short SHA, and the footer, `about` and /help show it as "the code we deploy". A plain `wrangler deploy`
+# has no tag, so they show no SHA.
+[version_metadata]
+binding = "CF_VERSION_METADATA"
 
 # The daily counter for IPINFO_DAILY_BUDGET and PROXYCHECK_DAILY_BUDGET (a Durable Object; included in the free Workers plan).
 [[durable_objects.bindings]]
