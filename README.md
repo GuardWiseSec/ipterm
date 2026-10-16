@@ -72,7 +72,8 @@ is paused for a minute; if Core refuses the token or quota, it's paused for ten.
 raise the number to about your monthly allowance divided by 31.
 
 Only fresh lookups count: lookups of other addresses, and `leaktest`'s check of the visitor's own address. Cached results (six hours), `whoami` (your visitors'
-own location comes from Cloudflare), DNS, whois and the subnet calculator never use the quota. If
+own location comes from Cloudflare), DNS, whois, the subnet calculator and the command line's one-value
+endpoints (`/asn`, `/8.8.8.8/org` and the rest, which use IPinfo Lite) never use the quota. If
 the monthly quota runs out anyway, or the token is refused, or the counter can't be reached,
 lookups fall back to IPinfo Lite rather than failing.
 
@@ -87,7 +88,8 @@ npx wrangler secret put PROXYCHECK_KEY
 ```
 
 - **When it's asked:** every `leaktest` (your own address), and lookups of other addresses that
-  IPinfo hasn't already flagged. Not for whoami, DNS, whois or the "hosted by" lines.
+  IPinfo hasn't already flagged. Not for whoami, DNS, whois, the "hosted by" lines or the one-value
+  endpoints (`/8.8.8.8/org`).
 - **Budget:** `PROXYCHECK_DAILY_BUDGET` (default 900) queries a day, paced to
   `PROXYCHECK_HOURLY_BUDGET` an hour (default twice an even share, 75) and
   `PROXYCHECK_VISITOR_HOURLY` per visitor (default 10), counted by the same `LookupBudget` Durable
@@ -140,9 +142,54 @@ curl https://your-domain              # your IP as plain text
 curl https://your-domain/json         # your details as JSON
 curl https://your-domain/8.8.8.8      # any IP as JSON
 curl https://your-domain/AS13335      # any network (ASN) as JSON
+curl https://your-domain/help         # the command-line reference as plain text
 ```
 
 Add `?format=json` to force JSON from a browser.
+
+### The command line (curl-first)
+
+`curl ipterm.net/help` prints the whole reference as plain text. `/api` is the same reference as a web page
+for browsers (a landing page like `/whois`, with the terminal running `api`), and command-line clients that ask
+for `/api` get the plain text too. Browsers that open `/help` are sent to `/api`.
+
+**One value for your own address**, plain text with a trailing newline, straight from Cloudflare's
+`request.cf`, so they make no outside call and don't count toward the rate limit:
+
+| Path | Value |
+| --- | --- |
+| `/asn` | your network's AS number (`AS13335`) |
+| `/org` | your network's name |
+| `/cc` | your country code, ISO 3166-1 (Cloudflare uses `T1` for Tor). Not `/country`: that path is kept free for country pages |
+| `/city` | your city |
+| `/tz` | your time zone (`Europe/Berlin`) |
+| `/colo` | the Cloudflare data center that answered |
+| `/hostname` | your reverse DNS name: the only one that asks anybody (Cloudflare's resolver), so it is rate limited |
+
+**One value for any public address:** `/<ip>/<field>` with `asn`, `org`, `cc`, `country` (the name),
+`continent` or `hostname`, e.g. `curl ipterm.net/8.8.8.8/country`. These always use IPinfo Lite
+(`ipData(..., { lite: true })`, without `withPrivacy()`), so they never spend the IPinfo Core budget or
+proxycheck.io's allowance, however hard a script hits them. `city` and `tz` for other addresses answer
+with a short explanation, since Lite has country and network only. Private addresses get HTTP 400.
+
+A missing value is an empty line with HTTP 404, so `curl -fs ipterm.net/city` exits non-zero and
+`$(curl -s ...)` is empty. Because a second line would break `$(curl ...)`, the IPinfo credit for these rides in
+an `x-attribution` response header instead (it is in `/help`, `/api`, the OpenAPI file and `llms.txt` too).
+
+**Aligned text instead of JSON:** add `?format=text` to `/`, `/json`, `/<ip>`, `/AS<number>`, `/dns/...`,
+`/whois/...`, `/cidr/...` (and their `/api/...` forms) for key/value lines like the terminal draws.
+Browsers get the text too. Results that include IPinfo data end with `IP address data powered by IPinfo
+(https://ipinfo.io)`, as IPinfo's free-data terms ask. JSON stays the default for command-line clients,
+and `curl ipterm.net` still prints the bare address. Shells such as zsh treat `?` as a wildcard, so the
+reference quotes those URLs: `curl 'ipterm.net/8.8.8.8?format=text'`.
+
+Text answers carry no sponsored line (that line only exists in the browser terminal), and every value
+from upstream (TXT records, registry names) has control characters and bidi overrides replaced with `?`,
+so a hostile record can't send escape sequences to the reader's terminal (`plain()` in `src/worker.js`).
+
+**Machine-readable descriptions:** `public/openapi.json` (OpenAPI 3.1) and `public/llms.txt` are static files,
+listed in `run_worker_first`'s exclusions so they don't count as Worker requests. Their links are written
+for `https://ipterm.net`; change them if you deploy elsewhere. Edit them whenever a route changes.
 
 The homepage itself carries the visitor's address: the Worker writes their IP, network and location into the
 HTML (`homePage()` in `src/worker.js`), so the number is there on first paint and without JavaScript, and the
@@ -236,6 +283,8 @@ sponsored line (any sponsor with `"check"` in its `on` list in `sponsors.json`, 
   a popular search topic, without any upstream lookup.
 - `/whois`, `/dns` and `/cidr` on their own are landing pages for each tool (what it does, usage and
   example links), and typing `whois`, `dig` or `cidr` with nothing after it shows the same thing.
+  `/api` is the API docs page (the terminal runs `api`; the plain-text reference stays in the HTML for
+  visitors without JavaScript), and it is in the sitemap.
 - Addresses that don't exist get a 404 page in the terminal's style with a "did you mean" link when
   the address looks like an IP, ASN or domain. A domain typed straight after the slash
   (`/github.com`) redirects to its DNS page. Invalid lookups (`/whois/not-a-domain!`) show the error
@@ -336,7 +385,8 @@ The Worker only runs for pages and the API (`run_worker_first` in `wrangler.toml
 fonts, images and map data are served directly by Cloudflare, which is free and unlimited, and get their
 headers from `public/_headers`. A first visit costs 1 Worker request (the homepage carries the visitor's
 address, so the terminal doesn't call the API) and each further lookup or page 1, so the free plan's 100,000
-requests a day covers up to about 100,000 visits. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
+requests a day covers up to about 100,000 visits. Every curl call (`/help`, `/asn`, `/8.8.8.8/org`, a
+`?format=text` lookup) is one request too; `/openapi.json` and `/llms.txt` are not. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
 which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
 requests.
 
@@ -349,6 +399,7 @@ so it doesn't count against the limit. Watch usage under **Workers & Pages → i
 | --- | --- | --- |
 | Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them | `[[ratelimits]]` in `wrangler.toml` | Edit `limit` (period must be 10 or 60 seconds) |
 | Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
+| Plain-text answers (`?format=text`, one-value endpoints) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal | `plain()` in `src/worker.js` | |
 | Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
 | Cross-site browser access (CORS) off by default | `PUBLIC_API` in `wrangler.toml` | Set to `"true"` to offer a public browser API |
 | Private, loopback, CGNAT, multicast and documentation addresses rejected before any upstream call | `nonPublicReason()` in `src/worker.js` | |

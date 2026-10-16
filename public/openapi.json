@@ -1,0 +1,268 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ipterm",
+    "version": "1.0.0",
+    "summary": "IP address, network (ASN), DNS, registry (whois) and subnet lookups for curl and scripts.",
+    "description": "No key and no sign-up. Command-line clients (curl, wget, HTTPie, PowerShell...) and scripts get JSON; browsers get an HTML page at the same address, so send `?format=json` from a browser-like client to be sure of JSON. Add `?format=text` to any lookup for aligned key/value lines instead of JSON (quote the URL in a shell). One-value endpoints answer with a single line of plain text; a missing value is an empty line with HTTP 404. Uncached lookups are limited to 30 a minute per address (IPv6: per /64), after which the answer is HTTP 429 with a Retry-After header. No cookies, no tracking, and nothing about callers is stored (https://ipterm.net/privacy). Plain-text reference: `curl ipterm.net/help`.\n\nIP address data powered by IPinfo (https://ipinfo.io), used under CC BY-SA 4.0. Networks: RIPEstat. Registry records: RDAP from the regional internet registries and domain registries. DNS: Cloudflare's public resolver (1.1.1.1).",
+    "contact": { "email": "contact@ipterm.net", "url": "https://ipterm.net/api" }
+  },
+  "servers": [{ "url": "https://ipterm.net" }],
+  "tags": [
+    { "name": "you", "description": "Your own address, from Cloudflare's edge (request.cf). No third-party lookup." },
+    { "name": "lookup", "description": "Any public IP address or network." },
+    { "name": "tools", "description": "DNS, registry records (whois) and the subnet calculator." },
+    { "name": "docs", "description": "Help and machine-readable descriptions." }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": ["you"], "operationId": "myIp",
+        "summary": "Your IP address as plain text (command-line clients)",
+        "description": "Command-line clients get the bare address and a newline. Browsers get the terminal page. With ?format=text, anyone gets your details as aligned lines.",
+        "parameters": [{ "$ref": "#/components/parameters/formatText" }],
+        "responses": { "200": { "$ref": "#/components/responses/OneValue" } }
+      }
+    },
+    "/ip": {
+      "get": {
+        "tags": ["you"], "operationId": "myIpPlain", "summary": "Your IP address as plain text, for any client",
+        "responses": { "200": { "$ref": "#/components/responses/OneValue" } }
+      }
+    },
+    "/json": {
+      "get": {
+        "tags": ["you"], "operationId": "myDetails", "summary": "Your IP, network, location and reverse DNS name",
+        "parameters": [{ "$ref": "#/components/parameters/format" }],
+        "responses": {
+          "200": { "description": "Your details.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IpInfo" } }, "text/plain": { "schema": { "type": "string" } } } },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/asn": { "get": { "tags": ["you"], "operationId": "myAsn", "summary": "Your network's AS number, e.g. AS13335", "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" } } } },
+    "/org": { "get": { "tags": ["you"], "operationId": "myOrg", "summary": "Your network's name", "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" } } } },
+    "/cc": { "get": { "tags": ["you"], "operationId": "myCountryCode", "summary": "Your country code (ISO 3166-1 alpha-2; Cloudflare uses T1 for Tor)", "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" } } } },
+    "/city": { "get": { "tags": ["you"], "operationId": "myCity", "summary": "Your city (approximate: usually your provider's nearest hub)", "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" } } } },
+    "/tz": { "get": { "tags": ["you"], "operationId": "myTimeZone", "summary": "Your time zone (IANA name, e.g. Europe/Berlin)", "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" } } } },
+    "/colo": { "get": { "tags": ["you"], "operationId": "myColo", "summary": "The Cloudflare data center that answered you (airport code)", "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" } } } },
+    "/hostname": {
+      "get": {
+        "tags": ["you"], "operationId": "myHostname", "summary": "Your reverse DNS (PTR) name",
+        "description": "The only one-value endpoint for your own address that asks anybody: Cloudflare's resolver. Counts toward the rate limit.",
+        "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/Upstream" } }
+      }
+    },
+    "/{ip}": {
+      "get": {
+        "tags": ["lookup"], "operationId": "lookupIp", "summary": "Owner, network and location of any IPv4 or IPv6 address",
+        "parameters": [{ "$ref": "#/components/parameters/ip" }, { "$ref": "#/components/parameters/format" }],
+        "responses": {
+          "200": { "description": "The address's details. Your own address returns the same as /json.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IpInfo" } }, "text/plain": { "schema": { "type": "string" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/Upstream" }
+        }
+      }
+    },
+    "/{ip}/{field}": {
+      "get": {
+        "tags": ["lookup"], "operationId": "lookupIpField", "summary": "One value for any public address, as plain text",
+        "description": "Country and network data (IPinfo Lite) plus the reverse DNS name. Cached for six hours.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ip" },
+          { "name": "field", "in": "path", "required": true, "schema": { "type": "string", "enum": ["asn", "org", "cc", "country", "continent", "hostname"] },
+            "description": "asn (AS13335), org (network name), cc (country code), country (country name), continent, hostname (reverse DNS)" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/OneValue" },
+          "400": { "description": "Not a public address.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "No value for this address (an empty line), or an unknown field (a message listing the fields).", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/Upstream" }
+        }
+      }
+    },
+    "/AS{number}": {
+      "get": {
+        "tags": ["lookup"], "operationId": "lookupAsn", "summary": "A network (autonomous system): holder, registry and announced prefixes",
+        "parameters": [
+          { "name": "number", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1, "maximum": 4294967295 }, "example": 13335 },
+          { "$ref": "#/components/parameters/format" }
+        ],
+        "responses": {
+          "200": { "description": "The network.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Asn" } }, "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "No holder or announced prefixes (found: false)." },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/Upstream" }
+        }
+      }
+    },
+    "/dns/{name}": {
+      "get": {
+        "tags": ["tools"], "operationId": "dnsSummary", "summary": "A, AAAA, MX, NS, TXT and CAA records, the host of the first address, and DNSSEC",
+        "description": "With an IP address as the name: its reverse DNS (PTR). A nonexistent domain answers 200 with status NXDOMAIN.",
+        "parameters": [{ "$ref": "#/components/parameters/dnsName" }, { "$ref": "#/components/parameters/format" }],
+        "responses": { "200": { "$ref": "#/components/responses/Dns" }, "400": { "$ref": "#/components/responses/BadRequest" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/Upstream" } }
+      }
+    },
+    "/dns/{name}/{type}": {
+      "get": {
+        "tags": ["tools"], "operationId": "dnsType", "summary": "One record type, with TTLs",
+        "parameters": [
+          { "$ref": "#/components/parameters/dnsName" },
+          { "name": "type", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/DnsType" } },
+          { "$ref": "#/components/parameters/format" }
+        ],
+        "responses": { "200": { "$ref": "#/components/responses/Dns" }, "400": { "$ref": "#/components/responses/BadRequest" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/Upstream" } }
+      }
+    },
+    "/whois/{query}": {
+      "get": {
+        "tags": ["tools"], "operationId": "whois", "summary": "Registry record (RDAP) for an IP address, AS number or domain",
+        "description": "Addresses and networks: owner, address block, dates and abuse contact. Domains: registrar, registration and expiry dates, status, name servers, DNSSEC and abuse contact; owner details are usually redacted.",
+        "parameters": [
+          { "name": "query", "in": "path", "required": true, "schema": { "type": "string" }, "examples": { "domain": { "value": "example.com" }, "ip": { "value": "8.8.8.8" }, "asn": { "value": "AS13335" } } },
+          { "$ref": "#/components/parameters/format" }
+        ],
+        "responses": {
+          "200": { "description": "The record.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Whois" } }, "text/plain": { "schema": { "type": "string" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "description": "No record (found: false, often with a message explaining why)." },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/Upstream" }
+        }
+      }
+    },
+    "/cidr/{network}/{prefix}": {
+      "get": {
+        "tags": ["tools"], "operationId": "cidr", "summary": "Subnet calculator (IPv4 and IPv6); pure calculation, no outside calls",
+        "parameters": [
+          { "name": "network", "in": "path", "required": true, "schema": { "type": "string" }, "example": "10.0.0.0" },
+          { "name": "prefix", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 0, "maximum": 128 }, "example": 22 },
+          { "$ref": "#/components/parameters/format" }
+        ],
+        "responses": {
+          "200": { "description": "The calculation.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Cidr" } }, "text/plain": { "schema": { "type": "string" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/lookup": {
+      "get": {
+        "tags": ["lookup"], "operationId": "apiLookup", "summary": "IP details as JSON, always (no ip: yourself)",
+        "parameters": [{ "name": "ip", "in": "query", "schema": { "type": "string" } }, { "$ref": "#/components/parameters/format" }],
+        "responses": { "200": { "description": "As /{ip}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IpInfo" } } } } }
+      }
+    },
+    "/api/asn": { "get": { "tags": ["lookup"], "operationId": "apiAsn", "summary": "As /AS{number}, always JSON", "parameters": [{ "name": "asn", "in": "query", "required": true, "schema": { "type": "string" }, "example": "AS13335" }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /AS{number}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Asn" } } } } } } },
+    "/api/dns": { "get": { "tags": ["tools"], "operationId": "apiDns", "summary": "As /dns/{name}[/{type}], always JSON", "parameters": [{ "name": "name", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "type", "in": "query", "schema": { "$ref": "#/components/schemas/DnsType" } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "$ref": "#/components/responses/Dns" } } } },
+    "/api/whois": { "get": { "tags": ["tools"], "operationId": "apiWhois", "summary": "As /whois/{query}, always JSON", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /whois/{query}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Whois" } } } } } } },
+    "/api/cidr": { "get": { "tags": ["tools"], "operationId": "apiCidr", "summary": "As /cidr/{network}/{prefix}, always JSON; also accepts an address and netmask", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" }, "examples": { "cidr": { "value": "10.0.0.0/22" }, "netmask": { "value": "192.168.1.10 255.255.255.0" } } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /cidr/{network}/{prefix}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Cidr" } } } } } } },
+    "/help": {
+      "get": {
+        "tags": ["docs"], "operationId": "help", "summary": "The command-line reference as plain text",
+        "description": "Browsers are redirected to the /api page.",
+        "responses": { "200": { "description": "The reference.", "content": { "text/plain": { "schema": { "type": "string" } } } }, "302": { "description": "Browsers: to /api." } }
+      }
+    },
+    "/api": {
+      "get": {
+        "tags": ["docs"], "operationId": "apiDocs", "summary": "API docs: an HTML page for browsers, the /help text for command-line clients",
+        "responses": { "200": { "description": "The docs.", "content": { "text/html": { "schema": { "type": "string" } }, "text/plain": { "schema": { "type": "string" } } } } }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "format": { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["json", "text"] }, "description": "json: JSON even for browser-like clients. text: aligned key/value lines instead of JSON." },
+      "formatText": { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["text"] }, "description": "text: your details as aligned key/value lines instead of the bare address." },
+      "ip": { "name": "ip", "in": "path", "required": true, "schema": { "type": "string" }, "description": "IPv4 or IPv6 address", "examples": { "v4": { "value": "8.8.8.8" }, "v6": { "value": "2606:4700:4700::1111" } } },
+      "dnsName": { "name": "name", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Domain name (international names are converted to punycode) or an IP address for reverse DNS", "example": "example.com" }
+    },
+    "responses": {
+      "OneValue": { "description": "One line: the value and a newline.", "content": { "text/plain": { "schema": { "type": "string" }, "example": "AS13335\n" } } },
+      "NoValue": { "description": "No value is known: an empty line.", "content": { "text/plain": { "schema": { "type": "string" }, "example": "\n" } } },
+      "BadRequest": { "description": "Not a valid or not a public input.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
+      "RateLimited": { "description": "More than 30 uncached lookups in a minute from your address.", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
+      "Upstream": { "description": "A data source didn't respond. Try again in a moment.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
+      "Dns": { "description": "DNS answer.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Dns" } }, "text/plain": { "schema": { "type": "string" } } } }
+    },
+    "schemas": {
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } },
+      "IpInfo": {
+        "type": "object",
+        "properties": {
+          "ip": { "type": "string" },
+          "version": { "type": "integer", "enum": [4, 6] },
+          "source": { "type": "string", "enum": ["edge", "ipinfo-lite", "ipinfo-core", "ipinfo"], "description": "edge: Cloudflare (your own address)" },
+          "hostname": { "type": ["string", "null"] },
+          "asn": { "type": ["string", "null"], "example": "AS15169" },
+          "org": { "type": ["string", "null"] },
+          "asDomain": { "type": ["string", "null"] },
+          "asType": { "type": ["string", "null"], "enum": ["isp", "hosting", "business", "education", "government", null] },
+          "city": { "type": ["string", "null"] },
+          "region": { "type": ["string", "null"] },
+          "postal": { "type": ["string", "null"] },
+          "countryCode": { "type": ["string", "null"] },
+          "country": { "type": ["string", "null"] },
+          "continent": { "type": ["string", "null"] },
+          "lat": { "type": ["number", "null"] },
+          "lon": { "type": ["number", "null"] },
+          "timezone": { "type": ["string", "null"] },
+          "colo": { "type": ["string", "null"], "description": "Your own address only: the Cloudflare data center" },
+          "flags": { "type": "object", "description": "IPinfo Core only", "properties": { "mobile": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "anycast": { "type": "boolean" }, "satellite": { "type": "boolean" } } },
+          "privacy": { "type": "object", "description": "proxycheck.io's VPN / proxy / Tor opinion, when configured", "properties": { "vpn": { "type": "boolean" }, "proxy": { "type": "boolean" }, "tor": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "operator": { "type": ["string", "null"] }, "risk": { "type": ["integer", "null"] } } }
+        }
+      },
+      "Asn": {
+        "type": "object",
+        "properties": {
+          "asn": { "type": "string" }, "number": { "type": "integer" }, "found": { "type": "boolean" },
+          "holder": { "type": ["string", "null"] }, "handle": { "type": ["string", "null"] }, "name": { "type": ["string", "null"] },
+          "registry": { "type": ["string", "null"] }, "announced": { "type": "boolean" },
+          "v4": { "type": "object", "properties": { "count": { "type": "integer" }, "addresses": { "type": "integer" }, "prefixes": { "type": "array", "items": { "type": "string" }, "description": "Largest first, up to 50" } } },
+          "v6": { "type": "object", "properties": { "count": { "type": "integer" }, "prefixes": { "type": "array", "items": { "type": "string" } } } },
+          "source": { "type": "string", "const": "ripestat" }
+        }
+      },
+      "DnsType": { "type": "string", "enum": ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "CAA", "SOA", "SRV", "PTR", "DS", "DNSKEY", "HTTPS"] },
+      "Dns": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" }, "query": { "type": "string" },
+          "types": { "type": "array", "items": { "$ref": "#/components/schemas/DnsType" } },
+          "status": { "type": "string", "enum": ["NOERROR", "NXDOMAIN", "SERVFAIL", "FORMERR", "NOTIMP", "REFUSED", "ERROR"] },
+          "dnssec": { "type": "boolean" },
+          "cname": { "type": "array", "items": { "type": "string" } },
+          "records": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "object", "properties": { "ttl": { "type": "integer" }, "value": { "type": "string" }, "priority": { "type": "integer" } } } } },
+          "hosting": { "type": "object", "properties": { "ip": { "type": "string" }, "asn": { "type": ["string", "null"] }, "org": { "type": ["string", "null"] }, "country": { "type": ["string", "null"] } } },
+          "source": { "type": "string", "const": "cloudflare-dns" }
+        }
+      },
+      "Whois": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" }, "kind": { "type": "string", "enum": ["ip", "asn", "domain"] }, "found": { "type": "boolean" },
+          "registry": { "type": ["string", "null"] }, "org": { "type": ["string", "null"] }, "name": { "type": ["string", "null"] },
+          "cidrs": { "type": "array", "items": { "type": "string" } },
+          "domain": { "type": "string" }, "registrar": { "type": ["object", "null"], "properties": { "name": { "type": ["string", "null"] }, "ianaId": { "type": ["string", "null"] } } },
+          "registered": { "type": ["string", "null"] }, "expires": { "type": ["string", "null"] }, "updated": { "type": ["string", "null"] },
+          "status": { "type": "array", "items": { "type": "string" } }, "nameservers": { "type": "array", "items": { "type": "string" } },
+          "abuse": { "type": ["object", "null"], "properties": { "email": { "type": ["string", "null"] }, "phone": { "type": ["string", "null"] }, "handle": { "type": ["string", "null"] } } },
+          "message": { "type": "string" }, "rdapUrl": { "type": "string" }
+        }
+      },
+      "Cidr": {
+        "type": "object",
+        "properties": {
+          "v": { "type": "integer", "enum": [4, 6] }, "cidr": { "type": "string" }, "prefix": { "type": "integer" },
+          "network": { "type": "string" }, "broadcast": { "type": "string" }, "netmask": { "type": "string" }, "wildcard": { "type": "string" },
+          "first": { "type": "string" }, "last": { "type": "string" }, "total": { "type": "number" }, "usable": { "type": "number" },
+          "range": { "type": "string" }, "rangeNote": { "type": "string" },
+          "halves": { "type": ["array", "null"], "items": { "type": "string" } }, "supernet": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

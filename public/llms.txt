@@ -1,0 +1,37 @@
+# ipterm
+
+> ipterm (https://ipterm.net) looks up IP addresses, networks (ASNs), DNS records, registry (whois) records and subnets. Every lookup has its own URL: browsers get a terminal-style page, and curl and scripts get JSON, plain text or aligned text. No API key, no sign-up, no cookies, and nothing about callers is stored.
+
+Answers for the caller's own address come from Cloudflare's edge, so they describe whoever sends the request (the machine running your code), not the person you are talking to. Command-line clients (curl, wget, HTTPie, PowerShell) get JSON by default; other HTTP clients should add `?format=json` to be sure of JSON, or `?format=text` for aligned key/value lines. One-value endpoints return one line of plain text; a missing value is an empty line with HTTP 404. Uncached lookups are limited to 30 a minute per address (HTTP 429 with Retry-After past that).
+
+IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Registry records: RDAP. DNS: Cloudflare's public resolver (1.1.1.1).
+
+## Reference
+
+- [Command-line help](https://ipterm.net/help): plain-text reference, the same as `curl ipterm.net/help`
+- [OpenAPI description](https://ipterm.net/openapi.json): every route, parameter and response shape
+- [API page](https://ipterm.net/api): the reference as a web page
+- [Privacy policy](https://ipterm.net/privacy): what is and isn't collected
+
+## Your own address
+
+- [Your IP](https://ipterm.net/ip): the address as plain text (`curl ipterm.net` gives the same)
+- [Your details](https://ipterm.net/json): IP, reverse DNS name, network, city, region, country, coordinates, time zone and Cloudflare data center as JSON
+- One value each, as plain text: [/asn](https://ipterm.net/asn), [/org](https://ipterm.net/org), [/cc](https://ipterm.net/cc) (country code), [/city](https://ipterm.net/city), [/tz](https://ipterm.net/tz) (time zone), [/colo](https://ipterm.net/colo) (Cloudflare data center), [/hostname](https://ipterm.net/hostname) (reverse DNS)
+
+## Any address or network
+
+- [IP lookup](https://ipterm.net/8.8.8.8): owner, network, location and VPN / proxy flags for any IPv4 or IPv6 address (`/<ip>`)
+- [One value for an IP](https://ipterm.net/8.8.8.8/country): `/<ip>/<field>` with asn, org, cc, country, continent or hostname, as plain text
+- [Network (ASN)](https://ipterm.net/AS13335): holder, registry and announced prefixes (`/AS<number>`)
+- [As text](https://ipterm.net/8.8.8.8?format=text): add `?format=text` to any lookup for aligned key/value lines
+
+## Tools
+
+- [DNS](https://ipterm.net/dns/example.com): A, AAAA, MX, NS, TXT and CAA records, the host of the first address and DNSSEC (`/dns/<name>`, or `/dns/<name>/<TYPE>` for one type with TTLs; an IP address gives its reverse DNS)
+- [Whois](https://ipterm.net/whois/example.com): registry record for a domain, IP address or ASN over RDAP: registrar, dates, status, name servers, owner and abuse contact (`/whois/<query>`)
+- [Subnet calculator](https://ipterm.net/cidr/10.0.0.0/22): network, broadcast, netmask, wildcard, usable hosts and how the block splits (`/cidr/<network>/<prefix>`, IPv4 and IPv6; no outside calls)
+
+## Optional
+
+- [Guides](https://ipterm.net/guides): private IP ranges, finding a router's address, what an IP address reveals, IPv4 vs IPv6, ASNs, subnet masks

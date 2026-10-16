@@ -29,6 +29,8 @@ run_worker_first = [
   "!/icon-192.png",
   "!/icon-512.png",
   "!/og.png",
+  "!/openapi.json",
+  "!/llms.txt",
   "!/fonts/*",
 ]
 

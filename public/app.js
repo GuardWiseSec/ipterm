@@ -462,7 +462,7 @@
   function cmdFor(pathname) {
     let p; try { p = decodeURIComponent(pathname).replace(/^\/+|\/+$/g, ''); } catch { return null; }
     if (!p) return 'whoami';
-    const tool = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest' }[p.toLowerCase()];
+    const tool = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest', api: 'api' }[p.toLowerCase()];
     if (tool) return tool;
     const cd = /^cidr\/(.+)$/i.exec(p);
     if (cd) return 'cidr ' + cd[1];
@@ -497,6 +497,7 @@
     switch (c) {
       case 'whoami': return '/';
       case 'leaktest': return '/leaktest';
+      case 'api': return '/api';
       case 'whois': return '/whois' + (a ? '/' + name(a) : '');
       case 'dig': return '/dns' + (a ? '/' + name(a) + (b ? '/' + b.toUpperCase() : '') : '');
       case 'cidr': {                                           // also "cidr 192.168.1.10 255.255.255.0"
@@ -1402,19 +1403,19 @@
   // man <command>: [synopsis, description, examples, see also, curl paths]
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
-      ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/json']],
+      ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/json', '/city', '/?format=text']],
     leaktest: ['leaktest', 'privacy check: is your IP a known VPN, and does WebRTC, IPv6 or your time zone give away more than your IP? Runs in your browser in a few seconds; nothing is stored.',
       ['leaktest'], ['whoami']],
     lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
-      ['lookup 8.8.8.8', 'lookup 2606:4700:4700::1111', 'lookup github.com'], ['whois', 'asn', 'dig'], ['/8.8.8.8']],
+      ['lookup 8.8.8.8', 'lookup 2606:4700:4700::1111', 'lookup github.com'], ['whois', 'asn', 'dig'], ['/8.8.8.8', '/8.8.8.8/org', '/8.8.8.8?format=text']],
     dig: ['dig <domain> [type]   or   dig <ip>', "DNS records from Cloudflare's resolver (1.1.1.1). With a type, just that type with its TTLs: A AAAA CNAME MX NS TXT CAA SOA SRV PTR DS DNSKEY HTTPS. With an IP address, its reverse DNS name.",
-      ['dig example.com', 'dig gmail.com MX', 'dig github.com TXT', 'dig 8.8.8.8'], ['lookup', 'whois'], ['/dns/example.com', '/dns/gmail.com/MX']],
+      ['dig example.com', 'dig gmail.com MX', 'dig github.com TXT', 'dig 8.8.8.8'], ['lookup', 'whois'], ['/dns/example.com', '/dns/gmail.com/MX', '/dns/example.com?format=text']],
     whois: ['whois <ip | ASN | domain>', 'the registry record. For addresses and networks: owner, address block and abuse contact. For domains: registrar, registration and expiry dates, status and name servers. Straight from the registries over RDAP.',
-      ['whois example.com', 'whois 8.8.8.8', 'whois AS13335'], ['lookup', 'asn', 'dig'], ['/whois/example.com', '/whois/8.8.8.8']],
+      ['whois example.com', 'whois 8.8.8.8', 'whois AS13335'], ['lookup', 'asn', 'dig'], ['/whois/example.com', '/whois/8.8.8.8', '/whois/example.com?format=text']],
     asn: ['asn <number>', 'an autonomous system: a network such as an internet provider, a cloud or a large company. Shows its holder and registry, and how many IPv4 and IPv6 prefixes it announces, largest first.',
-      ['asn AS13335', 'asn 15169'], ['whois', 'cidr'], ['/AS13335']],
+      ['asn AS13335', 'asn 15169'], ['whois', 'cidr'], ['/AS13335', '/AS13335?format=text']],
     cidr: ['cidr <range>   or   cidr <ip> <netmask>', 'subnet calculator: network and broadcast addresses, netmask, wildcard, usable host range and count, and how the block splits and combines. IPv6 too. Calculated in your browser.',
-      ['cidr 192.168.1.0/24', 'cidr 10.0.0.0/22', 'cidr 192.168.1.10 255.255.255.0', 'cidr 2001:db8::/48'], ['whois', 'asn'], ['/cidr/10.0.0.0/22']],
+      ['cidr 192.168.1.0/24', 'cidr 10.0.0.0/22', 'cidr 192.168.1.10 255.255.255.0', 'cidr 2001:db8::/48'], ['whois', 'asn'], ['/cidr/10.0.0.0/22', '/cidr/10.0.0.0/22?format=text']],
     ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
       ['ping', 'ping 10'], ['whoami', 'traceroute']],
     traceroute: ['traceroute', "not possible from a browser: tracing a route needs raw ICMP or UDP packets. ping times the connection to ipterm's edge instead.", ['ping'], ['ping', 'asn']],
@@ -1423,7 +1424,8 @@
     history: ['history', 'lists the commands you ran in this tab. Up and Down recall them at the prompt. Nothing is saved after you close the tab.', ['history'], ['clear']],
     theme: ['theme [phosphor | amber | ice | contrast | paper]', 'changes the colors; with no name, moves to the next theme. Remembered on this device only.', ['theme amber', 'theme paper', 'theme contrast'], ['crt', 'access']],
     crt: ['crt [on | off]', 'turns the CRT glow, scanlines and vignette on or off; with neither, switches. Remembered on this device only.', ['crt off', 'crt on'], ['theme', 'access']],
-    api: ['api', 'how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP).', ['api'], ['whoami'], ['', '/json', '/8.8.8.8']],
+    api: ['api', 'how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP). One value at a time as plain text: /asn, /org, /cc, /city, /tz, /colo and /hostname for your own address, /<ip>/asn, org, cc, country, continent or hostname for any other. Add ?format=text to any lookup for aligned lines instead of JSON. curl …/help prints the whole reference.',
+      ['api'], ['whoami', 'lookup'], ['/help', '/asn', '/8.8.8.8/country', '/8.8.8.8?format=text']],
     man: ['man <command>', 'shows the manual for a command: what it does, examples to click and related commands. help <command> and <command> --help do the same.', ['man dig', 'man whois'], ['help']],
     help: ['help [command]', 'lists every command; click one to run it. With a command name, shows its manual.', ['help', 'help dig'], ['man']],
   };
@@ -1486,10 +1488,7 @@
     const rows = [['NAME', `${name} - ${m ? m[1] : h[1]}`], ['SYNOPSIS', m ? m[0] : h[0]]];
     if (m) rows.push(['EXAMPLES', joined(m[2].map(c => runnable(c, c)))]);
     if (also.length) rows.push(['ALSO', also.join(', ')]);
-    if (m && m[4]) {
-      const base = live ? location.origin : 'https://your-domain';
-      m[4].forEach((p, i) => rows.push([i ? '' : 'CURL', `curl ${base}${p}`]));
-    }
+    if (m && m[4]) m[4].forEach((p, i) => rows.push([i ? '' : 'CURL', curlLine(p)]));
     if (m && m[3].length) rows.push(['SEE ALSO', joined(m[3].map(c => cmdButton(c, 'man ' + c)))]);
     if (MAN_GUIDE[name]) rows.push(['GUIDE', guideLink(MAN_GUIDE[name])]);
     await kv(rows);
@@ -1618,20 +1617,34 @@
     d.append(a); out.appendChild(d); scroll();
   }
 
+  // A curl line to show; URLs with ? are quoted, since zsh would treat the ? as a wildcard.
+  const curlLine = p => { const u = (live ? location.origin : 'https://your-domain') + p; return p.includes('?') ? `curl '${u}'` : `curl ${u}`; };
   async function apiHelp() {
-    const base = live ? location.origin : 'https://your-domain';
+    setUrl('/api', 'ipterm API: IP address lookups from curl and scripts | ipterm');
     await kv([
-      [`curl ${base}`, 'your IP as plain text'],
-      [`curl ${base}/json`, 'your IP details as JSON'],
-      [`curl ${base}/8.8.8.8`, 'any IP as JSON'],
-      [`curl ${base}/AS13335`, 'any network as JSON'],
-      [`curl ${base}/whois/8.8.8.8`, 'registry record as JSON'],
-      [`curl ${base}/whois/example.com`, 'domain registration as JSON'],
-      [`curl ${base}/cidr/10.0.0.0/22`, 'subnet calculation as JSON'],
-      [`curl ${base}/dns/example.com`, 'DNS records as JSON (add /MX for one type)'],
+      [curlLine(''), 'your IP as plain text'],
+      [curlLine('/json'), 'your IP details as JSON'],
+      [curlLine('/asn'), 'one value for your own address: /asn /org /cc /city /tz /colo /hostname'],
+      [curlLine('/8.8.8.8'), 'any IP as JSON'],
+      [curlLine('/8.8.8.8/country'), 'one value for any IP: asn, org, cc, country, continent or hostname'],
+      [curlLine('/AS13335'), 'any network as JSON'],
+      [curlLine('/whois/8.8.8.8'), 'registry record as JSON'],
+      [curlLine('/whois/example.com'), 'domain registration as JSON'],
+      [curlLine('/cidr/10.0.0.0/22'), 'subnet calculation as JSON'],
+      [curlLine('/dns/example.com'), 'DNS records as JSON (add /MX for one type)'],
+      [curlLine('/8.8.8.8?format=text'), 'any lookup as aligned text lines instead of JSON'],
+      [curlLine('/help'), 'this reference as plain text'],
     ]);
-    line('Open the same links in a browser to get a shareable page.', 'sys');
+    line('Open the same links in a browser to get a shareable page. One-value answers are a single line; a missing value is an empty line with HTTP 404.', 'sys');
+    const d = el('div', 'ln sys'), doc = (href, text) => { const a = el('a', 'cmd', text); a.href = href; return a; };
+    d.append('machine-readable: ', doc('/openapi.json', 'OpenAPI'), '  ·  ', doc('/llms.txt', 'llms.txt'));
+    const credit = el('div', 'ln sys'), ipinfo = el('a', '', 'IPinfo ↗');
+    ipinfo.href = 'https://ipinfo.io'; ipinfo.target = '_blank'; ipinfo.rel = 'noopener';
+    credit.append('IP address data powered by ', ipinfo);
+    out.append(d, credit); scroll();
     if (!live) line('These routes work once the Worker is deployed.', 'sys');
+    announce('API reference: curl commands for your IP, one value at a time, any IP, network, DNS name, registry record or subnet.');
+    next(['whoami', 'whoami', 'your own IP, as /json returns it'], ['lookup 8.8.8.8', 'lookup 8.8.8.8', 'what /8.8.8.8 returns, drawn in the terminal']);
   }
 
   async function run(raw) {
@@ -1800,15 +1813,16 @@
     // so only those go; the summary sentence and links stay for crawlers that run scripts. A 404 and
     // the homepage's whoami are drawn in full by the terminal, so their server copies go entirely.
     const stat = document.getElementById('static');
+    // The /api page's plain-text reference goes too: the terminal prints it with links (`api`).
     if (stat && (selfP || (init && init.kind === 'notfound'))) stat.remove();
-    else if (stat) stat.querySelectorAll('.head, dl').forEach(n => n.remove());
+    else if (stat) stat.querySelectorAll('.head, dl, .api-ref').forEach(n => n.remove());
     fast = hold = !!selfP;                                // swap the server's copy for the terminal's in one frame
     await lines(['ipterm 0.2 · IP address lookup', 'type help for commands, or enter any IP address, domain or ASN'], 'sys');
 
     if (init && init.kind === 'notfound') { setLive(true); notFound(init); return focusInput(); }
-    if (init && init.kind === 'tool' && (TOOL_INTRO[init.tool] || init.tool === 'leaktest')) {
+    if (init && init.kind === 'tool' && (TOOL_INTRO[init.tool] || init.tool === 'leaktest' || init.tool === 'api')) {
       setLive(true);
-      const cmd = running = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest' }[init.tool];
+      const cmd = running = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest', api: 'api' }[init.tool];
       const mark = out.lastChild;
       navPush = false;
       try { await run(cmd); } finally { navPush = true; }

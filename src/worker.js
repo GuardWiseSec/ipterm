@@ -4,7 +4,12 @@
 //   GET /                   the terminal, with your IP already in the page (curl/wget get it as plain text)
 //   GET /ip                 your IP as plain text
 //   GET /json               your IP details as JSON
+//   GET /help               the command-line reference as plain text (browsers are sent to /api)
+//   GET /asn, /org, /cc, /city, /tz, /colo   one value for your own address as plain text, from request.cf
+//                           (no outside call); /hostname is the one that asks DNS (reverse lookup)
 //   GET /<ip>               page for any IPv4/IPv6 address        (add ?format=json to force JSON)
+//   GET /<ip>/<field>       one value for any public address as plain text: asn, org, cc, country, continent,
+//                           hostname. IPinfo Lite only (never Core or proxycheck.io), so no budget is spent
 //   GET /AS<number>         page for any autonomous system (ASN)  (add ?format=json to force JSON)
 //   GET /api/lookup?ip=     IP details as JSON (no ip = yourself), used by the terminal
 //   GET /api/asn?asn=       ASN details as JSON, used by the terminal
@@ -14,11 +19,16 @@
 //   GET /dns/<name>[/TYPE]  DNS records for a domain (summary, or one record type) via Cloudflare's resolver
 //   GET /api/dns?name=&type= the same as JSON, used by the terminal
 //   GET /cidr/<ip>/<prefix> subnet calculator page (also /api/cidr?q=); pure calculation, no outside calls
-//   GET /whois, /dns, /cidr, /leaktest  landing page for each tool (usage and examples)
+//   GET /whois, /dns, /cidr, /leaktest, /api  landing page for each tool (usage and examples); /api is the
+//                           API docs, and command-line clients get the /help text there instead
 //   GET /api/check          your own IP plus how IPinfo classifies it (VPN, hosting...), for the privacy check
 //   GET /robots.txt, /sitemap.xml
+//   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /whois/..., /cidr/... and their /api/
+//                           forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
+//   /openapi.json, /llms.txt  static files describing the API (served without running the Worker)
 //   anything else: a static file if one exists, a domain-shaped path (/example.com) redirects to its
 //   DNS page, and the rest gets a 404 page in the terminal's style
+//   Plain-text answers never carry a sponsored line, and those with IPinfo data credit IPinfo.
 //
 // Data
 //   Your own details: Cloudflare's request.cf (free, unlimited).
@@ -68,16 +78,19 @@ async function route(request, env, ctx) {
   }
 
   const html = wantsHtml(request, url, ua);
-  const io = { request, env, ctx, url, me };
+  // plain: ?format=text, the same data as aligned key/value lines instead of JSON
+  const io = { request, env, ctx, url, me, plain: url.searchParams.get('format') === 'text' };
 
+  const self = () => guard(() => selfInfo(io), d => reply(io, d, 200, {}, ipText), (msg, status) => reply(io, { error: msg }, status));
+  if (path === '/' && io.plain) return self();
   if (path === '/') return CLI_UA.test(ua) ? text(me + '\n') : homePage(io);
   if (path === '/ip') return text(me + '\n');
+  if (path === '/help') return html ? redirect('/api') : helpText(io);
+  if (Object.hasOwn(SELF_FIELDS, path.slice(1).toLowerCase())) return selfField(io, path.slice(1).toLowerCase());
   if (path === '/robots.txt') return robots(url);
   if (path === '/sitemap.xml') return sitemap(url);
 
-  if (path === '/json' || (path === '/api/lookup' && !url.searchParams.get('ip'))) {
-    return guard(() => selfInfo(io), d => json(d));
-  }
+  if (path === '/json' || (path === '/api/lookup' && !url.searchParams.get('ip'))) return self();
   if (path === '/api/lookup') return ipRoute(io, url.searchParams.get('ip').trim(), false);
   if (path === '/api/check') return guard(() => checkData(io), d => json(d));
   if (path === '/api/asn') return asnRoute(io, String(url.searchParams.get('asn') || '').trim(), false);
@@ -92,14 +105,16 @@ async function route(request, env, ctx) {
   const bare = path.slice(1);
   if (bare && parseIp(bare)) return ipRoute(io, bare, html);
   if (ASN_RE.test(bare)) return asnRoute(io, bare, html);
-  if (path.startsWith('/api/')) return json({ error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/cidr' }, 404);
+  const field = /^([0-9a-f.:]{2,45})\/([a-z]{1,20})$/i.exec(bare);   // /8.8.8.8/asn
+  if (field && parseIp(field[1])) return ipField(io, field[1], field[2].toLowerCase());
+  if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/cidr. See /help.' }, 404);
 
   const res = await env.ASSETS.fetch(request);
   if (res.status !== 404) return withOrigin(res, url);
   // Someone typed a domain straight after the slash (ipterm.net/github.com): send them to its DNS page.
   const dom = !bare.includes('/') && !FILE_EXT.test(bare) ? normalizeDomain(bare) : null;
-  if (dom) return new Response(null, { status: 302, headers: { location: '/dns/' + dom, 'cache-control': 'public, max-age=3600' } });
-  if (!html) return json({ error: 'Not found.' }, 404);
+  if (dom) return redirect('/dns/' + dom);
+  if (!html) return reply(io, { error: 'Not found. See /help for what curl and scripts can ask for.' }, 404);
   return notFoundPage(io, path);
 }
 
@@ -137,18 +152,29 @@ const TOOLS = {
     usage: 'cidr <range>',
     examples: [['cidr 192.168.1.0/24', '/cidr/192.168.1.0/24'], ['cidr 10.0.0.0/22', '/cidr/10.0.0.0/22'], ['cidr 172.16.0.0/12', '/cidr/172.16.0.0/12'], ['cidr 2001:db8::/48', '/cidr/2001:db8::/48']],
   },
+  api: {
+    title: 'ipterm API: IP address lookups from curl and scripts | ipterm', heading: 'API and command line',
+    desc: 'Use ipterm from curl and scripts, with no key and no sign-up: your IP as plain text, one value at a time (/asn, /city, /tz), and any IP address, network, DNS name, registry record or subnet as JSON or aligned text.',
+    usage: 'curl ipterm.net/help',
+    examples: [],
+  },
 };
 
 function toolRoute(io, tool, html) {
   const t = TOOLS[tool];
   if (!html) {
-    if (!t.examples.length) return json({ error: 'This check runs in your browser. Open the page in a browser to run it.', usage: t.usage }, 400);
-    return json({ error: `Add something to look up, like ${t.examples[0][1]}`, usage: t.usage, examples: t.examples.map(e => e[1]) }, 400);
+    if (tool === 'api') return helpText(io);              // command-line clients get the reference itself
+    if (!t.examples.length) return reply(io, { error: 'This check runs in your browser. Open the page in a browser to run it.', usage: t.usage }, 400);
+    return reply(io, { error: `Add something to look up, like ${t.examples[0][1]}`, usage: t.usage, examples: t.examples.map(e => e[1]) }, 400);
   }
   const list = t.examples.map(([c, href]) => `<li><a href="${esc(href)}">${esc(c)}</a></li>`).join('');
   const extra = (list ? `<p class="ln sys">Examples:</p><ul class="static-list">${list}</ul>` : '') +
     (t.checks ? `<p class="ln sys">What it checks:</p><ul class="static-list">${t.checks.map(c => `<li>${esc(c)}</li>`).join('')}</ul>` : '') +
-    (tool === 'cidr' ? `<p class="ln sys">Guide: <a href="/guides/subnet-cheat-sheet">Subnet mask cheat sheet</a></p>` : '');
+    (tool === 'cidr' ? `<p class="ln sys">Guide: <a href="/guides/subnet-cheat-sheet">Subnet mask cheat sheet</a></p>` : '') +
+    // The full reference for visitors without JavaScript and for crawlers; the terminal prints its own (`api`).
+    (tool === 'api' ? `<pre class="doc-pre api-ref"><code>${esc(helpBody(io.url.host))}</code></pre>` +
+      `<p class="ln sys">Machine-readable: <a href="/openapi.json">OpenAPI description</a> · <a href="/llms.txt">llms.txt</a> · plain text: <code>curl ${esc(io.url.host)}/help</code></p>` +
+      `<p class="ln sys">IP address data powered by <a href="https://ipinfo.io" rel="noopener">IPinfo</a>.</p>` : '');
   return shell(io, { status: 200, path: '/' + tool, title: t.title, desc: t.desc, initial: { kind: 'tool', tool },
     body: staticBlock(t.heading, [tool], [['usage', t.usage]], t.desc, extra) });
 }
@@ -184,7 +210,7 @@ async function withOrigin(res, url) {
 }
 
 function wantsHtml(request, url, ua) {
-  if (url.searchParams.get('format') === 'json' || CLI_UA.test(ua)) return false;
+  if (/^(json|text)$/.test(url.searchParams.get('format') || '') || CLI_UA.test(ua)) return false;
   return PREVIEW_UA.test(ua) || (request.headers.get('accept') || '').includes('text/html');
 }
 
@@ -197,27 +223,27 @@ const sameIp = (a, b) => { const x = parseIp(String(a || '').trim()), y = parseI
 
 async function ipRoute(io, q, html) {
   const p = parseIp(String(q || '').trim());
-  if (!p) return json({ error: 'Not a valid IPv4 or IPv6 address.' }, 400);
+  if (!p) return reply(io, { error: 'Not a valid IPv4 or IPv6 address.' }, 400);
   const ip = canonIp(p);
-  if (sameIp(q, io.me) && !html) return guard(() => selfInfo(io), d => json(d));
+  if (sameIp(q, io.me) && !html) return guard(() => selfInfo(io), d => reply(io, d, 200, {}, ipText), (msg, status) => reply(io, { error: msg }, status));
 
   const reason = nonPublicReason(p);
   if (reason) {
     const d = { ip, version: p.v, bogon: true, range: reason };
-    return html ? ipPage(io, d, 200) : json({ error: `${ip} is not a public address (${reason}), so there is nothing to look up.`, ...d }, 400);
+    return html ? ipPage(io, d, 200) : reply(io, { error: `${ip} is not a public address (${reason}), so there is nothing to look up.`, ...d }, 400);
   }
   return guard(
     () => withPrivacy(io, ip, ipData(io, ip, p)),
     // Browsers may reuse an answer for 5 minutes; the Worker's own cache (6 hours) keeps repeats cheap.
-    d => html ? ipPage(io, d, 200) : json(d, 200, { 'cache-control': 'public, max-age=300' }),
-    (msg, status) => html ? ipPage(io, { ip, version: p.v, error: msg }, status) : json({ error: msg }, status),
+    d => html ? ipPage(io, d, 200) : reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, ipText),
+    (msg, status) => html ? ipPage(io, { ip, version: p.v, error: msg }, status) : reply(io, { error: msg }, status),
   );
 }
 
 function cidrRoute(io, q, html) {
   const d = CIDR.calc(String(q || '').replace(/-(\d{1,3})$/, '/$1'));   // also accept 10.0.0.0-22
-  if (d.error) return html ? cidrPage(io, { error: d.error, input: q }, 400) : json({ error: d.error }, 400);
-  return html ? cidrPage(io, d, 200) : json(d, 200, { 'cache-control': 'public, max-age=86400' });
+  if (d.error) return html ? cidrPage(io, { error: d.error, input: q }, 400) : reply(io, { error: d.error }, 400);
+  return html ? cidrPage(io, d, 200) : reply(io, d, 200, { 'cache-control': 'public, max-age=86400' }, cidrText);
 }
 
 // Adds proxycheck.io's VPN / proxy opinion, unless IPinfo already flagged the address (then a
@@ -245,14 +271,15 @@ function ipData(io, ip, p, opts = {}) {
 
 async function dnsRoute(io, rawName, rawType, html) {
   const type = rawType ? String(rawType).toUpperCase().slice(0, 12) : null;
-  const bad = error => html ? dnsPage(io, { name: clip(rawName), types: type ? [type] : [], error }, 400) : json({ error }, 400);
+  const bad = error => html ? dnsPage(io, { name: clip(rawName), types: type ? [type] : [], error }, 400) : reply(io, { error }, 400);
   if (type && !DNS_TYPES[type]) return bad(`Unsupported record type "${type}". Try one of: ${Object.keys(DNS_TYPES).join(', ')}`);
   const p = parseIp(String(rawName || '').trim());
   if (p) {                                                  // an IP address: reverse lookup (PTR)
     if (type && type !== 'PTR') return bad('For an IP address, only PTR (reverse DNS) applies.');
     const ip = canonIp(p);
     return guard(() => cached(io, 'dns/ptr/' + ip, 300, () => dnsData(io, reverseName(p), ['PTR'], ip)),
-      d => html ? dnsPage(io, d, 200) : json(d, 200, { 'cache-control': 'public, max-age=300' }));
+      d => html ? dnsPage(io, d, 200) : reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, dnsText),
+      (msg, status) => reply(io, { error: msg }, status));
   }
   const name = normalizeDomain(rawName);
   if (!name) return bad('Not a valid domain name. Example: example.com');
@@ -260,8 +287,8 @@ async function dnsRoute(io, rawName, rawType, html) {
   return guard(
     () => cached(io, `dns/${name}/${types.join(',')}`, 300, () => dnsData(io, name, types)),
     // A nonexistent domain is a valid DNS answer: JSON says so with 200; the HTML page uses 404 so it isn't indexed.
-    d => html ? dnsPage(io, d, d.status === 'NXDOMAIN' ? 404 : 200) : json(d, 200, { 'cache-control': 'public, max-age=300' }),
-    (msg, status) => html ? dnsPage(io, { name, types, error: msg }, status) : json({ error: msg }, status),
+    d => html ? dnsPage(io, d, d.status === 'NXDOMAIN' ? 404 : 200) : reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, dnsText),
+    (msg, status) => html ? dnsPage(io, { name, types, error: msg }, status) : reply(io, { error: msg }, status),
   );
 }
 
@@ -273,29 +300,29 @@ async function whoisRoute(io, q, html) {
     const name = normalizeDomain(q);
     if (!name) {
       const error = 'Not a valid IP address, AS number or domain. Examples: whois 8.8.8.8, whois AS13335, whois example.com';
-      return html ? whoisPage(io, { query: clip(q), kind: 'domain', error }, 400) : json({ error }, 400);
+      return html ? whoisPage(io, { query: clip(q), kind: 'domain', error }, 400) : reply(io, { error }, 400);
     }
     return guard(
       () => cached(io, 'whois/' + name, 21600, () => domainLookup(name, io.url.origin)),
-      d => html ? whoisPage(io, d, d.found ? 200 : 404) : json(d, d.found ? 200 : 404, { 'cache-control': 'public, max-age=300' }),
-      (msg, status) => html ? whoisPage(io, { query: name, kind: 'domain', error: msg }, status) : json({ error: msg }, status),
+      d => html ? whoisPage(io, d, d.found ? 200 : 404) : reply(io, d, d.found ? 200 : 404, { 'cache-control': 'public, max-age=300' }, whoisText),
+      (msg, status) => html ? whoisPage(io, { query: name, kind: 'domain', error: msg }, status) : reply(io, { error: msg }, status),
     );
   }
   if (asnM && (Number(asnM[1]) < 1 || Number(asnM[1]) > 4294967295)) {
-    return html ? whoisPage(io, { query: clip(q), kind: 'asn', error: 'Not a valid AS number.' }, 400) : json({ error: 'Not a valid AS number.' }, 400);
+    return html ? whoisPage(io, { query: clip(q), kind: 'asn', error: 'Not a valid AS number.' }, 400) : reply(io, { error: 'Not a valid AS number.' }, 400);
   }
   const query = asnM ? 'AS' + Number(asnM[1]) : canonIp(p);
   if (p) {
     const reason = nonPublicReason(p);
     if (reason) {
       const d = { query, kind: 'ip', found: false, bogon: true, range: reason };
-      return html ? whoisPage(io, d, 200) : json({ error: `${query} is not a public address (${reason}), so no registry holds a record for it.`, ...d }, 400);
+      return html ? whoisPage(io, d, 200) : reply(io, { error: `${query} is not a public address (${reason}), so no registry holds a record for it.`, ...d }, 400);
     }
   }
   return guard(
     () => cached(io, 'whois/' + query, 86400, () => rdapLookup(asnM ? { asn: Number(asnM[1]) } : { ip: query, p }, io.url.origin)),
-    d => html ? whoisPage(io, d, d.found ? 200 : 404) : json(d, d.found ? 200 : 404, { 'cache-control': 'public, max-age=300' }),
-    (msg, status) => html ? whoisPage(io, { query, kind: asnM ? 'asn' : 'ip', error: msg }, status) : json({ error: msg }, status),
+    d => html ? whoisPage(io, d, d.found ? 200 : 404) : reply(io, d, d.found ? 200 : 404, { 'cache-control': 'public, max-age=300' }, whoisText),
+    (msg, status) => html ? whoisPage(io, { query, kind: asnM ? 'asn' : 'ip', error: msg }, status) : reply(io, { error: msg }, status),
   );
 }
 
@@ -304,13 +331,219 @@ async function asnRoute(io, q, html) {
   const n = m ? Number(m[1]) : NaN;
   if (!Number.isInteger(n) || n < 1 || n > 4294967295) {
     const error = 'Not a valid AS number. Example: AS13335';
-    return html ? asnPage(io, { asn: clip(q), error }, 400) : json({ error }, 400);
+    return html ? asnPage(io, { asn: clip(q), error }, 400) : reply(io, { error }, 400);
   }
   return guard(
     () => cached(io, 'asn/' + n, 21600, () => asnData(n)),
-    d => html ? asnPage(io, d, d.found ? 200 : 404) : json(d, d.found ? 200 : 404, { 'cache-control': 'public, max-age=300' }),
-    (msg, status) => html ? asnPage(io, { asn: 'AS' + n, number: n, error: msg }, status) : json({ error: msg }, status),
+    d => html ? asnPage(io, d, d.found ? 200 : 404) : reply(io, d, d.found ? 200 : 404, { 'cache-control': 'public, max-age=300' }, asnText),
+    (msg, status) => html ? asnPage(io, { asn: 'AS' + n, number: n, error: msg }, status) : reply(io, { error: msg }, status),
   );
+}
+
+/* ---------- the command line: plain text for curl ----------
+   /help (and /api, for command-line clients) is the reference. One value for your own address comes
+   straight from request.cf (only /hostname asks anybody: Cloudflare's resolver). One value for another
+   address uses IPinfo Lite only, never Core or proxycheck.io, so these never touch the paid or daily
+   budgets. ?format=text turns any lookup into aligned key/value lines, like the terminal. None of it
+   carries a sponsored line. */
+
+const IPINFO_CREDIT = 'IP address data powered by IPinfo (https://ipinfo.io)';
+// /asn, /cc ... for your own address (/cc, not /country: that path is kept free for country pages)
+const SELF_FIELDS = { asn: 'asn', org: 'org', cc: 'countryCode', city: 'city', tz: 'timezone', colo: 'colo', hostname: 'hostname' };
+// /8.8.8.8/asn ... for any public address
+const IP_FIELDS = { asn: 'asn', org: 'org', cc: 'countryCode', country: 'country', continent: 'continent', hostname: 'hostname' };
+
+// What a script gets from a lookup route: JSON, or with ?format=text the same answer formatted by
+// toText. An error is just its message, with the same status as the JSON would have.
+function reply(io, d, status = 200, extra = {}, toText = null) {
+  if (!io.plain) return json(d, status, extra);
+  return text(d.error ? d.error + '\n' : toText(d), extra['cache-control'] || 'no-store', status, extra);
+}
+
+// One value and a newline. A missing value is an empty line with HTTP 404, so `curl -f` fails cleanly.
+const one = (v, cache = 'no-store', extra = {}) => (v != null && String(v).trim()
+  ? text(plain(v) + '\n', cache, 200, extra) : text('\n', cache, 404, extra));
+const textError = (msg, status) => text(msg + '\n', 'no-store', status);
+
+function selfField(io, name) {
+  if (name !== 'hostname') return one(edgeInfo(io)[SELF_FIELDS[name]]);
+  return guard(async () => {                             // reverse DNS asks a resolver, so it counts toward the rate limit
+    await limit(io);
+    const h = await ptr(io.me);
+    if (h === undefined) throw new Error('dns: reverse lookup did not answer');
+    return h;
+  }, h => one(h), textError);
+}
+
+function ipField(io, q, name) {
+  if (!Object.hasOwn(IP_FIELDS, name)) {
+    const why = Object.hasOwn(SELF_FIELDS, name)
+      ? `${name} is only available for your own address (curl ${io.url.host}/${name}). Other addresses get country and network data.`
+      : `Unknown field "${name}".`;
+    return textError(`${why} Fields for any address: ${Object.keys(IP_FIELDS).join(', ')}`, 404);
+  }
+  const p = parseIp(q), ip = canonIp(p), reason = nonPublicReason(p);
+  if (reason) return textError(`${ip} is not a public address (${reason}), so there is nothing to look up.`, 400);
+  return guard(
+    () => ipData(io, ip, p, { lite: true }),              // Lite only, and no withPrivacy(): no Core or proxycheck.io budget
+    d => one(name === 'country' ? d.country || countryName(d.countryCode) : d[IP_FIELDS[name]], 'public, max-age=300',
+      name === 'hostname' ? {} : { 'x-attribution': IPINFO_CREDIT }),   // a second line would break $(curl ...)
+    textError,
+  );
+}
+
+// Terminal-safe text: an upstream value (a TXT record, a registry's name field) could carry escape
+// sequences that rewrite the reader's terminal, or bidi controls that reorder what it shows.
+const plain = v => String(v).replace(/[\t\r\n]+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '?');
+
+// [key, value] rows as aligned lines. Empty values are skipped; an array gets one line per item.
+function kvText(rows, footer = []) {
+  const keep = rows.filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && !v.length));
+  const w = Math.max(0, ...keep.map(([k]) => k.length)) + 2;
+  const out = [];
+  for (const [k, v] of keep) (Array.isArray(v) ? v : [v]).forEach((x, i) => out.push(((i ? '' : k).padEnd(w) + plain(x)).trimEnd()));
+  return out.join('\n') + '\n' + (footer.length ? '\n' + footer.join('\n') + '\n' : '');
+}
+
+const SOURCE_NAMES = { edge: "Cloudflare's edge", 'ipinfo-lite': 'IPinfo Lite', 'ipinfo-core': 'IPinfo Core', ipinfo: 'IPinfo' };
+function ipText(d) {
+  const self = d.source === 'edge';
+  const ctry = d.country ? d.country + (d.countryCode ? ` [${d.countryCode}]` : '') : d.countryCode;
+  return kvText([
+    [self ? 'your ip' : 'ip', d.ip], ['version', d.version ? 'IPv' + d.version : null], ['hostname', d.hostname],
+    ['network', [d.asn, d.org].filter(Boolean).join('  ')], ['domain', d.asDomain],
+    ['location', [d.city, d.region, ctry].filter(Boolean).join(', ')], ['continent', d.city ? null : d.continent], ['postal', d.postal],
+    ['coordinates', d.lat != null && d.lon != null ? `${d.lat}, ${d.lon}` : null], ['time zone', d.timezone],
+    ['connection', connectionText(d)], ['vpn / proxy', self ? null : vpnText(d)],
+    ['edge', d.colo ? `${d.colo} (the Cloudflare data center that answered you)` : null],
+    ['source', (SOURCE_NAMES[d.source] || d.source || '') + (d.privacy ? ' + proxycheck.io' : '')],
+  ], /^ipinfo/.test(d.source || '') ? [IPINFO_CREDIT] : []);
+}
+
+function asnText(d) {
+  if (!d.found) return `${d.asn} has no registered holder or announced prefixes in RIPEstat.\n`;
+  const n = x => Number(x || 0).toLocaleString('en-US');
+  const v4 = d.v4 || { prefixes: [] }, v6 = d.v6 || { prefixes: [] };
+  const bits = v4.addresses >= 256 ? 32 - Math.floor(Math.log2(v4.addresses)) : null;
+  const show4 = v4.prefixes.slice(0, 12), show6 = v6.prefixes.slice(0, 6);
+  const more = (v4.count || 0) - show4.length + (v6.count || 0) - show6.length;
+  return kvText([
+    ['asn', d.asn], ['network', d.name || d.holder], ['handle', d.handle], ['registry', d.registry],
+    ['announced', d.announced ? 'yes, visible in global routing' : 'no prefixes announced right now'],
+    ['IPv4 prefixes', n(v4.count)], ['IPv4 space', v4.addresses != null ? n(v4.addresses) + ' addresses' + (bits ? ` (about a /${bits})` : '') : null],
+    ['IPv6 prefixes', n(v6.count)], ['largest v4', show4], ['largest v6', show6],
+  ], more > 0 ? [`${n(more)} more prefixes not shown (the JSON lists up to 50 of each).`] : []);
+}
+
+function dnsText(d) {
+  const single = d.types && d.types.length === 1 ? d.types[0] : null, R = d.records || {};
+  const val = (t, r) => (t === 'MX' ? `${r.priority} ${r.value}` : t === 'SOA' && r.admin ? `${r.value} ${r.admin} serial ${r.serial}`
+    : t === 'SRV' && r.port != null ? `${r.priority} ${r.weight} ${r.port} ${r.value}` : r.value) + (single && r.ttl != null ? `  (ttl ${r.ttl}s)` : '');
+  const rows = [['name', d.name], ['status', d.status], ['alias of', (d.cname || []).join(' -> ')]];
+  for (const t of d.types || []) {
+    const list = (R[t] || []).map(r => val(t, r));
+    rows.push([t, list.length ? list : d.status === 'NOERROR' && (single || ['A', 'MX', 'NS'].includes(t)) ? 'none' : null]);
+  }
+  const host = d.hosting && d.hosting.org;
+  if (host) rows.push(['hosted by', `${d.hosting.org}${d.hosting.asn ? ` (${d.hosting.asn})` : ''}${d.hosting.country ? ', ' + d.hosting.country : ''}`]);
+  if (!parseIp(d.name)) rows.push(['DNSSEC', d.dnssec ? 'validated' : 'not validated']);
+  return kvText(rows, host ? [IPINFO_CREDIT] : []);
+}
+
+function whoisText(d) {
+  if (!d.found) return (d.message || `No registry record was found for ${d.query}.`) + '\n';
+  const date = s => (s ? String(s).slice(0, 10) : null), abuse = d.abuse || {};
+  if (d.kind === 'domain') {
+    const left = d.expires ? dayDiff(d.expires) : null;
+    return kvText([
+      ['query', d.query !== d.domain ? d.query : null], ['domain', d.unicodeName ? `${d.domain} (${d.unicodeName})` : d.domain],
+      ['registrar', d.registrar && d.registrar.name ? d.registrar.name + (d.registrar.ianaId ? ` (IANA ID ${d.registrar.ianaId})` : '') : null],
+      ['registered', date(d.registered)],
+      ['expires', d.expires ? date(d.expires) + (left != null ? (left < 0 ? ` (expired ${-left} days ago)` : ` (in ${left} days)`) : '') : null],
+      ['last changed', date(d.updated)], ['status', d.status || []], ['name servers', d.nameservers || []],
+      ['DNSSEC', d.dnssec == null ? null : d.dnssec ? 'signed' : 'not signed'],
+      ['registrant', d.registrant ? d.registrant + (d.registrantCountry ? ` (${d.registrantCountry})` : '') : 'not published (redacted for privacy)'],
+      ['abuse email', abuse.email], ['abuse phone', abuse.phone], ['registry', d.registry], ['rdap', d.rdapUrl],
+    ]);
+  }
+  return kvText([
+    ['query', d.query], ['owner', d.org], ['network name', d.name], ['handle', d.handle && !/ - /.test(d.handle) ? d.handle : null],
+    ['registry', d.registry], ['address block', d.cidrs || []], ['range', d.range ? `${d.range.start} - ${d.range.end}` : null],
+    ['ASN range', d.asnRange && d.asnRange.start !== d.asnRange.end ? `AS${d.asnRange.start} - AS${d.asnRange.end}` : null],
+    ['type', d.type], ['country', d.country], ['registered', date(d.registered)], ['last changed', date(d.updated)], ['description', d.description],
+    ['abuse email', abuse.email], ['abuse contact', !abuse.email && abuse.handle ? `${abuse.handle} (email not published in RDAP; see the registry)` : null],
+    ['abuse phone', abuse.phone], ['rdap', d.rdapUrl],
+  ]);
+}
+
+function cidrText(d) {
+  const list = a => (a ? a.join(', ') : null);
+  if (d.v !== 4) {
+    return kvText([['network', d.cidr], ['first address', d.network], ['last address', d.last], ['addresses', `${d.totalPow} = ${d.totalText}`],
+      ['/64 subnets', d.subnets64], ['expanded', d.expanded], ['splits into', list(d.halves)], ['part of', d.supernet], ['range', d.rangeNote]]);
+  }
+  // network | host bits: the split falls after the prefix-th bit, skipping the dots between octets
+  const split = d.prefix > 0 && d.prefix < 32 ? d.prefix + Math.floor((d.prefix - 1) / 8) : null;
+  const bits = split != null ? `${d.bits.slice(0, split)} | ${d.bits.slice(split).replace(/^\./, '')}` : d.bits;
+  return kvText([
+    ['network', d.cidr], ['netmask', d.netmask], ['wildcard', d.wildcard], ['broadcast', d.prefix <= 30 ? d.broadcast : null],
+    ['usable hosts', `${d.first} - ${d.last}`],
+    ['host count', `${d.usableText} usable, ${d.totalText} addresses` + (d.prefix === 31 ? ' (point-to-point, RFC 3021)' : '')],
+    ['your address', d.hostIndex ? `${d.ip} is address #${CIDR.fmt(d.hostIndex)} in this network` : null],
+    ['bits', bits], ['splits into', list(d.halves)], ['contains', d.slash24s > 2 ? `${CIDR.fmt(d.slash24s)} x /24 networks` : null],
+    ['part of', d.supernet], ['range', d.rangeNote], ['legacy class', d.legacyClass ? `${d.legacyClass} (classful addressing is historical)` : null],
+  ]);
+}
+
+// The command-line reference: `curl <host>/help`, and /api for command-line clients.
+function helpText(io) {
+  return text(helpBody(io.url.host), 'public, max-age=3600', 200, { vary: 'Accept, User-Agent' });
+}
+
+function helpBody(h) {
+  const block = (title, rows) => {
+    const w = Math.max(...rows.map(([c, what]) => (what == null ? 0 : c.length))) + 3;
+    return [title, ...rows.map(([c, what]) => ('  ' + (what == null ? c : c.padEnd(w) + what)).trimEnd())].join('\n');
+  };
+  return [
+    `ipterm: IP lookups from the command line. No key, no sign-up, no cookies.`,
+    block("YOUR OWN ADDRESS (from Cloudflare's edge: no third-party lookup)", [
+      [`curl ${h}`, 'your IP address'],
+      [`curl ${h}/json`, 'your IP, network and location as JSON'],
+      [`curl ${h}/asn`, "your network's AS number"],
+      [`curl ${h}/org`, "your network's name"],
+      [`curl ${h}/cc`, 'your country code (ISO 3166-1)'],
+      [`curl ${h}/city`, 'your city'],
+      [`curl ${h}/tz`, 'your time zone'],
+      [`curl ${h}/colo`, 'the Cloudflare data center that answered you'],
+      [`curl ${h}/hostname`, 'your reverse DNS name'],
+    ]),
+    block('ANY ADDRESS', [
+      [`curl ${h}/8.8.8.8`, 'owner, network and location as JSON'],
+      [`curl ${h}/8.8.8.8/country`, 'one value: asn, org, cc, country,'],
+      ['', 'continent or hostname'],
+    ]),
+    block('NETWORKS, DNS, REGISTRY RECORDS, SUBNETS', [
+      [`curl ${h}/AS13335`, 'a network and its address blocks'],
+      [`curl ${h}/dns/example.com`, 'DNS records; add /MX for one type'],
+      [`curl ${h}/whois/github.com`, 'registry record: domain, IP or ASN'],
+      [`curl ${h}/cidr/10.0.0.0/22`, 'subnet calculator'],
+    ]),
+    block('TEXT INSTEAD OF JSON', [
+      ['Add ?format=text to any lookup for aligned lines, like the web terminal.'],
+      ['Quote the URL so the shell leaves the ? alone:'],
+      [`curl '${h}/8.8.8.8?format=text'`],
+    ]),
+    block('NOTES', [
+      ['One-value answers are one line. A missing value is an empty line with'],
+      [`HTTP 404, so  curl -fs ${h}/city  exits non-zero.`],
+      ['30 uncached lookups a minute per address, then HTTP 429.'],
+      [`No cookies or tracking, and nothing about you is stored: ${h}/privacy`],
+      [`OpenAPI: ${h}/openapi.json   For AI tools: ${h}/llms.txt`],
+      [`Browsers: ${h} is a terminal; this reference is at ${h}/api`],
+    ]),
+    `${IPINFO_CREDIT}. Networks: RIPEstat.\nRegistry records: RDAP. DNS: Cloudflare's 1.1.1.1.`,
+  ].join('\n\n') + '\n';
 }
 
 // Runs a data step and maps rate limiting and provider failures to friendly responses.
@@ -407,14 +640,23 @@ async function checkData(io) {
 
 async function selfInfo(io, quick = false) {
   await limit(io);
+  const hostname = await ptr(io.me, quick);
+  const { ip, version, source, ...rest } = edgeInfo(io);
+  return {
+    ip, version, source,
+    hostname: hostname || null,
+    ...(hostname === undefined && quick ? { ptrTimedOut: true } : {}),   // the page offers a reverse lookup instead
+    ...rest,
+  };
+}
+
+// Your own details as Cloudflare's edge sees them (request.cf): no outside call, so no rate limit.
+function edgeInfo(io) {
   const cf = io.request.cf || {}, ip = io.me, p = parseIp(ip);
-  const hostname = await ptr(ip, quick);
   return {
     ip,
     version: p ? p.v : null,
     source: 'edge',
-    hostname: hostname || null,
-    ...(hostname === undefined && quick ? { ptrTimedOut: true } : {}),   // the page offers a reverse lookup instead
     asn: cf.asn ? 'AS' + cf.asn : null,
     org: cf.asOrganization || null,
     city: cf.city || null,
@@ -1445,7 +1687,7 @@ function staticBlock(heading, tags, rows, summary, extra = '') {
 
 const SITEMAP_PATHS = [
   // pages, tools and guides
-  '/', '/whois', '/dns', '/cidr', '/leaktest', '/guides', '/guides/find-router-ip', '/guides/private-ip-ranges', '/guides/what-your-ip-reveals',
+  '/', '/whois', '/dns', '/cidr', '/leaktest', '/api', '/guides', '/guides/find-router-ip', '/guides/private-ip-ranges', '/guides/what-your-ip-reveals',
   '/guides/ipv4-vs-ipv6', '/guides/what-is-an-asn', '/privacy',
   // router and other private addresses people search for
   '/192.168.1.1', '/192.168.0.1', '/10.0.0.1', '/192.168.1.254', '/192.168.100.1', '/192.168.2.1', '/192.168.0.254',
@@ -1586,6 +1828,11 @@ function json(data, status = 200, extra = {}) {
   });
 }
 
-function text(s, cache = 'no-store') {
-  return new Response(s, { headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': cache } });
+function text(s, cache = 'no-store', status = 200, extra = {}) {
+  return new Response(s, { status, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': cache, ...extra } });
+}
+
+// Same-site redirects. Some answers differ for browsers and curl (/help), hence the Vary.
+function redirect(location) {
+  return new Response(null, { status: 302, headers: { location, 'cache-control': 'public, max-age=3600', vary: 'Accept, User-Agent' } });
 }
