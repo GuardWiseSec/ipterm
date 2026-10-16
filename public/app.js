@@ -8,7 +8,33 @@
   let fast = false, hold = false;
   const sleep = ms => (fast ? Promise.resolve() : new Promise(r => setTimeout(r, reduced ? 0 : ms)));
   let live = false, busy = false;
-  const hist = []; let hIdx = 0;
+
+  /* ---------- command history ----------
+     The commands you run (typed or clicked, never their results) are kept in this browser's local storage
+     under ipterm-history, the newest 200, so Up, Down, history, Tab and Ctrl+R still know them after a
+     reload. A page's own first command (the homepage's whoami, a shared link's lookup) isn't saved, since
+     nobody typed it. `history clear` forgets them; `history off` stops saving (remembered as
+     ipterm-history-off) until `history on`. Up and Down keep working for this tab either way. */
+  const HIST_KEY = 'ipterm-history', HIST_OFF = 'ipterm-history-off', HIST_MAX = 200;
+  const stored = k => { try { return localStorage.getItem(k); } catch { return null; } };
+  const store = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch {} };
+  const histOff = () => stored(HIST_OFF) === '1';
+  function savedHistory() {
+    if (histOff()) return [];
+    try {
+      const a = JSON.parse(stored(HIST_KEY) || '[]');
+      return Array.isArray(a) ? a.filter(x => typeof x === 'string' && x.trim() && x.length <= 500).slice(-HIST_MAX) : [];
+    } catch { return []; }
+  }
+  // Read again before each write, so two open tabs add to one list instead of overwriting each other's.
+  function remember(cmd) {
+    if (histOff() || cmd.length > 500) return;
+    const a = savedHistory();
+    if (a[a.length - 1] !== cmd) a.push(cmd);
+    store(HIST_KEY, JSON.stringify(a.slice(-HIST_MAX)));
+  }
+  const hist = savedHistory(); let hIdx = hist.length;
+  const addHist = cmd => { if (hist[hist.length - 1] !== cmd) hist.push(cmd); hIdx = hist.length; };
 
   /* ---------- output helpers ---------- */
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -1704,7 +1730,7 @@
     ['access', 'accessibility and display options', 'access'],
     ['reset', 'forget display settings and return to the defaults', null],
     ['api', 'use ipterm from curl or scripts', 'api'],
-    ['history', 'list commands from this session', 'history'],
+    ['history', 'your recent commands, saved in this browser (history clear, history off)', 'history'],
     ['about', 'where the data comes from', 'about'],
     ['clear', 'clear the screen (Ctrl+L)', null],
   ];
@@ -1748,7 +1774,8 @@
       ['share'], ['copy']],
     copy: ['copy [md | link]', "copies the current result's main value: the IP address, the domain, the range or the AS number. copy md copies the whole result as a Markdown code block that starts with the command and ends with its link, for GitHub issues, Discord or Stack Overflow (your own address is left out of whoami, leaktest and port results). copy link copies the link. The sponsored line is never copied.",
       ['copy', 'copy md', 'copy link'], ['share']],
-    history: ['history', 'lists the commands you ran in this tab. Up and Down recall them at the prompt. Nothing is saved after you close the tab.', ['history'], ['clear']],
+    history: ['history [clear | off | on]', "lists the commands you ran, numbered (click one to run it again). They are saved in this browser's local storage, the newest 200 and never their results, so they are still there after a reload; nothing is sent anywhere. history clear deletes them, history off stops saving them (and deletes them) until history on. Up and Down recall them at the prompt either way, Ctrl+R searches them, Tab completes from them, !! runs the last one again and !<n> runs number n.",
+      ['history', 'history clear', 'history off', 'history on'], ['privacy']],
     theme: ['theme [phosphor | amber | ice | contrast | paper]', 'changes the colors; with no name, moves to the next theme. Remembered on this device only.', ['theme amber', 'theme paper', 'theme contrast'], ['crt', 'access']],
     crt: ['crt [on | off]', 'turns the CRT glow, scanlines and vignette on or off; with neither, switches. Remembered on this device only.', ['crt off', 'crt on'], ['theme', 'access']],
     api: ['api', "how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP). /me draws a card of your own address with a world map (?w=<columns> to fit, ?color=0 for no colors, ?redact to hide the IP). One value at a time as plain text: /asn, /org, /cc, /city, /tz, /colo and /hostname for your own address, /<ip>/asn, org, cc, country, continent or hostname for any other. /line puts your IP, network, country and data center on one line for a shell prompt. /expect/<ASN or country code> answers HTTP 200 when your address matches and 412 when it doesn't, so curl -fs …/expect/AS13335 || <stop something> works as a VPN kill switch. Add ?format=text to any lookup for aligned lines instead of JSON. curl …/help prints the whole reference.",
@@ -2029,6 +2056,23 @@
     return `${fence}\n$ ${clean(r.cmd)}\n${text}\n${fence}\n${live ? location.origin : 'https://your-domain'}${r.path}\n`;
   }
 
+  function historyCmd(arg) {
+    const a = String(arg || '').toLowerCase(), say = m => { announce(m); return line(m, 'sys'); };
+    if (a === 'clear' || a === '-c') { store(HIST_KEY, null); hist.length = 0; hIdx = 0; return say('History cleared: no commands are saved in this browser now.'); }
+    if (a === 'off') {
+      store(HIST_OFF, '1'); store(HIST_KEY, null);
+      return say("History off: commands are no longer saved in this browser, and the saved ones are deleted. Up and Down still recall this tab's commands. history on saves them again.");
+    }
+    if (a === 'on') { store(HIST_OFF, null); return say(`History on: your commands are saved in this browser again (the newest ${HIST_MAX}, never their results).`); }
+    if (a) return line('usage: history   history clear   history off   history on', 'warn');
+    const list = hist.slice(0, -1);                // everything before this `history`
+    if (!list.length) return line('No history yet.', 'sys');
+    list.forEach((h, i) => { const d = el('div', 'ln'); d.append(String(i + 1).padStart(4) + '  ', runnable(h, h)); out.appendChild(d); });
+    scroll();
+    line(histOff() ? "Saving is off, so these are only this tab's commands. history on saves them again."
+      : `Saved in this browser only: the newest ${HIST_MAX} commands, never their results. history clear deletes them; history off stops saving.`, 'sys');
+    announce(`${list.length} command${list.length > 1 ? 's' : ''} in your history.`);
+  }
   function copy(arg) {
     const a = String(arg || '').toLowerCase();
     if (a && !/^(--?)?(md|markdown|link|url)$/.test(a)) return line('usage: copy   copy md   copy link', 'warn');
@@ -2096,10 +2140,12 @@
   }
 
   const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'dig', 'mail', 'lookup', 'asn', 'port']);
-  async function run(raw) {
+  // save: false for what the page runs by itself (a tool page's command, Back and Forward), which isn't saved.
+  async function run(raw, save = true) {
     const cmd = raw.trim(); echo(raw);
     if (!cmd) return;
-    hist.push(cmd); hIdx = hist.length;
+    addHist(cmd);
+    if (save) remember(cmd);
     const [c0, ...args] = cmd.split(/\s+/);
     const lc = c0.toLowerCase(), c = ALIASES[lc] || lc;
     if (args.length === 1 && /^(--help|-h)$/.test(args[0]) && (MAN[c] || HELP.some(r => r[0].split(' ')[0] === c))) return man(c);
@@ -2131,8 +2177,7 @@
       case 'share': return share();
       case 'privacy': return privacy();
       case 'clear': out.textContent = ''; current = null; return;
-      case 'history':
-        return hist.length > 1 ? lines(hist.slice(0, -1).map((h, i) => String(i + 1).padStart(4) + '  ' + h)) : line('No history yet.', 'sys');
+      case 'history': return historyCmd(args[0]);
       case 'theme': return theme(args[0]);
       case 'crt': return crt(args[0]);
       case 'reset': return reset();
@@ -2185,11 +2230,11 @@
   // most). If the one running is a slow one, a note says so; quick ones just finish first.
   let running = 'whoami', startedAt = 0;
   const queued = [];
-  const runQueued = () => { if (queued.length) setTimeout(() => exec(queued.shift()), 0); };
-  async function exec(v) {
+  const runQueued = () => { if (queued.length) { const [v, save] = queued.shift(); setTimeout(() => exec(v, save), 0); } };
+  async function exec(v, save = true) {
     if (busy) {
       if (!String(v).trim() || queued.length >= 5) return;
-      queued.push(v);
+      queued.push([v, save]);
       if (performance.now() - startedAt > 400) {
         const msg = `queued: ${String(v).trim()} (runs after ${running})`;
         line(msg, 'sys'); announce(msg);
@@ -2198,7 +2243,7 @@
     }
     busy = true; running = String(v).trim(); startedAt = performance.now(); nextItems = null;
     const mark = out.lastChild;
-    try { await run(v); } finally {
+    try { await run(v, save); } finally {
       busy = false;
       if (!nextItems && failedUpstream(mark)) next(['retry', running, 'run the same command again']);
       flushNext(); scroll();
@@ -2239,7 +2284,7 @@
     const c = cmdFor(location.pathname, location.search);
     if (!c || !live) return;
     navPush = false;
-    exec(c).finally(() => { navPush = true; });
+    exec(c, false).finally(() => { navPush = true; });
   });
 
   const clock = $('#clock');
@@ -2282,7 +2327,7 @@
       const cmd = running = { whois: 'whois', dns: 'dig', mail: 'mail', cidr: 'cidr', leaktest: 'leaktest', port: 'port', api: 'api' }[init.tool];
       const mark = out.lastChild;
       navPush = false;
-      try { await run(cmd); } finally { navPush = true; }
+      try { await run(cmd, false); } finally { navPush = true; }
       if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
       flushNext();
       return focusInput();
@@ -2292,7 +2337,7 @@
       setLive(true);
       const n = PORTSLIB ? PORTSLIB.parse(init.query) : null;
       const cmd = running = n && !init.error ? `port ${n} --info` : `port ${init.query}`;
-      echo(cmd); hist.push(cmd); hIdx = hist.length;
+      echo(cmd); addHist(cmd);
       navPush = false;
       try { if (n && !init.error) await portAbout(n); else line(init.error || 'Not a port number. Ports run from 1 to 65535: port 22', 'err'); }
       finally { navPush = true; }
@@ -2305,7 +2350,7 @@
       const cmd = init.kind === 'cidr' ? 'cidr ' + init.query : init.kind === 'dns' ? 'dig ' + init.query + (init.qtype && init.qtype !== 'PTR' ? ' ' + init.qtype : '')
         : init.kind === 'mail' ? mailCmd.join(' ') : (init.kind === 'asn' ? 'asn ' : init.kind === 'whois' ? 'whois ' : 'lookup ') + init.query;
       running = cmd;
-      echo(cmd); hist.push(cmd); hIdx = hist.length;
+      echo(cmd); addHist(cmd);
       const mark = out.lastChild;
       navPush = false;
       try {
@@ -2318,7 +2363,7 @@
       return focusInput();
     }
 
-    echo('whoami'); hist.push('whoami'); hIdx = hist.length;
+    echo('whoami'); addHist('whoami');
     if (selfP) {
       setLive(true);
       const d = init.data;
