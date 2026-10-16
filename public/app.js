@@ -51,17 +51,30 @@
      land into a tiny mask canvas (one pixel per dot), then draws one dot per cell. */
   const GEO = window.IPTERM_GEO || null;
   const ASPECT = 2.2, CITY_KM = 50, ZOOM_MS = 1400, PULSE_MS = 20000;
-  let LAND_PATH = null;
+  // Some rings cross the antimeridian by jumping from 180 to -180 (Eurasia at 65°N and 69°N, Wrangel
+  // Island at 71°N). Filled as they are, the jumps flip even-odd parity across the whole band, so each
+  // ring is unwrapped into one continuous outline that may run past ±180 (paint() draws the path at
+  // -360, 0 and +360), then moved by 360 if its middle ended up outside ±180. A ring that goes all the
+  // way around (Antarctica) is closed along its pole. LAND_X is the path's longitude extent.
+  let LAND_PATH = null, LAND_X = null;
   function landPath() {
     if (LAND_PATH || !GEO) return LAND_PATH;
-    LAND_PATH = new Path2D();
+    LAND_PATH = new Path2D(); LAND_X = [Infinity, -Infinity];
     for (const f of GEO.land) {
-      let x = 0, y = 0;
+      const pts = [];
+      let x = 0, y = 0, shift = 0, lo = Infinity, hi = -Infinity;
       for (let i = 0; i < f.length; i += 2) {
+        if (i && Math.abs(f[i]) > 3600) shift -= Math.sign(f[i]) * 360;
         x += f[i]; y += f[i + 1];
-        if (i) LAND_PATH.lineTo(x / 20, y / 20); else LAND_PATH.moveTo(x / 20, y / 20);
+        const px = x / 20 + shift;
+        pts.push([px, y / 20]); lo = Math.min(lo, px); hi = Math.max(hi, px);
       }
+      if (Math.abs(f[0] - x) > 3600) shift -= Math.sign(f[0] - x) * 360;   // the closing edge
+      if (shift) { const pole = y < 0 ? -90 : 90; pts.push([pts[pts.length - 1][0], pole], [f[0] / 20, pole]); }
+      const k = lo + hi > 360 ? -360 : lo + hi < -360 ? 360 : 0;
+      pts.forEach(([px, py], i) => { if (i) LAND_PATH.lineTo(px + k, py); else LAND_PATH.moveTo(px + k, py); });
       LAND_PATH.closePath();
+      LAND_X[0] = Math.min(LAND_X[0], lo + k); LAND_X[1] = Math.max(LAND_X[1], hi + k);
     }
     return LAND_PATH;
   }
@@ -138,7 +151,7 @@
     mctx.setTransform(1, 0, 0, 1, 0, 0); mctx.clearRect(0, 0, cols, rows);
     const sx = cols / lonSpan, sy = rows / v.span, path = landPath();
     for (const off of [-360, 0, 360]) {
-      if (lon0 + lonSpan < off - 180 || lon0 > off + 180) continue;
+      if (lon0 + lonSpan < off + LAND_X[0] || lon0 > off + LAND_X[1]) continue;
       mctx.setTransform(sx, 0, 0, -sy, (off - lon0) * sx, latTop * sy);
       mctx.fill(path, 'evenodd');
     }
