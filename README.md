@@ -57,7 +57,9 @@ With documentation values instead of a real address. In a terminal the land is g
 ## In the browser
 
 [ipterm.net](https://ipterm.net) is the same thing as a terminal: type `help`, or click any command. Every result has
-its own page to share (`ipterm.net/8.8.8.8`, `ipterm.net/AS13335`, `ipterm.net/dns/example.com`).
+its own page to share (`ipterm.net/8.8.8.8`, `ipterm.net/AS13335`, `ipterm.net/dns/example.com`), and `[share] [copy]
+[md]` on its header line, where `md` copies it as a Markdown block for an issue or a chat. Tab completes, Ctrl+R
+searches your history, and `ipterm.net/go?q=<anything>` works as a browser search engine.
 
 | Command | What it does |
 | --- | --- |

@@ -1956,6 +1956,7 @@
       ['crt off', 'keep your theme, drop the glow, scanlines and vignette'],
       ['motion', 'animations are skipped when your system is set to reduce motion'],
       ['screen readers', 'each result is announced as a one-line summary'],
+      ['keys', 'keyboard shortcuts. Tab completes at the prompt; on an empty prompt it moves focus out of the terminal'],
       ['reset', 'forget these settings and go back to the defaults'],
     ]);
     line('Settings are remembered on this device only.', 'sys');
@@ -2093,7 +2094,8 @@
 
   async function privacy() {
     await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
-      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, and a mail check also fetches the domain\'s own MTA-STS policy file. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.'], 'sys');
+      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, and a mail check also fetches the domain\'s own MTA-STS policy file. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.',
+      'The commands you type are saved in your own browser (the newest 200, never their results) and never leave it: history clear deletes them, history off stops saving.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
     const d = el('div', 'ln sys'); const a = el('a', 'cmd', 'read the full privacy policy ↗'); a.href = '/privacy';
     d.append(a); out.appendChild(d); scroll();
