@@ -19,8 +19,11 @@
 //   GET /dns/<name>[/TYPE]  DNS records for a domain (summary, or one record type) via Cloudflare's resolver
 //   GET /api/dns?name=&type= the same as JSON, used by the terminal
 //   GET /cidr/<ip>/<prefix> subnet calculator page (also /api/cidr?q=); pure calculation, no outside calls
-//   GET /whois, /dns, /cidr, /leaktest, /api  landing page for each tool (usage and examples); /api is the
-//                           API docs, and command-line clients get the /help text there instead
+//   GET /port/<n>           page explaining port n with a button to check it (browsers); command-line tools get
+//                           the check itself. It only ever tests your own address (see "port check" below)
+//   GET /api/port?n=        the check as JSON, used by the terminal (same-origin or command-line clients only)
+//   GET /whois, /dns, /cidr, /leaktest, /port, /api  landing page for each tool (usage and examples); /api is
+//                           the API docs, and command-line clients get the /help text there instead
 //   GET /api/check          your own IP plus how IPinfo classifies it (VPN, hosting...), for the privacy check
 //   GET /robots.txt, /sitemap.xml
 //   GET /status             for the owner: today's and this hour's IPinfo Core and proxycheck.io budget use.
@@ -50,8 +53,11 @@
 //   - Every response carries a strict Content-Security-Policy and related headers.
 
 import { DurableObject } from 'cloudflare:workers';
+import { connect } from 'cloudflare:sockets';
 import '../public/cidr.js';                       // shared subnet calculator (also served to the page)
+import '../public/ports.js';                      // what common ports are for (also served to the page)
 const CIDR = globalThis.IPTERM_CIDR;
+const PORTS = globalThis.IPTERM_PORTS;
 
 const CLI_UA = /^(curl|wget|httpie|xh|fetch|libfetch|aria2)\b|powershell/i;
 // Link-preview fetchers for chat apps and social sites. Many send "Accept: */*", so without this a
@@ -98,6 +104,8 @@ async function route(request, env, ctx) {
   if (path === '/api/check') return guard(() => checkData(io), d => json(d));
   if (path === '/api/asn') return asnRoute(io, String(url.searchParams.get('asn') || '').trim(), false);
   if (Object.hasOwn(TOOLS, path.slice(1).toLowerCase())) return toolRoute(io, path.slice(1).toLowerCase(), html);
+  if (path === '/api/port') return portRoute(io, url.searchParams.get('n'), false);
+  if (path.startsWith('/port/')) return portRoute(io, path.slice(6), html);
   if (path === '/api/whois') return whoisRoute(io, String(url.searchParams.get('q') || '').trim(), false);
   if (path.startsWith('/whois/')) return whoisRoute(io, path.slice(7), html);
   if (path === '/api/cidr') return cidrRoute(io, url.searchParams.get('q'), false);
@@ -110,7 +118,7 @@ async function route(request, env, ctx) {
   if (ASN_RE.test(bare)) return asnRoute(io, bare, html);
   const field = /^([0-9a-f.:]{2,45})\/([a-z]{1,20})$/i.exec(bare);   // /8.8.8.8/asn
   if (field && parseIp(field[1])) return ipField(io, field[1], field[2].toLowerCase());
-  if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/cidr. See /help.' }, 404);
+  if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/cidr, /api/port. See /help.' }, 404);
 
   const res = await env.ASSETS.fetch(request);
   if (res.status !== 404) return withOrigin(res, url);
@@ -155,6 +163,12 @@ const TOOLS = {
     usage: 'cidr <range>',
     examples: [['cidr 192.168.1.0/24', '/cidr/192.168.1.0/24'], ['cidr 10.0.0.0/22', '/cidr/10.0.0.0/22'], ['cidr 172.16.0.0/12', '/cidr/172.16.0.0/12'], ['cidr 2001:db8::/48', '/cidr/2001:db8::/48']],
   },
+  port: {
+    title: 'Port checker: is a port open on my IP? | ipterm', heading: 'Port checker',
+    desc: 'Free open port checker: see whether a TCP port is open on your own IP address, for port forwarding, game servers, Plex, SSH or Remote Desktop. ipterm connects to the address you visit from, one port at a time, and explains why a port may be closed.',
+    usage: 'port <number>',
+    examples: [['port 25565', '/port/25565'], ['port 32400', '/port/32400'], ['port 22', '/port/22'], ['port 3389', '/port/3389']],
+  },
   api: {
     title: 'ipterm API: IP address lookups from curl and scripts | ipterm', heading: 'API and command line',
     desc: 'Use ipterm from curl and scripts, with no key and no sign-up: your IP as plain text, one value at a time (/asn, /city, /tz), and any IP address, network, DNS name, registry record or subnet as JSON or aligned text.',
@@ -168,12 +182,13 @@ function toolRoute(io, tool, html) {
   if (!html) {
     if (tool === 'api') return helpText(io);              // command-line clients get the reference itself
     if (!t.examples.length) return reply(io, { error: 'This check runs in your browser. Open the page in a browser to run it.', usage: t.usage }, 400);
-    return reply(io, { error: `Add something to look up, like ${t.examples[0][1]}`, usage: t.usage, examples: t.examples.map(e => e[1]) }, 400);
+    return reply(io, { error: `${tool === 'port' ? 'Add a port number' : 'Add something to look up'}, like ${t.examples[0][1]}`, usage: t.usage, examples: t.examples.map(e => e[1]) }, 400);
   }
   const list = t.examples.map(([c, href]) => `<li><a href="${esc(href)}">${esc(c)}</a></li>`).join('');
   const extra = (list ? `<p class="ln sys">Examples:</p><ul class="static-list">${list}</ul>` : '') +
     (t.checks ? `<p class="ln sys">What it checks:</p><ul class="static-list">${t.checks.map(c => `<li>${esc(c)}</li>`).join('')}</ul>` : '') +
     (tool === 'cidr' ? `<p class="ln sys">Guide: <a href="/guides/subnet-cheat-sheet">Subnet mask cheat sheet</a></p>` : '') +
+    (tool === 'port' ? `<p class="ln sys">It only ever tests the address you connect from, so it can't be pointed at anyone else's.</p>${portIndex()}` : '') +
     // The full reference for visitors without JavaScript and for crawlers; the terminal prints its own (`api`).
     (tool === 'api' ? `<pre class="doc-pre api-ref"><code>${esc(helpBody(io.url.host))}</code></pre>` +
       `<p class="ln sys">Machine-readable: <a href="/openapi.json">OpenAPI description</a> · <a href="/llms.txt">llms.txt</a> · plain text: <code>curl ${esc(io.url.host)}/help</code></p>` +
@@ -341,6 +356,183 @@ async function asnRoute(io, q, html) {
     d => html ? asnPage(io, d, d.found ? 200 : 404) : reply(io, d, d.found ? 200 : 404, { 'cache-control': 'public, max-age=300' }, asnText),
     (msg, status) => html ? asnPage(io, { asn: 'AS' + n, number: n, error: msg }, status) : reply(io, { error: msg }, status),
   );
+}
+
+/* ---------- port check ----------
+   "Is this port open on my IP?" The Worker opens a TCP connection to the address the request came from
+   (cf-connecting-ip, which Cloudflare sets itself) on the one port asked for, and reports whether it was
+   accepted, refused or got no answer. It never tests any other address, sends nothing over the
+   connection, closes it at once and keeps nothing. Guards:
+   - only the ipterm page itself (a same-origin request) or a command-line tool can start a check, so
+     other sites can't make visitors' browsers start one and crawlers never do;
+   - the /port/<n> pages explain the port and offer a button; nothing is tested on page load;
+   - PORT_LIMITER allows 10 checks a minute per address (per /64 for IPv6).
+   What testing on Cloudflare showed (wrangler dev --remote):
+   - IPv6 works, but only as a bracketed literal ("[2001:db8::1]"); a bare IPv6 literal is refused.
+   - connect() refuses port 25 itself ("Connections to port 25 are prohibited").
+   - Cloudflare's own addresses (WARP, 1.1.1.1) are refused at once, so they are recognized beforehand.
+   - A port that is dropped (what most home routers do with anything not forwarded) never opens.
+   - A visitor who reaches ipterm over IPv6 gets their IPv6 address tested, where a router's IPv4 port
+     forward doesn't apply: the answer says so and points to `curl -4`, which tests IPv4. */
+const PORT_TIMEOUT = 5000;
+// Cloudflare's own networks (WARP, the 1.1.1.1 app, iCloud Private Relay's Cloudflare exits), which
+// Workers can't connect to, and its published ranges in case the network number is missing.
+const CLOUDFLARE_ASNS = new Set([13335, 209242]);
+const CLOUDFLARE_RANGES = ['173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
+  '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13', '104.24.0.0/14', '172.64.0.0/13',
+  '131.0.72.0/22', '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32'];
+// Providers that usually share IPv4 addresses between customers (carrier-grade NAT), so no port forward
+// can work. Mobile networks in general do; these are the common home-internet cases.
+const CGNAT_ASNS = { 14593: 'Starlink', 21928: 'T-Mobile', 22394: 'Verizon Wireless', 6167: 'Verizon Wireless', 20057: 'AT&T Mobility' };
+
+// Fetches from the page itself say so (Sec-Fetch-Site); older browsers send Origin on cross-site requests.
+function sameOrigin(request, url) {
+  const site = request.headers.get('sec-fetch-site');
+  return site ? site === 'same-origin' : request.headers.get('origin') === url.origin;
+}
+
+async function portRoute(io, raw, html) {
+  const n = PORTS.parse(raw);
+  if (n == null) {
+    const error = 'Not a port number. Ports run from 1 to 65535, and the check takes one at a time, like /port/22';
+    return html ? portPage(io, { input: clip(raw), error }, 400) : reply(io, { error }, 400);
+  }
+  if (html) return portPage(io, { port: n }, 200);       // explains the port; only its button runs the check
+  if (!sameOrigin(io.request, io.url) && !CLI_UA.test(io.request.headers.get('user-agent') || '')) {
+    return reply(io, { error: `The port check runs from the ipterm terminal or a command-line tool such as curl: curl -4 ${io.url.host}/port/${n}`, port: n }, 403);
+  }
+  if (io.request.method !== 'GET') return reply(io, { error: 'Use GET to run a port check.' }, 405, { allow: 'GET' });
+  try {
+    return reply(io, await portCheck(io, n), 200, {}, portText);
+  } catch (e) {
+    if (e instanceof RateLimited) {
+      const r = reply(io, { error: 'Too many port checks from your address (10 a minute). Wait a minute and try again.' }, 429);
+      r.headers.set('retry-after', '60');
+      return r;
+    }
+    console.error('[ipterm] port check failed:', String((e && e.message) || e));   // never the visitor's address
+    return reply(io, { error: "The port check didn't finish. Try again in a moment." }, 502);
+  }
+}
+
+async function portCheck(io, n) {
+  const svc = PORTS.get(n), p = parseIp(io.me);
+  const service = svc ? { name: svc.name, proto: svc.proto, use: svc.use, tips: svc.tips, risk: svc.risk } : null;
+  const base = p ? { ip: canonIp(p), version: p.v, port: n, protocol: 'tcp', service } : { ip: null, version: null, port: n, protocol: 'tcp', service };
+  const untested = (reason, summary, notes = []) => ({ ...base, state: 'untestable', reason, summary, notes });
+  if (!p) return untested('no-address', "not tested: the request didn't say which address it came from.");
+  const range = nonPublicReason(p), asn = Number((io.request.cf || {}).asn) || null;
+  if (range && /carrier-grade/.test(range)) {
+    return untested('cgnat', `not tested: ${base.ip} is in the carrier-grade NAT range (100.64.0.0/10). Your provider shares public addresses between many customers, so nothing on the internet can reach this one and no port forward can work. Ask your provider for a public IPv4 address, or use IPv6 or a tunnel such as Tailscale or Cloudflare Tunnel.`);
+  }
+  if (range) return untested('not-public', `not tested: ${base.ip} is not a public address (${range}), so nothing on the internet can reach it.`);
+  if (n === 25) return untested('port-25', "not tested: Cloudflare, which runs ipterm, doesn't allow connections to port 25 (email), to stop spam. Most home internet providers block port 25 too.");
+  if (CLOUDFLARE_ASNS.has(asn) || CLOUDFLARE_RANGES.some(r => inPrefix(p, r) >= 0)) {
+    return untested('cloudflare', `not tested: ${base.ip} belongs to Cloudflare, so you are probably using Cloudflare WARP, the 1.1.1.1 app or iCloud Private Relay. ipterm runs on Cloudflare, which can't connect to its own addresses: turn the VPN or relay off and check again.`);
+  }
+  await portLimit(io);
+  const r = await probePort(p.v === 6 ? `[${base.ip}]` : base.ip, n);
+  if (r.state === 'untestable') return untested('refused', `not tested: Cloudflare, which runs ipterm, refused to connect to port ${n}.`);
+  return { ...base, state: r.state, ms: r.ms, summary: portSummary(r.state, n, svc), notes: portNotes(io, base, r.state, svc, asn) };
+}
+
+async function portLimit(io) {
+  if (!io.env.PORT_LIMITER) return;
+  let ok = true;
+  try { ok = (await io.env.PORT_LIMITER.limit({ key: limitKey(io.me) })).success; } catch { ok = true; }   // fail open, like LOOKUP_LIMITER
+  if (!ok) throw new RateLimited();
+}
+
+// Open: the handshake completed. Closed: the address refused it (a reset). No answer: nothing came back
+// in time, which is what a router does with a port it doesn't forward. Nothing is ever sent.
+async function probePort(hostname, port) {
+  const t0 = Date.now();
+  let sock, timer;
+  try { sock = connect({ hostname, port }); } catch { return { state: 'untestable' }; }   // refused before connecting
+  sock.closed.catch(() => {});
+  try {
+    const state = await Promise.race([
+      sock.opened.then(() => 'open', () => 'closed'),
+      new Promise(res => { timer = setTimeout(() => res('no-answer'), PORT_TIMEOUT); }),
+    ]);
+    return { state, ms: state === 'no-answer' ? PORT_TIMEOUT : Date.now() - t0 };
+  } finally {
+    clearTimeout(timer);
+    try { sock.close().catch(() => {}); } catch {}
+  }
+}
+
+function portSummary(state, n, svc) {
+  const what = `TCP port ${n}` + (svc ? ` (${svc.name})` : '');
+  if (state === 'open') return `open: your address accepted a connection on ${what}.`;
+  if (state === 'closed') return `closed: your address refused the connection on ${what}. It got through, but nothing there accepted it: no program is listening on that port, or a firewall turned it away.`;
+  return `no answer: nothing replied on ${what} within ${PORT_TIMEOUT / 1000} seconds. A router or firewall is dropping it, or the port isn't forwarded to any device.`;
+}
+
+// Shared by the terminal and the text answer, so both explain a result in the same words.
+function portNotes(io, d, state, svc, asn) {
+  const notes = [], n = d.port, v6 = d.version === 6;
+  if (svc && svc.proto === 'udp') notes.push(`${svc.name} uses UDP, which this check can't test: the result is about TCP port ${n} only.`);
+  else if (svc && svc.proto === 'tcp+udp') notes.push(`${svc.name} also uses UDP, which this check can't test.`);
+  if (v6) {
+    notes.push(`You reached ipterm over IPv6, so this tested your IPv6 address. A router's port forward only applies to IPv4; over IPv6 the router's firewall has to allow the port to the device instead. To test your IPv4 address, run: curl -4 ${io.url.host}/port/${n}`);
+  }
+  if (state === 'open') {
+    notes.push(svc && svc.risk ? svc.risk : 'Anyone on the internet can reach this port, not just you: make sure whatever answers is meant to be public and has a strong password.');
+    return notes;
+  }
+  notes.push(v6 ? `To open it: the program must be running and listening on port ${n}, the device's firewall must allow it, and the router's IPv6 firewall must let it through to the device.`
+    : `To open it: the program must be running and listening on port ${n}, the device's firewall must allow it, and the router must forward TCP port ${n} to the device's local IP address (give the device a fixed local IP so the forward keeps working).`);
+  if (svc && svc.tips) notes.push(`${svc.name}: ${svc.tips}`);
+  if (!v6) {
+    const isp = CGNAT_ASNS[asn];
+    notes.push((isp ? `${isp} usually shares IPv4 addresses between customers (carrier-grade NAT), which would explain this. ` : '') +
+      `If your router's internet (WAN) address isn't ${d.ip}, or is between 100.64.0.0 and 100.127.255.255, your provider uses carrier-grade NAT: the router has no public address of its own, so no port forward can reach it. Ask your provider for a public IPv4 address, or use IPv6 or a tunnel such as Tailscale or Cloudflare Tunnel.`);
+  }
+  return notes;
+}
+
+function portText(d) {
+  const s = d.service;
+  return kvText([
+    ['port', `${d.port}/tcp` + (s ? `  ${s.name}` : '')],
+    ['your address', d.ip ? `${d.ip} (IPv${d.version}, the address this request came from)` : null],
+    ['result', d.summary], ['used for', s && s.use], ['notes', d.notes || []],
+  ]);
+}
+
+// Links to every port with its own explainer: the /port landing page and the foot of each port page.
+function portIndex(skip = null) {
+  const items = PORTS.list().filter(n => n !== skip)
+    .map(n => `<li><a href="/port/${n}">${n} ${esc(PORTS.get(n).name)}</a></li>`).join('');
+  return `<p class="ln sys">Common ports:</p><ul class="static-list">${items}</ul>`;
+}
+
+// What a port is for and why it may be closed, plus how to check it. The check itself never runs here:
+// the terminal offers a button, so crawlers and link previews never start one.
+function portPage(io, d, status) {
+  if (d.error) {
+    return shell(io, { status, path: '/port/' + String(d.input || '').slice(0, 20), title: 'Port checker | ipterm',
+      initial: { kind: 'port', query: String(d.input || ''), error: d.error }, body: staticBlock('Port checker', ['port'], [], d.error) });
+  }
+  const n = d.port, s = PORTS.get(n), path = '/port/' + n, host = io.url.host;
+  const title = s ? `Port ${n} (${s.name}): check if it's open on your IP | ipterm` : `Port ${n}: check if it's open on your IP | ipterm`;
+  const desc = s ? `${s.use} Check whether TCP port ${n} is open on your own IP address, and see why it may be closed.`
+    : `Check whether TCP port ${n} is open on your own IP address: ipterm connects to the address you visit from and reports open, closed or no answer.`;
+  const summary = (s ? s.use + ' ' : '') + `ipterm can check whether TCP port ${n} is open on your own IP address: it connects to the address you visit from, on this one port, and reports open, closed or no answer. Nothing is stored.` +
+    (s && s.proto === 'udp' ? ` ${s.name} uses UDP, which the check can't test.` : '');
+  const rows = s ? [['protocol', PORTS.protoText(s.proto)], ['why it may be closed', s.tips], ['caution', s.risk]] : [['protocol', 'TCP']];
+  const p = t => `<p class="ln">${t}</p>`;
+  const extra = `<p class="ln sys">Check it: type <code>port ${n}</code> in the terminal, or from a command line run <code>curl -4 ${esc(host)}/port/${n}</code>. It only tests the address you connect from, one port at a time.</p>` +
+    `<p class="ln sys">For a port to be open, all of these must be true:</p>` +
+    p(`1. A program is running and listening on port ${n} (on all addresses, not only 127.0.0.1).`) +
+    p("2. The device's firewall allows the port.") +
+    p(`3. The router forwards TCP port ${n} to the device's local IP address, which should be fixed (a DHCP reservation).`) +
+    p("4. Your provider gives the router a public IPv4 address. If the router's internet (WAN) address isn't the one websites see, or is in 100.64.0.0/10 (100.64.x.x to 100.127.x.x), you are behind carrier-grade NAT and no port forward can work: ask for a public IP, or use IPv6 or a tunnel such as Tailscale or Cloudflare Tunnel.") +
+    p(`5. Over IPv6 there is no port forwarding: the router's IPv6 firewall has to allow the port to the device. If your browser connects over IPv6, the check tests your IPv6 address; <code>curl -4</code> tests IPv4.`) +
+    portIndex(n);
+  return shell(io, { status, path, title, desc, noindex: !s, initial: { kind: 'port', query: n },
+    body: staticBlock(s ? `Port ${n} · ${s.name}` : `Port ${n}`, ['port', s ? s.proto : 'tcp'], rows, summary, extra) });
 }
 
 /* ---------- the command line: plain text for curl ----------
@@ -531,6 +723,10 @@ function helpBody(h) {
       [`curl ${h}/dns/example.com`, 'DNS records; add /MX for one type'],
       [`curl ${h}/whois/github.com`, 'registry record: domain, IP or ASN'],
       [`curl ${h}/cidr/10.0.0.0/22`, 'subnet calculator'],
+    ]),
+    block('PORT CHECK (YOUR OWN ADDRESS ONLY, 10 A MINUTE)', [
+      [`curl -4 ${h}/port/22`, 'is TCP port 22 open on your IP?'],
+      ['-4 tests your IPv4 address, where router port forwards apply.'],
     ]),
     block('TEXT INSTEAD OF JSON', [
       ['Add ?format=text to any lookup for aligned lines, like the web terminal.'],
@@ -1394,7 +1590,8 @@ async function loadShell(io) {
 // Fills the terminal page with a title, description, share tags, a static summary that works
 // without JavaScript (and for search engines), and the data the terminal boots from. Pages other
 // than the homepage get their own h1 (the title without " | ipterm") in place of the generic one.
-async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null, cache = null }) {
+// noindex: a working page that search engines should skip (ports without an explainer of their own).
+async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null, cache = null, noindex = false }) {
   let h = await loadShell(io);
   const canonical = io.url.origin + (path === '/' ? '/' : encodePath(path));
   // Replacements use functions: with a plain string, "$`", "$'" and "$&" in page text (which can come
@@ -1413,7 +1610,7 @@ async function shell(io, { status = 200, title, desc, path = '/', body = '', ini
     `<meta property="og:image" content="${esc(io.url.origin)}/og.png">`,
     `<meta name="twitter:card" content="summary_large_image">`,
     path === '/' ? homeJsonLd(io.url.origin) : status < 400 ? breadcrumbJsonLd(io.url.origin, path) : '',
-    status >= 400 && status !== 429 ? `<meta name="robots" content="noindex">` : '',
+    (status >= 400 && status !== 429) || noindex ? `<meta name="robots" content="noindex">` : '',
   ].filter(Boolean).join('\n');
   if (path !== '/') h = h.replace(/\s*<p class="intro">[\s\S]*?<\/p>/, '');   // the plain-English line is for the homepage
   const h1 = path !== '/' && title ? title.replace(/\s*\|\s*ipterm$/, '') : null;
@@ -1501,7 +1698,7 @@ function breadcrumbJsonLd(origin, path) {
   const tool = Object.hasOwn(TOOLS, first) ? first : null;
   const crumbs = [['ipterm', '/']];
   if (tool) crumbs.push([TOOLS[tool].heading, '/' + tool]);
-  if (!tool || rest.length) crumbs.push([tool ? rest.join(tool === 'cidr' ? '/' : ' ') : first, path]);
+  if (!tool || rest.length) crumbs.push([tool ? (tool === 'port' ? 'port ' : '') + rest.join(tool === 'cidr' ? '/' : ' ') : first, path]);
   const ld = {
     '@context': 'https://schema.org',
     '@type': 'BreadcrumbList',
@@ -1738,6 +1935,8 @@ const SITEMAP_PATHS = [
   // pages, tools and guides
   '/', '/whois', '/dns', '/cidr', '/leaktest', '/api', '/guides', '/guides/find-router-ip', '/guides/private-ip-ranges', '/guides/what-your-ip-reveals',
   '/guides/ipv4-vs-ipv6', '/guides/what-is-an-asn', '/privacy',
+  // port checker: what each port is for (the pages never run a check themselves)
+  '/port', '/port/22', '/port/80', '/port/443', '/port/3389', '/port/25565', '/port/32400', '/port/8080', '/port/27015', '/port/51820',
   // router and other private addresses people search for
   '/192.168.1.1', '/192.168.0.1', '/10.0.0.1', '/192.168.1.254', '/192.168.100.1', '/192.168.2.1', '/192.168.0.254',
   '/192.168.10.1', '/192.168.8.1', '/10.0.0.138', '/10.1.1.1', '/10.0.1.1', '/172.16.0.1', '/127.0.0.1', '/169.254.1.1',

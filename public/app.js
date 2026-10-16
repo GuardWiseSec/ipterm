@@ -462,8 +462,10 @@
   function cmdFor(pathname) {
     let p; try { p = decodeURIComponent(pathname).replace(/^\/+|\/+$/g, ''); } catch { return null; }
     if (!p) return 'whoami';
-    const tool = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest', api: 'api' }[p.toLowerCase()];
+    const tool = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest', port: 'port', api: 'api' }[p.toLowerCase()];
     if (tool) return tool;
+    const pt = /^port\/(\d{1,5})$/i.exec(p);           // the page explains the port; Back never re-runs a check
+    if (pt) return 'port ' + Number(pt[1]) + ' --info';
     const cd = /^cidr\/(.+)$/i.exec(p);
     if (cd) return 'cidr ' + cd[1];
     const dn = /^dns\/([^/]+)(?:\/([a-z]+))?$/i.exec(p);
@@ -510,6 +512,11 @@
         const m = /^(?:as)?(\d{1,10})$/i.exec(a || ''), n = m ? Number(m[1]) : 0;
         return n >= 1 && n <= 4294967295 ? '/AS' + n : null;
       }
+      case 'port': {                                           // the page explains the port; the link's click runs the check
+        if (!a) return '/port';
+        const n = PORTSLIB && PORTSLIB.parse(a);
+        return n ? '/port/' + n : null;
+      }
       case 'lookup':
         if (!a) return null;
         if (parseIp(a)) return '/' + a;
@@ -542,7 +549,7 @@
     out.appendChild(d); scroll();
   }
   // A data source hiccup or the rate limit (not a typo): offer to run the same command again.
-  const RETRYABLE = /didn't respond|Too many lookups|network error|HTTP \d/;
+  const RETRYABLE = /didn't respond|didn't finish|Too many (lookups|port checks)|network error|HTTP \d/;
   function failedUpstream(mark) {
     for (let n = mark ? mark.nextSibling : out.firstChild; n; n = n.nextSibling)
       if (n.classList && n.classList.contains('err') && RETRYABLE.test(n.textContent)) return true;
@@ -1023,6 +1030,88 @@
     }
   }
 
+  /* ---------- port check ----------
+     "Is this port open on my IP?" The Worker connects to the address you are visiting from (never any
+     other) on the one port you name, and says whether it was accepted, refused or got no answer. It
+     only runs when you ask: the /port/<n> pages explain the port and offer a button. What each port is
+     for comes from ports.js, shared with the Worker; how a result reads comes from the Worker. */
+  const PORTSLIB = window.IPTERM_PORTS || null;
+  const portTitle = (n, s) => (s ? `Port ${n} (${s.name}): check if it's open on your IP` : `Port ${n}: check if it's open on your IP`) + ' | ipterm';
+  const PORT_STATE = { open: ['st-ok', 'open'], closed: ['st-warn', 'closed'], 'no-answer': ['st-warn', 'no answer'], untestable: ['st-info', 'not tested'] };
+
+  async function portIntro() {
+    setUrl('/port', 'Port checker: is a port open on my IP? | ipterm');
+    line("port checks whether a TCP port is open on your own IP address: ipterm connects to the address you are visiting from, on the one port you name, and reports open, closed or no answer. It never tests anyone else's address.", 'sys');
+    line('usage: port <number>   e.g. port 25565    port <number> --info explains a port without checking it', 'sys');
+    const d = el('div', 'ln sys'); d.append('try: ');
+    [25565, 32400, 22, 3389].forEach((n, i) => { if (i) d.append('  ·  '); d.append(cmdLink(`port ${n}`, `port ${n}`, `/port/${n}`)); });
+    out.appendChild(d);
+    if (PORTSLIB) {                            // what each common port is for (a click explains it; nothing is checked)
+      const c = el('div', 'ln sys'); c.append('common ports: ');
+      PORTSLIB.list().forEach((n, i) => { if (i) c.append('  ·  '); c.append(cmdLink(`${n} ${PORTSLIB.get(n).name}`, `port ${n} --info`, `/port/${n}`)); });
+      out.appendChild(c);
+    }
+    scroll();
+    announce('Port checker. Type port and a number to check whether that port is open on your own IP address.');
+  }
+
+  async function portAbout(n) {
+    const s = PORTSLIB && PORTSLIB.get(n);
+    setUrl('/port/' + n, portTitle(n, s));
+    const head = el('div', 'head');
+    head.append(el('span', 'hip', `port ${n}`), el('span', 'tag', s ? s.proto : 'tcp'), el('span', 'tag', 'about'));
+    out.appendChild(head);
+    const rows = s ? [['service', s.name], ['used for', s.use], ['protocol', PORTSLIB.protoText(s.proto)], ['if closed', s.tips]]
+      : [['protocol', 'TCP'], ['', `Port ${n} isn't one of the common ports ipterm describes, but it can still be checked.`, 'plain']];
+    if (s && s.risk) rows.push(['caution', s.risk]);
+    const f = document.createDocumentFragment();
+    f.append(cmdButton(`check port ${n} now`, `port ${n}`), '  on the address you are visiting from (one connection; nothing is stored)');
+    rows.push(['check', f]);
+    await kv(rows);
+    announce(s ? `Port ${n}, ${s.name}: ${s.use} Use the check button to test it on your address.` : `Port ${n}. Use the check button to test it on your address.`);
+    next(['port', 'port', 'common ports and how the check works'], ['man port', 'man port', 'the manual']);
+  }
+
+  async function portCheck(n) {
+    setUrl('/port/' + n, portTitle(n, PORTSLIB && PORTSLIB.get(n)));
+    if (!live) return line('The port check tests your real connection, so it only runs on the deployed site.', 'warn');
+    const q = line(`connecting to your address on TCP port ${n}… (up to 5 seconds; nothing is stored)`, 'sys'); const t0 = performance.now();
+    const d = await getJson('/api/port?n=' + n);
+    if (d.error) { q.textContent = d.error; q.className = 'ln err'; announce(d.error); return; }
+    q.textContent = `done · ${Math.round(performance.now() - t0)} ms`;
+    const [cls, label] = PORT_STATE[d.state] || PORT_STATE.untestable, svc = d.service;
+    const head = el('div', 'head');
+    head.append(el('span', 'hip', `port ${n}`), el('span', 'tag', 'tcp'), el('span', 'tag ' + cls, label));
+    if (d.version) head.append(el('span', 'tag', 'IPv' + d.version));
+    out.appendChild(head);
+    const rows = [['port', `${n}/tcp` + (svc ? '  ' + svc.name : '')]];
+    if (d.ip) rows.push(['your address', `${d.ip}  (IPv${d.version}: the address you connected from, the only one ipterm tests)`]);
+    if (d.version === 6) {                     // the address a router's port forward applies to, which this couldn't test
+      const slot = el('span', 'ttl', 'checking…');
+      rows.push(['IPv4', slot]);
+      otherFamily(6).then(v4 => { slot.className = ''; slot.textContent = v4 ? `${v4}  not tested: you reached ipterm over IPv6 (curl -4 tests it)` : 'none detected: your connection looks IPv6 only'; });
+    }
+    rows.push(['result', d.summary || label]);
+    if (svc && svc.use) rows.push(['used for', svc.use]);
+    (d.notes || []).forEach((t, i) => rows.push([i ? '' : 'notes', t]));
+    await kv(rows);
+    announce(d.summary || label);
+    const about = svc && [`port ${n} --info`, `port ${n} --info`, `what port ${n} is used for`];
+    if (d.state === 'open') next(about, ['port', 'port', 'check another port'], ['share', 'share', "copy a link to this port's page"], ['whoami', 'whoami', 'your IP address and network']);
+    else next(d.state !== 'untestable' && ['check again', `port ${n}`, 'run the check again after a change'], about, ['port', 'port', 'common ports'], ['whoami', 'whoami', 'your IP address and network']);
+  }
+
+  function portCmd(args) {
+    if (!args.length) return portIntro();
+    if (!PORTSLIB) return line('The port list did not load. Reload the page and try again.', 'err');
+    const [a, b] = args, n = PORTSLIB.parse(a);
+    // Only ever your own address, one port at a time: say so instead of guessing at what was meant.
+    if (parseIp(a) || looksLikeDomain(a)) return line(`port only checks your own address, so it takes just a port number: port ${PORTSLIB.parse(b) || 22}`, 'warn');
+    if (n == null) return line(/^\d+\s*[-,:]/.test(a) ? 'One port at a time: port <number>, e.g. port 22' : `"${a}" is not a port number. Ports run from 1 to 65535: port 22`, 'err');
+    if (b && /^(--?info|info|about)$/i.test(b)) return portAbout(n);
+    return portCheck(n);
+  }
+
   /* ---------- tool intros (/whois, /dns, /cidr, or the command on its own) ---------- */
   const TOOL_INTRO = {
     whois: { url: '/whois', title: 'Whois lookup: who owns a domain, IP address or network | ipterm',
@@ -1396,6 +1485,7 @@
     ['cidr <range>', 'subnet calculator: cidr 10.0.0.0/22, IP + netmask, or IPv6', 'cidr 10.0.0.0/22'],
     ['whois <ip|ASN|domain>', 'registry record: owner, registrar, dates, name servers, abuse contact', 'whois example.com'],
     ['asn <number>', 'network details and address blocks, e.g. asn AS13335', 'asn AS13335'],
+    ['port <number>', 'is a TCP port open on your IP? (tests your own address only)', 'port'],
     ['<ip> or <ASN>', 'same as lookup', null],
     ['ping [count]', 'round trip from your browser to the nearest Cloudflare data center', 'ping'],
     ['man <command>', 'details and examples for one command, e.g. man dig', 'man dig'],
@@ -1415,7 +1505,7 @@
   const ALIASES = { myip: 'whoami', me: 'whoami', leaks: 'leaktest', leak: 'leaktest', privacycheck: 'leaktest', vpntest: 'leaktest',
     vpncheck: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
     as: 'asn', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
-    tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
+    portcheck: 'port', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
   // man <command>: [synopsis, description, examples, see also, curl paths]
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
@@ -1432,6 +1522,8 @@
       ['asn AS13335', 'asn 15169'], ['whois', 'cidr'], ['/AS13335', '/AS13335?format=text']],
     cidr: ['cidr <range>   or   cidr <ip> <netmask>', 'subnet calculator: network and broadcast addresses, netmask, wildcard, usable host range and count, and how the block splits and combines. IPv6 too. Calculated in your browser.',
       ['cidr 192.168.1.0/24', 'cidr 10.0.0.0/22', 'cidr 192.168.1.10 255.255.255.0', 'cidr 2001:db8::/48'], ['whois', 'asn'], ['/cidr/10.0.0.0/22', '/cidr/10.0.0.0/22?format=text']],
+    port: ['port <number>   or   port <number> --info', "checks whether a TCP port is open on your own public IP address: ipterm's server connects to the address you are visiting from, on the one port you name, and reports open (something accepted), closed (refused) or no answer (dropped, usually by a router that isn't forwarding the port). It never tests any other address, sends nothing over the connection and stores nothing; 10 checks a minute. Over IPv6 it tests your IPv6 address, where port forwards don't apply: curl -4 tests IPv4. --info explains a port without checking it.",
+      ['port 25565', 'port 22', 'port 32400 --info'], ['whoami', 'ping'], ['-4 /port/22', '-4 /port/22?format=text']],
     ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
       ['ping', 'ping 10'], ['whoami', 'traceroute']],
     traceroute: ['traceroute', "not possible from a browser: tracing a route needs raw ICMP or UDP packets. ping times the connection to ipterm's edge instead.", ['ping'], ['ping', 'asn']],
@@ -1452,7 +1544,7 @@
   const MAN_GUIDE = { whoami: 'what-your-ip-reveals', leaktest: 'what-your-ip-reveals', asn: 'what-is-an-asn', cidr: 'subnet-cheat-sheet' };
   const guideLink = slug => { const g = GUIDES.find(x => x[0] === slug), a = el('a', 'cmd', g ? g[1] : slug); a.href = '/guides/' + slug; return a; };
   // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup).
-  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'whois', 'cidr', 'subnet', 'dig', 'lookup', 'nslookup', 'asn', 'ping', 'traceroute',
+  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'whois', 'cidr', 'subnet', 'dig', 'lookup', 'nslookup', 'asn', 'port', 'ping', 'traceroute',
     'share', 'copy', 'privacy', 'clear', 'history', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
   function osa(a, b) {
@@ -1504,7 +1596,7 @@
     const rows = [['NAME', `${name} - ${m ? m[1] : h[1]}`], ['SYNOPSIS', m ? m[0] : h[0]]];
     if (m) rows.push(['EXAMPLES', joined(m[2].map(c => runnable(c, c)))]);
     if (also.length) rows.push(['ALSO', also.join(', ')]);
-    if (m && m[4]) m[4].forEach((p, i) => rows.push([i ? '' : 'CURL', curlLine(p)]));
+    if (m && m[4]) m[4].forEach((p, i) => { const [f, q] = p.startsWith('-') ? p.split(' ') : ['', p]; rows.push([i ? '' : 'CURL', curlLine(q, f)]); });
     if (m && m[3].length) rows.push(['SEE ALSO', joined(m[3].map(c => cmdButton(c, 'man ' + c)))]);
     if (MAN_GUIDE[name]) rows.push(['GUIDE', guideLink(MAN_GUIDE[name])]);
     await kv(rows);
@@ -1627,14 +1719,14 @@
 
   async function privacy() {
     await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
-      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.'], 'sys');
+      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
     const d = el('div', 'ln sys'); const a = el('a', 'cmd', 'read the full privacy policy ↗'); a.href = '/privacy';
     d.append(a); out.appendChild(d); scroll();
   }
 
   // A curl line to show; URLs with ? are quoted, since zsh would treat the ? as a wildcard.
-  const curlLine = p => { const u = (live ? location.origin : 'https://your-domain') + p; return p.includes('?') ? `curl '${u}'` : `curl ${u}`; };
+  const curlLine = (p, flag = '') => { const u = (live ? location.origin : 'https://your-domain') + p, f = flag ? flag + ' ' : ''; return p.includes('?') ? `curl ${f}'${u}'` : `curl ${f}${u}`; };
   async function apiHelp() {
     setUrl('/api', 'ipterm API: IP address lookups from curl and scripts | ipterm');
     await kv([
@@ -1648,6 +1740,7 @@
       [curlLine('/whois/example.com'), 'domain registration as JSON'],
       [curlLine('/cidr/10.0.0.0/22'), 'subnet calculation as JSON'],
       [curlLine('/dns/example.com'), 'DNS records as JSON (add /MX for one type)'],
+      [curlLine('/port/22', '-4'), 'is TCP port 22 open on your own IP? (JSON; -4 tests IPv4)'],
       [curlLine('/8.8.8.8?format=text'), 'any lookup as aligned text lines instead of JSON'],
       [curlLine('/help'), 'this reference as plain text'],
     ]);
@@ -1686,6 +1779,7 @@
       case 'dig': return args[0] ? dns(args[0], args[1]) : toolIntro('dns');
       case 'lookup': return args[0] ? lookup(args[0]) : line('usage: lookup <ip, domain or ASN>   example: lookup 8.8.8.8', 'warn');
       case 'asn': return args[0] ? asn(args[0]) : line('usage: asn <number>   example: asn AS13335', 'warn');
+      case 'port': return portCmd(args);
       case 'ping': return ping(args);
       case 'traceroute': return traceroute(args[0]);
       case 'share': return share();
@@ -1836,13 +1930,25 @@
     await lines(['ipterm 0.2 · IP address lookup', 'type help for commands, or enter any IP address, domain or ASN'], 'sys');
 
     if (init && init.kind === 'notfound') { setLive(true); notFound(init); return focusInput(); }
-    if (init && init.kind === 'tool' && (TOOL_INTRO[init.tool] || init.tool === 'leaktest' || init.tool === 'api')) {
+    if (init && init.kind === 'tool' && (TOOL_INTRO[init.tool] || ['leaktest', 'port', 'api'].includes(init.tool))) {
       setLive(true);
-      const cmd = running = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest', api: 'api' }[init.tool];
+      const cmd = running = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest', port: 'port', api: 'api' }[init.tool];
       const mark = out.lastChild;
       navPush = false;
       try { await run(cmd); } finally { navPush = true; }
       if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
+      flushNext();
+      return focusInput();
+    }
+    // A port's page explains it and offers a button: it never checks on load (crawlers, prefetches, Back).
+    if (init && init.kind === 'port') {
+      setLive(true);
+      const n = PORTSLIB ? PORTSLIB.parse(init.query) : null;
+      const cmd = running = n && !init.error ? `port ${n} --info` : `port ${init.query}`;
+      echo(cmd); hist.push(cmd); hIdx = hist.length;
+      navPush = false;
+      try { if (n && !init.error) await portAbout(n); else line(init.error || 'Not a port number. Ports run from 1 to 65535: port 22', 'err'); }
+      finally { navPush = true; }
       flushNext();
       return focusInput();
     }

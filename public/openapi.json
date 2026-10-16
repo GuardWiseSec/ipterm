@@ -10,6 +10,7 @@
   "servers": [{ "url": "https://ipterm.net" }],
   "tags": [
     { "name": "you", "description": "Your own address, from Cloudflare's edge (request.cf). No third-party lookup." },
+    { "name": "port", "description": "Is a TCP port open on your own address? The server connects to the address the request comes from, never any other." },
     { "name": "lookup", "description": "Any public IP address or network." },
     { "name": "tools", "description": "DNS, registry records (whois) and the subnet calculator." },
     { "name": "docs", "description": "Help and machine-readable descriptions." }
@@ -148,6 +149,22 @@
         }
       }
     },
+    "/port/{n}": {
+      "get": {
+        "tags": ["port"], "operationId": "port", "summary": "Is TCP port n open on your own IP? (command-line clients; browsers get a page explaining the port)",
+        "description": "The server opens one TCP connection to the address the request comes from (never any other) on port n, sends nothing and closes it, and reports open (accepted), closed (refused), no-answer (nothing within 5 seconds: filtered, or not forwarded) or untestable (port 25, which Cloudflare blocks; Cloudflare's own addresses, such as WARP; non-public addresses). Runs only for command-line user agents (curl, wget, HTTPie, PowerShell) or same-origin requests from the ipterm page; other callers get HTTP 403. Limited to 10 checks a minute per address. Use `curl -4` to test your IPv4 address, where router port forwards apply: over IPv6 the IPv6 address is tested. Only TCP can be tested.",
+        "parameters": [
+          { "name": "n", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1, "maximum": 65535 }, "example": 22 },
+          { "$ref": "#/components/parameters/format" }
+        ],
+        "responses": {
+          "200": { "description": "The result.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PortCheck" } }, "text/plain": { "schema": { "type": "string" } }, "text/html": { "schema": { "type": "string" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "description": "Not a command-line client or a same-origin request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "429": { "description": "More than 10 port checks in a minute from your address.", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
     "/api/lookup": {
       "get": {
         "tags": ["lookup"], "operationId": "apiLookup", "summary": "IP details as JSON, always (no ip: yourself)",
@@ -159,6 +176,7 @@
     "/api/dns": { "get": { "tags": ["tools"], "operationId": "apiDns", "summary": "As /dns/{name}[/{type}], always JSON", "parameters": [{ "name": "name", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "type", "in": "query", "schema": { "$ref": "#/components/schemas/DnsType" } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "$ref": "#/components/responses/Dns" } } } },
     "/api/whois": { "get": { "tags": ["tools"], "operationId": "apiWhois", "summary": "As /whois/{query}, always JSON", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /whois/{query}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Whois" } } } } } } },
     "/api/cidr": { "get": { "tags": ["tools"], "operationId": "apiCidr", "summary": "As /cidr/{network}/{prefix}, always JSON; also accepts an address and netmask", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" }, "examples": { "cidr": { "value": "10.0.0.0/22" }, "netmask": { "value": "192.168.1.10 255.255.255.0" } } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /cidr/{network}/{prefix}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Cidr" } } } } } } },
+    "/api/port": { "get": { "tags": ["port"], "operationId": "apiPort", "summary": "As /port/{n}, always JSON (same guards and limit)", "parameters": [{ "name": "n", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 1, "maximum": 65535 }, "example": 22 }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /port/{n}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PortCheck" } } } }, "400": { "$ref": "#/components/responses/BadRequest" }, "403": { "description": "Not a command-line client or a same-origin request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }, "429": { "description": "More than 10 port checks in a minute.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } } } } },
     "/help": {
       "get": {
         "tags": ["docs"], "operationId": "help", "summary": "The command-line reference as plain text",
@@ -193,6 +211,24 @@
     },
     "schemas": {
       "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } },
+      "PortCheck": {
+        "type": "object", "required": ["port", "protocol", "state", "summary"],
+        "properties": {
+          "ip": { "type": ["string", "null"], "description": "The address that was tested: the one the request came from" },
+          "version": { "type": ["integer", "null"], "enum": [4, 6, null] },
+          "port": { "type": "integer" },
+          "protocol": { "type": "string", "enum": ["tcp"] },
+          "state": { "type": "string", "enum": ["open", "closed", "no-answer", "untestable"] },
+          "reason": { "type": "string", "description": "Why it wasn't tested (untestable only)", "enum": ["port-25", "cloudflare", "cgnat", "not-public", "no-address", "refused"] },
+          "ms": { "type": "integer", "description": "How long the connection took to be accepted or refused (5000 for no-answer)" },
+          "summary": { "type": "string", "description": "The result in one sentence" },
+          "notes": { "type": "array", "items": { "type": "string" }, "description": "What the result means and what to check: IPv6, UDP, port forwarding, carrier-grade NAT" },
+          "service": {
+            "type": ["object", "null"], "description": "What the port is commonly used for, when it is one of the ports ipterm describes",
+            "properties": { "name": { "type": "string" }, "proto": { "type": "string", "enum": ["tcp", "udp", "tcp+udp"] }, "use": { "type": "string" }, "tips": { "type": "string" }, "risk": { "type": ["string", "null"] } }
+          }
+        }
+      },
       "IpInfo": {
         "type": "object",
         "properties": {
