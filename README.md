@@ -200,14 +200,20 @@ browser gives away more than its IP address. Each line is marked OK, LEAK or INF
 Findings count as LEAK only when the visitor appears to be on a VPN; otherwise the same facts are
 shown as INFO. DNS leaks are not tested (that needs a custom DNS server). Nothing is stored. The
 visitor's own IP is sent to IPinfo only when they run the check (it uses the Core daily budget),
-and the privacy policy says so. When no VPN is detected, the Proton VPN line can appear
-afterwards (`"on": ["whoami", "check"]` in `sponsors.json`).
+and the privacy policy says so. When no VPN is detected, the verdict is always followed by the
+sponsored line (any sponsor with `"check"` in its `on` list in `sponsors.json`, currently Proton VPN).
 
 ## Shareable pages and search
 
-- `/<ip>` and `/AS<number>` are real pages with their own title, description, canonical link and
-  social-share tags, plus a plain summary of the result in the HTML itself. That summary is what
-  search engines index and what visitors without JavaScript see; the terminal replaces it on load.
+- `/<ip>` and `/AS<number>` are real pages with their own title, h1, description, canonical link,
+  social-share tags and breadcrumbs (BreadcrumbList structured data), plus a plain summary of the
+  result in the HTML itself. That summary is what search engines index and what visitors without
+  JavaScript see. On load the terminal redraws the heading line and table, and the summary sentence
+  and links stay, so crawlers that run JavaScript still see them.
+- Link previews: chat apps and social sites (Facebook, WhatsApp, Slack, Discord, Telegram, X,
+  LinkedIn, iMessage, Reddit, Mastodon, Bluesky, Embedly, Iframely) get the HTML page even when they
+  don't ask for `text/html`, so shared links preview with a title and image. They're matched by
+  name (`PREVIEW_UA` in `src/worker.js`); curl, scripts and other clients still get JSON.
 - Private addresses like `/192.168.1.1` get a page explaining the range and how to reach a router,
   a popular search topic, without any upstream lookup.
 - `/whois`, `/dns` and `/cidr` on their own are landing pages for each tool (what it does, usage and
@@ -217,7 +223,9 @@ afterwards (`"on": ["whoami", "check"]` in `sponsors.json`).
   (`/github.com`) redirects to its DNS page. Invalid lookups (`/whois/not-a-domain!`) show the error
   in the terminal instead of raw JSON. None of these pages are indexed by search engines.
 - Inside the terminal, every lookup updates the address bar, Back/Forward replay results, ASNs and
-  prefixes are clickable, and the `share` command copies the current link.
+  prefixes are clickable, and the `share` command copies the current link. Prefixes on ASN pages
+  open the subnet calculator (`/cidr/<prefix>`), which makes no outside calls, so crawlers following
+  them don't spend the IPinfo budget.
 - `/robots.txt` and `/sitemap.xml` are generated. Add popular pages to `SITEMAP_PATHS` in
   `src/worker.js`, then submit the sitemap in Google Search Console.
 
@@ -261,14 +269,16 @@ Edit `public/sponsors.json` and run `npx wrangler deploy` to change it:
 | Field | Meaning |
 | --- | --- |
 | `enabled` | `false` hides the line everywhere |
-| `every` | Show after the 1st result, then every Nth (default 3) |
+| `every` | Show after the 1st result that has a matching sponsor, then every Nth such result (default 3). Results with no matching sponsor don't count. `check` ignores this and always shows |
 | `text` | Up to 160 characters, shown as plain text |
 | `url` | Optional `https://` link, opened in a new tab with `rel="sponsored"`. Anything else is ignored |
-| `on` | Which results it can appear after: `whoami` (visitor's own IP), `ip`, `asn`. Leave out for all |
+| `on` | Which results it can appear after: `whoami` (visitor's own IP), `check` (the leaktest verdict when no VPN is detected), `ip`, `asn`. Leave out for all |
 | `weight` | Relative chance when several sponsors match (default 1) |
 | `label` | Optional tag text instead of `sponsored`, e.g. `affiliate` |
 
-Targeting by result type works without tracking: a VPN offer fits `whoami`, a hosting offer fits `asn`.
+Targeting by result type works without tracking: a VPN offer fits `check`, a hosting offer fits `asn`.
+`whoami` has no VPN signal, so a VPN offer on `whoami` is also shown to visitors who are already on a VPN;
+`check` only appears when leaktest finds no VPN.
 Affiliate programs (VPNs, hosting, dev tools) and direct sponsors both work: put the referral link in `url`.
 In the US, the FTC requires affiliate and sponsored links to be disclosed; the `sponsored` tag does that.
 

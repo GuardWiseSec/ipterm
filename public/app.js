@@ -600,9 +600,11 @@
   /* ---------- sponsored line ----------
      One labeled line after some results, filled from sponsors.json (edit it and redeploy).
      Plain text and a link: no ad scripts, no tracking, nothing about the visitor is sent anywhere.
-     It shows after the 1st result, then every `every` results, picking (by weight) among
-     sponsors whose `on` list matches the result type: whoami, ip or asn. */
-  let SPONSORS = [], SPONSOR_EVERY = 3, results = 0;
+     Sponsors are picked (by weight) among those whose `on` list matches the result type: whoami,
+     check (the leaktest verdict when no VPN is on), ip or asn. Only results that have a matching
+     sponsor count: the line shows after the 1st of them, then every `every`. The check verdict
+     always gets its line. */
+  let SPONSORS = [], SPONSOR_EVERY = 3, sinceShown = -1;   // -1: none shown yet
   async function loadSponsors() {
     for (const path of ['/sponsors.json', 'sponsors.json']) {
       try {
@@ -627,12 +629,12 @@
   const SPONSORS_READY = loadSponsors();
 
   async function sponsor(kind) {
-    results++;
     await Promise.race([SPONSORS_READY, new Promise(r => setTimeout(r, 1500))]);
-    if (!SPONSORS.length || (results - 1) % SPONSOR_EVERY !== 0) return;
     const pool = SPONSORS.filter(x => !x.on || x.on.includes(kind));
     const total = pool.reduce((a, x) => a + x.weight, 0);
-    if (!pool.length || total <= 0) return;
+    if (!pool.length || total <= 0) return;             // nothing to show here, so it doesn't use up a turn
+    if (kind !== 'check' && sinceShown >= 0 && ++sinceShown < SPONSOR_EVERY) return;
+    sinceShown = 0;
     let roll = Math.random() * total, pick = pool[0];
     for (const x of pool) { roll -= x.weight; if (roll < 0) { pick = x; break; } }
     const row = el('div', 'ln sponsor');
@@ -1232,7 +1234,7 @@
     const show4 = v4.prefixes.slice(0, 12), show6 = v6.prefixes.slice(0, 6);
     const list = arr => {
       const f = document.createDocumentFragment();
-      arr.forEach((px, i) => { if (i) f.append(document.createTextNode('  ')); const a = px.split('/')[0]; f.append(cmdLink(px, 'lookup ' + a, '/' + a)); });
+      arr.forEach((px, i) => { if (i) f.append(document.createTextNode('  ')); f.append(cmdLink(px, 'cidr ' + px, '/cidr/' + px)); });
       return f;
     };
     if (show4.length || show6.length) {
@@ -1243,8 +1245,8 @@
     await kv(rows);
     announce(`${d.asn} ${d.name || d.holder || ''}: ${fmt(n4)} IPv4 prefixes` + (v4.addresses != null ? `, ${fmt(v4.addresses)} addresses` : '') + `, ${fmt(n6)} IPv6 prefixes.`);
     const more = (n4 - show4.length) + (n6 - show6.length);
-    if (more > 0) line(`${fmt(more)} more prefixes not shown. Click a prefix to look it up.`, 'sys');
-    else if (show4.length + show6.length) line('Click a prefix to look it up.', 'sys');
+    if (more > 0) line(`${fmt(more)} more prefixes not shown. Click a prefix to see its address range.`, 'sys');
+    else if (show4.length + show6.length) line('Click a prefix to see its address range.', 'sys');
     if (d.sample) line('Sample data. The live version lists the largest announced prefixes and counts the full address space.', 'sys');
   }
 
@@ -1465,8 +1467,12 @@
 
   async function boot() {
     const init = readInitial();
-    const stat = document.getElementById('static');      // server summary for no-JS visitors and crawlers
-    if (stat) stat.remove();
+    // Server summary for no-JS visitors and crawlers. The terminal redraws its heading line and table,
+    // so only those go; the summary sentence and links stay for crawlers that run scripts. A 404 is
+    // drawn in full by the terminal (and isn't indexed), so its summary goes too.
+    const stat = document.getElementById('static');
+    if (stat && init && init.kind === 'notfound') stat.remove();
+    else if (stat) stat.querySelectorAll('.head, dl').forEach(n => n.remove());
     await lines(['ipterm 0.2 · IP address lookup', 'type help for commands, or enter any IP address, domain or ASN'], 'sys');
 
     if (init && init.kind === 'notfound') { setLive(true); notFound(init); return focusInput(); }

@@ -42,6 +42,9 @@ import '../public/cidr.js';                       // shared subnet calculator (a
 const CIDR = globalThis.IPTERM_CIDR;
 
 const CLI_UA = /^(curl|wget|httpie|xh|fetch|libfetch|aria2)\b|powershell/i;
+// Link-preview fetchers for chat apps and social sites. Many send "Accept: */*", so without this a
+// shared link would preview as JSON. Named bots only: anything else without text/html still gets JSON.
+const PREVIEW_UA = /facebookexternalhit|WhatsApp|Slackbot|Discordbot|TelegramBot|Twitterbot|LinkedInBot|Applebot|redditbot|Mastodon\/|Bluesky|Cardyb|Embedly|Iframely/i;
 const ASN_RE = /^as(\d{1,10})$/i;
 
 class RateLimited extends Error {}
@@ -182,7 +185,7 @@ async function withOrigin(res, url) {
 
 function wantsHtml(request, url, ua) {
   if (url.searchParams.get('format') === 'json' || CLI_UA.test(ua)) return false;
-  return (request.headers.get('accept') || '').includes('text/html');
+  return PREVIEW_UA.test(ua) || (request.headers.get('accept') || '').includes('text/html');
 }
 
 /* ---------- routes ---------- */
@@ -1107,7 +1110,8 @@ async function loadShell(io) {
 }
 
 // Fills the terminal page with a title, description, share tags, a static summary that works
-// without JavaScript (and for search engines), and the data the terminal boots from.
+// without JavaScript (and for search engines), and the data the terminal boots from. Pages other
+// than the homepage get their own h1 (the title without " | ipterm") in place of the generic one.
 async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null }) {
   let h = await loadShell(io);
   const canonical = io.url.origin + (path === '/' ? '/' : encodePath(path));
@@ -1126,10 +1130,12 @@ async function shell(io, { status = 200, title, desc, path = '/', body = '', ini
     `<meta property="og:url" content="${esc(canonical)}">`,
     `<meta property="og:image" content="${esc(io.url.origin)}/og.png">`,
     `<meta name="twitter:card" content="summary_large_image">`,
-    path === '/' ? homeJsonLd(io.url.origin) : '',
+    path === '/' ? homeJsonLd(io.url.origin) : status < 400 ? breadcrumbJsonLd(io.url.origin, path) : '',
     status >= 400 && status !== 429 ? `<meta name="robots" content="noindex">` : '',
   ].filter(Boolean).join('\n');
   if (path !== '/') h = h.replace(/\s*<p class="intro">[\s\S]*?<\/p>/, '');   // the plain-English line is for the homepage
+  const h1 = path !== '/' && title ? title.replace(/\s*\|\s*ipterm$/, '') : null;
+  if (h1) h = h.replace(/<h1 class="sr-only">[^<]*<\/h1>/, () => `<h1 class="sr-only">${esc(h1)}</h1>`);
   h = h.replace('<!--SEO-->', () => head).replace('<!--STATIC-->', () => body).replaceAll('%ORIGIN%', () => io.url.origin);
   if (initial) h = h.replace('<!--INITIAL-->', () => `<script type="application/json" id="ipterm-initial">${safeJson(initial)}</script>`);
   return new Response(h, {
@@ -1152,6 +1158,22 @@ function homeJsonLd(origin) {
         description: 'Terminal-style lookup for your IP address, any IPv4 or IPv6 address, and any network (ASN).',
         offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' } },
     ],
+  };
+  return `<script type="application/ld+json">${safeJson(ld)}</script>`;
+}
+
+// Search-result breadcrumbs: ipterm › tool › this page (/whois/example.com), or ipterm › this page
+// for IP and ASN pages. A data block, not a script, so the CSP doesn't need to allow it.
+function breadcrumbJsonLd(origin, path) {
+  const [first, ...rest] = path.split('/').filter(Boolean);
+  const tool = Object.hasOwn(TOOLS, first) ? first : null;
+  const crumbs = [['ipterm', '/']];
+  if (tool) crumbs.push([TOOLS[tool].heading, '/' + tool]);
+  if (!tool || rest.length) crumbs.push([tool ? rest.join(tool === 'cidr' ? '/' : ' ') : first, path]);
+  const ld = {
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    itemListElement: crumbs.map(([name, p], i) => ({ '@type': 'ListItem', position: i + 1, name, item: origin + encodePath(p) })),
   };
   return `<script type="application/ld+json">${safeJson(ld)}</script>`;
 }
@@ -1346,8 +1368,10 @@ function asnPage(io, d, status) {
     ['IPv4 prefixes', d.v4.count.toLocaleString('en-US')], ['IPv4 addresses', d.v4.addresses.toLocaleString('en-US')],
     ['IPv6 prefixes', d.v6.count.toLocaleString('en-US')],
   ];
+  // Prefixes link to the subnet calculator (no outside calls), not to an IP lookup of the network
+  // address: crawlers following 30 links per ASN page would otherwise spend the IPinfo budget.
   const list = [...d.v4.prefixes.slice(0, 20), ...d.v6.prefixes.slice(0, 10)]
-    .map(px => { const a = px.split('/')[0]; return `<li><a href="/${esc(a)}">${esc(px)}</a></li>`; }).join('');
+    .map(px => `<li><a href="/cidr/${esc(px)}">${esc(px)}</a></li>`).join('');
   const links = (list ? `<p class="ln sys">Largest announced prefixes:</p><ul class="static-list">${list}</ul>` : '') +
     `<p class="ln sys">Registry record: <a href="/whois/${esc(d.asn)}">whois ${esc(d.asn)}</a></p>` +
     `<p class="ln sys">Guide: <a href="/guides/what-is-an-asn">What is an ASN?</a></p>`;
@@ -1358,7 +1382,7 @@ function asnPage(io, d, status) {
 function staticBlock(heading, tags, rows, summary, extra = '') {
   const tagHtml = tags.map(t => `<span class="tag">${esc(t)}</span>`).join(' ');
   const dl = rows.filter(r => r[1] != null && r[1] !== '').map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
-  return `<article class="static" id="static"><h1 class="head"><span class="hip">${esc(heading)}</span> ${tagHtml}</h1>` +
+  return `<article class="static" id="static"><div class="head"><span class="hip">${esc(heading)}</span> ${tagHtml}</div>` +
     (dl ? `<dl class="kv">${dl}</dl>` : '') + `<p class="ln">${esc(summary)}</p>${extra}</article>`;
 }
 

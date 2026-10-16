@@ -121,7 +121,6 @@ a:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
 .geo-btn:hover{color:var(--hi)}
 .geo-btn:focus-visible{outline:1px solid var(--accent);outline-offset:2px}
 
-.static h1{font:inherit;margin:8px 0 0}
 .static-list{list-style:none;margin:4px 0 8px;padding:0;display:flex;flex-wrap:wrap;gap:4px 16px}
 a.cmd{color:var(--accent)}
 a.cmd:hover{color:var(--hi)}
