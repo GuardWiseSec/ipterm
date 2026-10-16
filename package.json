@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "node tools/deploy.mjs",
-    "landmask": "node tools/build_landmask.mjs"
+    "landmask": "node tools/build_landmask.mjs",
+    "asn-sitemap": "node tools/build_asn_sitemap.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"
