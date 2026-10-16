@@ -1,0 +1,35 @@
+# ipterm DNS leak test responder: authoritative DNS for the test zone, plus the API on 127.0.0.1:8053
+# that Caddy serves over HTTPS. Installed by setup.sh to /etc/systemd/system/dnsleak.service.
+[Unit]
+Description=ipterm DNS leak test responder
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/dnsleak/dnsleak.env
+ExecStart=/usr/bin/node /opt/dnsleak/server.js
+Restart=always
+RestartSec=2
+
+# Its own throwaway user, allowed to open port 53 and nothing more. It keeps everything in memory, so it
+# needs no writable directory. (No MemoryDenyWriteExecute: Node's JIT needs it off.)
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryMax=256M
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

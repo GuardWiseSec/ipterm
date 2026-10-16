@@ -1,0 +1,11 @@
+{
+  "name": "ipterm-dnsleak-server",
+  "private": true,
+  "description": "Authoritative DNS for ipterm's DNS leak test zone, plus the API the Worker reads it with. No dependencies.",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}
