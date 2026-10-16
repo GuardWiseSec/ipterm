@@ -31,6 +31,7 @@ IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Regis
 - [DNS](https://ipterm.net/dns/example.com): A, AAAA, MX, NS, TXT and CAA records, the host of the first address and DNSSEC (`/dns/<name>`, or `/dns/<name>/<TYPE>` for one type with TTLs; an IP address gives its reverse DNS)
 - [Whois](https://ipterm.net/whois/example.com): registry record for a domain, IP address or ASN over RDAP: registrar, dates, status, name servers, owner and abuse contact (`/whois/<query>`)
 - [Subnet calculator](https://ipterm.net/cidr/10.0.0.0/22): network, broadcast, netmask, wildcard, usable hosts and how the block splits (`/cidr/<network>/<prefix>`, IPv4 and IPv6; no outside calls)
+- [Port check](https://ipterm.net/port/22): is a TCP port open on the caller's own address? `curl -4 ipterm.net/port/22` makes the server connect to the address the request comes from (never any other) and answers open, closed, no-answer or untestable. Command-line clients only (browsers get a page explaining the port); 10 checks a minute. Like every "your own address" answer, it tests the machine running your code, not the person you are talking to
 
 ## Optional
 

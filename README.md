@@ -163,6 +163,7 @@ curl https://your-domain              # your IP as plain text
 curl https://your-domain/json         # your details as JSON
 curl https://your-domain/8.8.8.8      # any IP as JSON
 curl https://your-domain/AS13335      # any network (ASN) as JSON
+curl -4 https://your-domain/port/22   # is TCP port 22 open on your own IP? (see "Port checker")
 curl https://your-domain/help         # the command-line reference as plain text
 ```
 
@@ -298,6 +299,72 @@ visitor's own IP is sent to IPinfo only when they run the check (it uses the Cor
 and the privacy policy says so. When no VPN is detected, the verdict is always followed by the
 sponsored line (any sponsor with `"check"` in its `on` list in `sponsors.json`, currently Proton VPN).
 
+### Port checker (port)
+
+`port 25565` in the terminal, or `curl -4 ipterm.net/port/25565` from a command line, answers "is this port
+open on my IP?". The Worker opens one TCP connection (`connect()` from `cloudflare:sockets`) to
+`cf-connecting-ip`, the address Cloudflare saw the request come from, on that one port. It sends nothing,
+closes the connection at once and stores nothing. `port <n> --info` explains a port without checking it,
+and `port` on its own lists the common ports.
+
+| Result | Meaning |
+| --- | --- |
+| open | the connection was accepted |
+| closed | it was refused (a reset): it reached the address, but nothing there accepted it |
+| no answer | nothing within 5 seconds: a router or firewall dropped it, which is what most home routers do with a port they don't forward |
+| not tested | port 25 (Cloudflare blocks it), Cloudflare's own addresses (WARP, the 1.1.1.1 app, iCloud Private Relay), non-public addresses |
+
+Results that aren't open list what has to be true for a port to be open (a program listening, the
+device firewall, the router's forward), the port's own advice, and how to spot carrier-grade NAT: the
+router's WAN address isn't the one websites see, or is in 100.64.0.0/10. On networks that usually use
+carrier-grade NAT (Starlink, T-Mobile, Verizon Wireless, AT&T Mobility: `CGNAT_ASNS` in `src/worker.js`)
+the provider is named. Only TCP can be tested; for UDP services (WireGuard, Valheim, Minecraft Bedrock)
+the result says so. No sponsored line follows any port result.
+
+**Guards** (`portRoute()` in `src/worker.js`):
+
+- Only the visitor's own address. There is no parameter for any other, and Cloudflare overwrites a
+  `CF-Connecting-IP` header sent by the client (checked on Cloudflare's network). The terminal says so
+  when an address is typed (`port 8.8.8.8 22`), takes one port per check (no ranges or lists), and has
+  no `nmap` alias.
+- `/api/port?n=` and `/port/<n>` check only for same-origin requests (`Sec-Fetch-Site: same-origin`, or
+  a matching `Origin`) and command-line user agents (`CLI_UA`). Everything else gets HTTP 403, so other
+  sites can't make their visitors' browsers start checks.
+- The `/port/<n>` pages explain the port and offer a button in the terminal. Nothing is tested on page
+  load, on Back/Forward, for prefetches, crawlers or link previews.
+- `PORT_LIMITER` (`[[ratelimits]]`, namespace `1002`): 10 checks a minute per address (IPv6 per /64),
+  apart from the 30-lookup limit. Checks that are refused up front (port 25, Cloudflare, non-public
+  addresses) make no connection and don't count.
+
+**Pages:** `/port` lists the common ports. `/port/<n>` explains each of the 42 ports in `public/ports.js`
+(SSH, RDP, Plex, Minecraft, game, NAS and remote-access ports): what it's for, why it may be closed and
+any risk in opening it. Other port numbers get a short page marked `noindex`. `public/ports.js` is
+shared by the page and the Worker, like `cidr.js`; add a port by adding a line to its `LIST`.
+
+**IPv4, IPv6 and dual stack.** What testing on Cloudflare (`wrangler dev --remote`) showed:
+
+- `connect()` reaches IPv6 addresses, but only written in brackets (`[2001:db8::1]`); a bare IPv6
+  literal is refused with the same error as a blocked address. `probePort()` adds the brackets.
+- Port 25 throws at `connect()` ("Connections to port 25 are prohibited"), and Cloudflare's own addresses
+  are refused at once ("proxy request failed, cannot connect to the specified address"). Both are
+  recognized beforehand (port number; network AS13335 / AS209242 or Cloudflare's published ranges), so
+  visitors get an explanation rather than a false "closed".
+- A port that a router drops never opens, so it shows as "no answer" after 5 seconds. A refusal (reset)
+  ends the connection attempt at once (seen under `wrangler dev`); the test connection's router drops
+  everything, so a reset couldn't be observed on Cloudflare's network itself.
+- **Dual-stack visitors:** a visitor who reaches ipterm over IPv6 has their IPv6 address tested. Home
+  routers forward ports on IPv4 only, and their IPv6 firewall usually drops incoming connections, so a
+  working IPv4 port forward would show as "no answer" over IPv6. (On the test connection, even a port
+  that was listening on the machine's IPv6 address showed no answer.) The result says which address
+  was tested and why, shows the visitor's IPv4 address (from ipify, as `whoami` does) marked "not
+  tested", and gives `curl -4 ipterm.net/port/<n>`, which tests IPv4.
+- **Why the page can't test IPv4 for an IPv6 visitor:** a browser can't choose IPv4 for a request, and the
+  IPv4 address ipify reports comes from the page, so trusting it would let anyone aim the check at any
+  address. The real fix is an IPv4-only hostname for the check, such as `v4.ipterm.net`. Cloudflare gives
+  every proxied hostname AAAA records while the zone's IPv6 Compatibility setting is on, and that setting
+  covers a whole zone. So it needs a second domain (zone) with IPv6 Compatibility off, routed to this
+  Worker, plus a `connect-src` entry in the CSP and CORS for that one route. It is not set up here.
+
 ## Shareable pages and search
 
 - `/<ip>` and `/AS<number>` are real pages with their own title, h1, description, canonical link,
@@ -339,7 +406,7 @@ Network data comes from [RIPEstat](https://stat.ripe.net/) (free, no key). Resul
 - **Share image:** `public/og.png` (1200×630) is used when any page is shared.
 - **Placeholders:** static pages use `%ORIGIN%`, which the Worker replaces with your site's address.
 - **Sitemap:** generated at `/sitemap.xml` from `SITEMAP_PATHS` in `src/worker.js` (guides, router addresses,
-  public DNS resolvers and major networks).
+  public DNS resolvers, major networks and the most searched port pages).
 
 ## Sponsored line (ads)
 
@@ -428,6 +495,7 @@ so it doesn't count against the limit. Watch usage under **Workers & Pages → i
 | Protection | Where | How to change it |
 | --- | --- | --- |
 | Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them | `[[ratelimits]]` in `wrangler.toml` | Edit `limit` (period must be 10 or 60 seconds) |
+| Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
 | Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
 | Plain-text answers (`?format=text`, one-value endpoints) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal | `plain()` in `src/worker.js` | |
 | Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
@@ -468,7 +536,10 @@ npx wrangler dev
 ```
 
 Note that `request.cf` location data is limited when running locally, and `ping` says it can't run there:
-it needs Cloudflare's edge, which answers `/cdn-cgi/trace` on the deployed site.
+it needs Cloudflare's edge, which answers `/cdn-cgi/trace` on the deployed site. The port check sees
+your address as `127.0.0.1` locally, so it answers "not tested". `wrangler dev` passes a
+`CF-Connecting-IP` header through (Cloudflare's network replaces it), so sending your own public address
+in it exercises the whole check locally.
 
 ## Next steps worth considering
 

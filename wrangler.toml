@@ -20,6 +20,7 @@ run_worker_first = [
   "!/app.js",
   "!/land.js",
   "!/cidr.js",
+  "!/ports.js",
   "!/prefs.js",
   "!/sponsors.json",
   "!/site.webmanifest",
@@ -80,4 +81,14 @@ namespace_id = "1001"
 
   [ratelimits.simple]
   limit = 30
+  period = 60
+
+# Per-visitor limit on port checks (`port <n>`, /port/<n> from the command line, /api/port): 10 per
+# 60 seconds. Each check makes the Worker open one TCP connection to the visitor's own address.
+[[ratelimits]]
+name = "PORT_LIMITER"
+namespace_id = "1002"
+
+  [ratelimits.simple]
+  limit = 10
   period = 60

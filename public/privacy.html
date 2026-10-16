@@ -25,7 +25,7 @@
   <main class="doc-body">
     <p class="ln echo"><span class="ps1">guest@ipterm:~$</span> cat privacy.txt</p>
     <h1>Privacy policy</h1>
-    <p class="doc-meta">Last updated: October 15, 2026</p>
+    <p class="doc-meta">Last updated: October 16, 2026</p>
 
     <p class="doc-lede">ipterm has no accounts, sets no cookies and runs no analytics or tracking. This page explains the small amount of information it has to handle to work.</p>
 
@@ -41,6 +41,8 @@
       <dd>When you look up an IP address, that address is sent to IPinfo to find its owner and location, and, unless IPinfo already recognizes it as a VPN or proxy, to proxycheck.io to check whether it is one. When you look up a network (ASN), its number is sent to RIPEstat, and registry (whois) lookups go to the regional internet registries. When you look up a domain, its name is sent to Cloudflare's DNS resolver (1.1.1.1), which is also used to find hostnames; a domain whois lookup sends the name to that domain's registry and registrar. Your own IP address is not passed to these services as part of a lookup, with two exceptions: when you open the homepage or run <code>whoami</code>, Cloudflare's resolver is asked for your address's hostname (reverse DNS), and the privacy check described below sends it to IPinfo and proxycheck.io. ipterm stores none of it.</dd>
       <dt>privacy check (leaktest)</dt>
       <dd>Only if you run the <code>leaktest</code> command or open the leak test page: your IP address, and your address on the other IP version if you have one, is looked up with IPinfo and proxycheck.io to see whether it is recognized as a VPN, proxy or data-center address (and which VPN service, if known), your browser contacts a STUN server run by Cloudflare (stun.cloudflare.com) to see which public addresses WebRTC reveals, and your device's time zone is compared with your IP's location inside your browser. The check's results are shown to you and not saved. As with any lookup, IPinfo's answer for an address is cached for up to six hours, and proxycheck.io's for up to one hour, so repeat lookups are fast; those cache entries contain only the address and its network details, nothing about you or your browser. ipterm asks proxycheck.io not to keep these queries in its log.</dd>
+      <dt>port check</dt>
+      <dd>Only if you run the <code>port</code> command (or ask for <code>/port/&lt;number&gt;</code> from a command-line tool): ipterm's server opens one connection to your own IP address, the one your request came from, on the port you name, to see whether anything answers, and closes it at once without sending anything. It never connects to any other address, and the result is shown to you and not saved. Pages that explain a port never run the check by themselves. Your address counts toward a separate limit of 10 checks a minute, kept for about a minute like the one above.</dd>
       <dt>cached results</dt>
       <dd>Lookup results are cached for up to six hours so repeated lookups are fast. The cache is keyed by the address that was looked up, with no record of who asked (if you look up or check your own address, that entry is for your address).</dd>
       <dt>browser storage</dt>
