@@ -1731,6 +1731,7 @@
     ['reset', 'forget display settings and return to the defaults', null],
     ['api', 'use ipterm from curl or scripts', 'api'],
     ['history', 'your recent commands, saved in this browser (history clear, history off)', 'history'],
+    ['keys', 'keyboard shortcuts: Tab completes, Ctrl+R searches history, !! repeats', 'keys'],
     ['about', 'where the data comes from', 'about'],
     ['clear', 'clear the screen (Ctrl+L)', null],
   ];
@@ -1739,7 +1740,7 @@
     vpncheck: 'leaktest', dnsleak: 'leaktest', dnsleaktest: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
     spf: 'mail', dmarc: 'mail', dkim: 'mail', email: 'mail', mailcheck: 'mail',
     as: 'asn', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
-    portcheck: 'port', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
+    portcheck: 'port', shortcuts: 'keys', bindkey: 'keys', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
   // man <command>: [synopsis, description, examples, see also, curl paths]
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
@@ -1775,7 +1776,9 @@
     copy: ['copy [md | link]', "copies the current result's main value: the IP address, the domain, the range or the AS number. copy md copies the whole result as a Markdown code block that starts with the command and ends with its link, for GitHub issues, Discord or Stack Overflow (your own address is left out of whoami, leaktest and port results). copy link copies the link. The sponsored line is never copied.",
       ['copy', 'copy md', 'copy link'], ['share']],
     history: ['history [clear | off | on]', "lists the commands you ran, numbered (click one to run it again). They are saved in this browser's local storage, the newest 200 and never their results, so they are still there after a reload; nothing is sent anywhere. history clear deletes them, history off stops saving them (and deletes them) until history on. Up and Down recall them at the prompt either way, Ctrl+R searches them, Tab completes from them, !! runs the last one again and !<n> runs number n.",
-      ['history', 'history clear', 'history off', 'history on'], ['privacy']],
+      ['history', 'history clear', 'history off', 'history on'], ['keys', 'privacy']],
+    keys: ['keys', "the keyboard shortcuts. Tab completes a command, a record type after dig <name>, a theme, or an address, domain, range or AS number from your history; when several match, Tab fills in what they share and then steps through them. On an empty prompt Tab moves focus on, as on any page. Ctrl+R searches your history as you type (Ctrl+R again for an older match, Enter runs it, Esc gives your line back). !! is the previous command and !<n> number n in history, also inside a line. Up and Down step through history; Ctrl+L clears the screen.",
+      ['keys', 'history'], ['history']],
     theme: ['theme [phosphor | amber | ice | contrast | paper]', 'changes the colors; with no name, moves to the next theme. Remembered on this device only.', ['theme amber', 'theme paper', 'theme contrast'], ['crt', 'access']],
     crt: ['crt [on | off]', 'turns the CRT glow, scanlines and vignette on or off; with neither, switches. Remembered on this device only.', ['crt off', 'crt on'], ['theme', 'access']],
     api: ['api', "how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP). /me draws a card of your own address with a world map (?w=<columns> to fit, ?color=0 for no colors, ?redact to hide the IP). One value at a time as plain text: /asn, /org, /cc, /city, /tz, /colo and /hostname for your own address, /<ip>/asn, org, cc, country, continent or hostname for any other. /line puts your IP, network, country and data center on one line for a shell prompt. /expect/<ASN or country code> answers HTTP 200 when your address matches and 412 when it doesn't, so curl -fs …/expect/AS13335 || <stop something> works as a VPN kill switch. Add ?format=text to any lookup for aligned lines instead of JSON. curl …/help prints the whole reference.",
@@ -1792,7 +1795,7 @@
   // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup),
   // unless the caller names one to prefer ("mal gmail.com" -> mail, not man).
   const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'lookup', 'nslookup', 'asn', 'port', 'ping', 'traceroute', 'dmarc',
-    'share', 'copy', 'privacy', 'clear', 'history', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
+    'share', 'copy', 'privacy', 'clear', 'history', 'keys', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
   function osa(a, b) {
     const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
@@ -2142,8 +2145,13 @@
   const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'dig', 'mail', 'lookup', 'asn', 'port']);
   // save: false for what the page runs by itself (a tool page's command, Back and Forward), which isn't saved.
   async function run(raw, save = true) {
-    const cmd = raw.trim(); echo(raw);
+    let cmd = raw.trim(); echo(raw);
     if (!cmd) return;
+    if (/!(!|-?\d)/.test(cmd)) {                    // !! and !<n>, as in bash: show what runs, then run it
+      const x = expandHistory(cmd);
+      if (x.missing) return line(`${x.missing}: event not found`, 'err');
+      cmd = x.cmd; line(cmd, 'sys');
+    }
     addHist(cmd);
     if (save) remember(cmd);
     const [c0, ...args] = cmd.split(/\s+/);
@@ -2177,6 +2185,7 @@
       case 'share': return share();
       case 'privacy': return privacy();
       case 'clear': out.textContent = ''; current = null; return;
+      case 'keys': return keys();
       case 'history': return historyCmd(args[0]);
       case 'theme': return theme(args[0]);
       case 'crt': return crt(args[0]);
@@ -2254,6 +2263,116 @@
     }
   }
 
+  /* ---------- Tab completion, Ctrl+R and !! ----------
+     Tab completes the word being typed: a command, a record type after dig <name>, a theme, or an address,
+     domain, range or AS number from your history. When several match, the first Tab fills in what they
+     share and each further Tab steps to the next one (the hint beside the prompt lists them). Tab on an
+     empty prompt, and Shift+Tab always, move focus as usual, so keyboard users can still leave the
+     terminal. Ctrl+R searches the history as you type, newest first: Ctrl+R again finds an older match,
+     Enter runs it, an arrow key or Tab keeps it for editing, Esc gives your line back. !! is the previous
+     command and !<n> the nth in `history`, as in bash. */
+  const COMMANDS = [...new Set([...HELP.map(r => r[0].split(' ')[0]).filter(w => /^[a-z]/.test(w)), 'traceroute'])];
+  const VALUE_ARGS = new Set(['lookup', 'whois', 'dig', 'mail', 'asn', 'cidr', 'ip', 'traceroute']);
+  const WORD_ARGS = { theme: () => THEMES, crt: () => ['on', 'off'], history: () => ['clear', 'off', 'on'], copy: () => ['md', 'link'],
+    man: () => COMMANDS, help: () => COMMANDS, port: () => (PORTSLIB ? PORTSLIB.list().map(String) : []) };
+  const hint = el('span', 'hint'); hint.hidden = true; hint.setAttribute('aria-hidden', 'true'); form.appendChild(hint);
+  const showHint = t => { hint.textContent = t; hint.hidden = false; };
+  // Addresses, domains, ranges and AS numbers from your history, newest first.
+  function histValues() {
+    const seen = new Set();
+    for (let i = hist.length - 1; i >= 0; i--) {
+      for (const w of hist[i].split(/\s+/)) if (parseIp(w) || /^as\d{1,10}$/i.test(w) || looksLikeCidr(w) || (looksLikeDomain(w) && !/[/:]/.test(w))) seen.add(w);
+    }
+    return [...seen];
+  }
+  let tabCycle = null;                             // { lead, list, i } while Tab steps through several matches
+  function complete() {
+    const v = input.value;
+    if (tabCycle && v === tabCycle.lead + tabCycle.list[tabCycle.i]) {
+      tabCycle.i = (tabCycle.i + 1) % tabCycle.list.length;
+      input.value = tabCycle.lead + tabCycle.list[tabCycle.i];
+      return showHint(`${tabCycle.i + 1}/${tabCycle.list.length}  ` + tabCycle.list.join('  '));
+    }
+    tabCycle = null;
+    const lead = v.replace(/\S*$/, ''), word = v.slice(lead.length), before = lead.trim() ? lead.trim().split(/\s+/) : [];
+    const c = before.length ? ALIASES[before[0].toLowerCase()] || before[0].toLowerCase() : '';
+    const pool = !before.length ? [...COMMANDS, ...histValues()]
+      : before.length === 2 && c === 'dig' && !parseIp(before[1]) ? DNS_TYPES
+      : before.length === 1 && WORD_ARGS[c] ? WORD_ARGS[c]()
+      : before.length === 1 && VALUE_ARGS.has(c) ? histValues() : [];
+    const w = word.toLowerCase(), list = [...new Set(pool)].filter(x => x.toLowerCase().startsWith(w));
+    if (!list.length) return announce('No completions.');
+    if (list.length === 1) { input.value = lead + list[0] + ' '; return; }
+    const shared = list.reduce((a, b) => { let n = 0; while (n < a.length && n < b.length && a[n].toLowerCase() === b[n].toLowerCase()) n++; return a.slice(0, n); });
+    showHint(list.join('  '));
+    announce(`${list.length} matches: ${list.slice(0, 12).join(', ')}${list.length > 12 ? ' and more' : ''}.`);
+    if (shared.length > word.length) { input.value = lead + shared; return; }
+    tabCycle = { lead, list, i: 0 };
+    input.value = lead + list[0];
+  }
+
+  let search = null;                               // { orig: the line before Ctrl+R, at: index of the match in hist }
+  const ps1 = form.querySelector('.ps1'), PS1 = ps1.textContent, PLACEHOLDER = input.placeholder;
+  function searchStart() {                         // what's already typed is the first search
+    search = { orig: input.value, at: -1 };
+    ps1.textContent = '(reverse-i-search)';
+    input.placeholder = 'search your history'; input.setAttribute('aria-label', 'Search your command history');
+    announce('History search. Type to search, Control R for an older match, Enter to run it, Escape to cancel.');
+    searchFind(false);
+  }
+  function searchFind(older) {
+    const q = input.value.toLowerCase(), cur = search.at >= 0 ? hist[search.at] : null;
+    let i = older && search.at >= 0 ? search.at : hist.length;
+    while (--i >= 0) if (hist[i].toLowerCase().includes(q) && !(older && hist[i] === cur)) break;
+    if (i >= 0 || !older) search.at = i;           // Ctrl+R past the oldest match keeps the one shown
+    const hit = search.at >= 0 ? hist[search.at] : null;
+    showHint(hit ? '→ ' + hit : q ? 'no match' : 'type to search');
+    if (hit && q) announce(hit);
+  }
+  function searchEnd(value) {                      // the prompt keeps value: the match, or the line from before
+    search = null;
+    ps1.textContent = PS1; input.placeholder = PLACEHOLDER; input.setAttribute('aria-label', 'Command');
+    hint.hidden = true; input.value = value;
+  }
+  function searchKey(e, k, ctrl) {                 // true when the key was the search's
+    const hit = search.at >= 0 ? hist[search.at] : null;
+    if (ctrl && k.toLowerCase() === 'r') { e.preventDefault(); searchFind(true); return true; }
+    if (k === 'Escape' || (ctrl && k.toLowerCase() === 'g')) { e.preventDefault(); searchEnd(search.orig); return true; }
+    if (k === 'Enter') {
+      e.preventDefault(); searchEnd(hit != null ? hit : input.value);
+      if (hit != null) form.requestSubmit();
+      return true;
+    }
+    if (k === 'Tab' && (e.shiftKey || hit == null)) { searchEnd(input.value); return false; }   // Tab as usual
+    if (['Tab', 'ArrowUp', 'ArrowDown'].includes(k)) { e.preventDefault(); searchEnd(hit != null ? hit : input.value); return true; }
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(k)) { searchEnd(hit != null ? hit : input.value); return true; }
+    return true;                                   // typing changes the search; the input event looks again
+  }
+
+  // !! is the previous command, !<n> number n in `history` and !-<n> the nth from the end.
+  function expandHistory(cmd) {
+    let missing = null;
+    const x = cmd.replace(/!(!|-?\d+)/g, (m, ref) => {
+      const i = ref === '!' ? hist.length - 1 : ref[0] === '-' ? hist.length + Number(ref) : Number(ref) - 1;
+      if (i >= 0 && i < hist.length) return hist[i];
+      if (!missing) missing = m;
+      return m;
+    });
+    return { cmd: x, missing };
+  }
+
+  async function keys() {
+    await kv([
+      ['Enter', 'run the command'],
+      ['Up / Down', 'step through your history'],
+      ['Tab', 'complete a command, a record type after dig <name>, or an address or domain from your history. Several matches: Tab again steps through them. On an empty prompt, Tab moves on'],
+      ['Ctrl+R', 'search your history as you type: Ctrl+R again for an older match, Enter to run it, an arrow key to edit it, Esc to cancel'],
+      ['!!', 'the previous command again, also inside a line; !3 runs number 3 in history'],
+      ['Ctrl+L', 'clear the screen'],
+    ]);
+    announce('Keyboard shortcuts: Tab completes, Control R searches history, two exclamation marks repeat the last command.');
+  }
+
   /* ---------- wiring ---------- */
   // Focus the command line only for mouse/trackpad users: on phones and tablets focusing it pops up
   // the keyboard. After a command is submitted on a touch screen, close the keyboard so the result shows.
@@ -2265,10 +2384,20 @@
     exec(v);
   });
   input.addEventListener('keydown', e => {
-    if (e.key === 'ArrowUp' && hist.length) { e.preventDefault(); hIdx = Math.max(0, hIdx - 1); input.value = hist[hIdx]; }
-    else if (e.key === 'ArrowDown' && hist.length) { e.preventDefault(); hIdx = Math.min(hist.length, hIdx + 1); input.value = hist[hIdx] || ''; }
-    else if (e.key.toLowerCase() === 'l' && e.ctrlKey) { e.preventDefault(); out.textContent = ''; }
+    const k = e.key || '', ctrl = e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;   // (autofill sends no key)
+    if (search && searchKey(e, k, ctrl)) return;
+    if (k !== 'Tab') { tabCycle = null; hint.hidden = true; }
+    if (k === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (!input.value.trim()) return;             // an empty prompt: Tab moves focus on, as on any page
+      e.preventDefault(); return complete();
+    }
+    if (ctrl && k.toLowerCase() === 'r') { e.preventDefault(); return searchStart(); }
+    if (k === 'ArrowUp' && hist.length) { e.preventDefault(); hIdx = Math.max(0, hIdx - 1); input.value = hist[hIdx]; }
+    else if (k === 'ArrowDown' && hist.length) { e.preventDefault(); hIdx = Math.min(hist.length, hIdx + 1); input.value = hist[hIdx] || ''; }
+    else if (ctrl && k.toLowerCase() === 'l') { e.preventDefault(); out.textContent = ''; current = null; }
   });
+  input.addEventListener('input', () => { if (search) searchFind(false); else { tabCycle = null; hint.hidden = true; } });
+  input.addEventListener('blur', () => { if (search) searchEnd(search.orig); });
   document.querySelectorAll('button[data-cmd]').forEach(b => b.addEventListener('click', () => { exec(b.dataset.cmd); focusInput(); }));
   // Links in the section below the terminal are real links for crawlers and new tabs; a plain click
   // runs the lookup right in the terminal instead of reloading the page.
