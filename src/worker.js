@@ -867,9 +867,9 @@ function parseProxycheck(j, ip) {
   for (const [k, v] of Object.entries(e.detections)) det[k.toLowerCase()] = v;
   const yes = k => det[k] === true || det[k] === 'yes';
   const vpn = yes('vpn'), proxy = yes('proxy'), tor = yes('tor'), compromised = yes('compromised');
-  // v3 puts risk beside detections, on the address's own entry (only confidence is inside); detections
-  // is read too, in case an answer has it there.
-  const risk = num(e.risk ?? det.risk);
+  // The live v3 API sends risk inside detections; the published OpenAPI spec puts it on the address's
+  // own entry, beside detections. Read both, so a move to match the spec doesn't drop it.
+  const risk = num(det.risk ?? e.risk);
   const op = e.operator && typeof e.operator === 'object' ? txt(e.operator.name, 60) : null;
   const nt = e.network && typeof e.network === 'object' && typeof e.network.type === 'string' ? e.network.type.toLowerCase() : null;
   return {
