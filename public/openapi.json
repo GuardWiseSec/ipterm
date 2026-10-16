@@ -3,7 +3,7 @@
   "info": {
     "title": "ipterm",
     "version": "1.0.0",
-    "summary": "IP address, network (ASN), DNS, email security (SPF, DMARC, DKIM), registry (whois) and subnet lookups for curl and scripts.",
+    "summary": "IP address, network (ASN), DNS, email security (SPF, DMARC, DKIM), domain report card, registry (whois) and subnet lookups for curl and scripts.",
     "description": "No key and no sign-up. Command-line clients (curl, wget, HTTPie, PowerShell...) and scripts get JSON; browsers get an HTML page at the same address, so send `?format=json` from a browser-like client to be sure of JSON. Add `?format=text` to any lookup for aligned key/value lines instead of JSON (quote the URL in a shell). One-value endpoints answer with a single line of plain text; a missing value is an empty line with HTTP 404. Uncached lookups are limited to 30 a minute per address (IPv6: per /64), after which the answer is HTTP 429 with a Retry-After header. No cookies, no tracking, and nothing about callers is stored (https://ipterm.net/privacy). Plain-text reference: `curl ipterm.net/help`.\n\nIP address data powered by IPinfo (https://ipinfo.io), used under CC BY-SA 4.0. Networks: RIPEstat. Registry records: RDAP from the regional internet registries and domain registries. DNS and mail checks: Cloudflare's public resolver (1.1.1.1), plus each domain's own MTA-STS policy file.",
     "contact": { "email": "contact@ipterm.net", "url": "https://ipterm.net/api" }
   },
@@ -12,7 +12,7 @@
     { "name": "you", "description": "Your own address, from Cloudflare's edge (request.cf). No third-party lookup." },
     { "name": "port", "description": "Is a TCP port open on your own address? The server connects to the address the request comes from, never any other." },
     { "name": "lookup", "description": "Any public IP address or network." },
-    { "name": "tools", "description": "DNS, email security (mail), registry records (whois), the subnet calculator and shared leak test results." },
+    { "name": "tools", "description": "DNS, email security (mail), the domain report card (grade) and its badges, registry records (whois), the subnet calculator and shared leak test results." },
     { "name": "docs", "description": "Help and machine-readable descriptions." }
   ],
   "paths": {
@@ -163,6 +163,33 @@
         "responses": { "200": { "$ref": "#/components/responses/Mail" }, "400": { "$ref": "#/components/responses/BadRequest" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/Upstream" } }
       }
     },
+    "/grade/{domain}": {
+      "get": {
+        "tags": ["tools"], "operationId": "grade", "summary": "Domain report card: DNSSEC, IPv6, CAA and HTTPS records, the email security grade, expiry and transfer lock, and the website's HTTPS redirect and security headers, graded A to F",
+        "description": "Every finding is a line with a status (ok, warn, fail or info) and, for warn and fail, a fix. The grade counts them: A no FAIL and no WARN; B no FAIL, one to three WARN; C one FAIL, or four or more WARN; D two FAIL; F three or more FAIL, an expired registration, or broken DNSSEC (validating resolvers refuse the domain). INFO never counts, and neither does a part that couldn't be checked (listed in notChecked). DNS comes from Cloudflare's resolver (DNSSEC, AAAA, CAA at the name or its closest parent, HTTPS). The mail line is the mail check's grade (A ok, B warn, C or worse fail) with its main findings in details. The registration (RDAP) gives expiry (warn within 30 days, fail once expired or lapsing) and the transfer lock. The website gets one HEAD request to https://{domain}/ (redirects followed only within the domain, at most twice, never to plain http) for HSTS, Content-Security-Policy, X-Content-Type-Options, frame protection and Referrer-Policy, and one to http://{domain}/ for the redirect to HTTPS; a 403, a bot challenge, a timeout or an error is info (couldn't check), never fail. Certificates aren't checked. A nonexistent domain answers 200 with status NXDOMAIN and grade null. Cached for five minutes (one minute when a part couldn't be checked). Never uses IPinfo or proxycheck.io.",
+        "parameters": [{ "$ref": "#/components/parameters/gradeDomain" }, { "$ref": "#/components/parameters/format" }],
+        "responses": { "200": { "$ref": "#/components/responses/Grade" }, "400": { "$ref": "#/components/responses/BadRequest" }, "429": { "$ref": "#/components/responses/RateLimited" }, "502": { "$ref": "#/components/responses/Upstream" } }
+      }
+    },
+    "/badge/{domain}.json": {
+      "get": {
+        "tags": ["tools"], "operationId": "badgeEndpoint", "summary": "The report card's grade as a shields.io endpoint badge",
+        "description": "For README badges: ![domain security grade](https://img.shields.io/endpoint?url=https%3A%2F%2Fipterm.net%2Fbadge%2Fexample.com.json). shields.io (and GitHub's image proxy) fetch this, so readers' browsers never contact ipterm. The message is the grade letter, colored brightgreen (A) to red (F); \"no such domain\", \"checking…\" (the card wasn't ready within about three seconds; it finishes in the background) or \"busy, try later\" otherwise. Cached for an hour (ten minutes when part of the card couldn't be checked); a card that can't be had falls back to the last grade, kept for a day.",
+        "parameters": [{ "$ref": "#/components/parameters/gradeDomain" }],
+        "responses": {
+          "200": { "description": "The badge.", "headers": { "Cache-Control": { "schema": { "type": "string" }, "example": "public, max-age=3600" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Badge" } } } },
+          "400": { "description": "Not a domain name: the same badge shape, with isError.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Badge" } } } }
+        }
+      }
+    },
+    "/badge/{domain}.svg": {
+      "get": {
+        "tags": ["tools"], "operationId": "badgeSvg", "summary": "The same badge drawn by ipterm, as SVG",
+        "description": "Each reader's browser fetches this from ipterm directly (unless a proxy such as GitHub's sits in between), so prefer the shields.io endpoint where readers' privacy matters. Sent with Cross-Origin-Resource-Policy: cross-origin so other sites can show it. Cached like the JSON.",
+        "parameters": [{ "$ref": "#/components/parameters/gradeDomain" }],
+        "responses": { "200": { "description": "The badge.", "content": { "image/svg+xml": { "schema": { "type": "string" } } } }, "400": { "description": "Not a domain name (a grey badge)." } }
+      }
+    },
     "/whois/{query}": {
       "get": {
         "tags": ["tools"], "operationId": "whois", "summary": "Registry record (RDAP) for an IP address, AS number or domain",
@@ -259,6 +286,7 @@
     "/api/asn": { "get": { "tags": ["lookup"], "operationId": "apiAsn", "summary": "As /AS{number}, always JSON", "parameters": [{ "name": "asn", "in": "query", "required": true, "schema": { "type": "string" }, "example": "AS13335" }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /AS{number}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Asn" } } } } } } },
     "/api/dns": { "get": { "tags": ["tools"], "operationId": "apiDns", "summary": "As /dns/{name}[/{type}], always JSON", "parameters": [{ "name": "name", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "type", "in": "query", "schema": { "$ref": "#/components/schemas/DnsType" } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "$ref": "#/components/responses/Dns" } } } },
     "/api/mail": { "get": { "tags": ["tools"], "operationId": "apiMail", "summary": "As /mail/{domain}, always JSON", "parameters": [{ "name": "domain", "in": "query", "required": true, "schema": { "type": "string" }, "example": "gmail.com" }, { "$ref": "#/components/parameters/dkim" }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "$ref": "#/components/responses/Mail" } } } },
+    "/api/grade": { "get": { "tags": ["tools"], "operationId": "apiGrade", "summary": "As /grade/{domain}, always JSON", "parameters": [{ "name": "domain", "in": "query", "required": true, "schema": { "type": "string" }, "example": "github.com" }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "$ref": "#/components/responses/Grade" }, "400": { "$ref": "#/components/responses/BadRequest" } } } },
     "/api/whois": { "get": { "tags": ["tools"], "operationId": "apiWhois", "summary": "As /whois/{query}, always JSON", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /whois/{query}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Whois" } } } } } } },
     "/api/cidr": { "get": { "tags": ["tools"], "operationId": "apiCidr", "summary": "As /cidr/{network}/{prefix}, always JSON; also accepts an address and netmask", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" }, "examples": { "cidr": { "value": "10.0.0.0/22" }, "netmask": { "value": "192.168.1.10 255.255.255.0" } } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /cidr/{network}/{prefix}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Cidr" } } } } } } },
     "/api/route": { "get": { "tags": ["tools"], "operationId": "apiRoute", "summary": "As /route/{network}/{prefix} or /route/{ip}, always JSON", "parameters": [{ "name": "q", "in": "query", "required": true, "schema": { "type": "string" }, "examples": { "prefix": { "value": "1.1.1.0/24" }, "ip": { "value": "8.8.8.8" } } }, { "$ref": "#/components/parameters/format" }], "responses": { "200": { "description": "As /route/{network}/{prefix}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Route" } } } }, "400": { "$ref": "#/components/responses/BadRequest" } } } },
@@ -298,6 +326,7 @@
       "formatText": { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["text"] }, "description": "text: your details as aligned key/value lines instead of the bare address." },
       "ip": { "name": "ip", "in": "path", "required": true, "schema": { "type": "string" }, "description": "IPv4 or IPv6 address", "examples": { "v4": { "value": "8.8.8.8" }, "v6": { "value": "2606:4700:4700::1111" } } },
       "mailDomain": { "name": "domain", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Domain name (international names are converted to punycode)", "example": "gmail.com" },
+      "gradeDomain": { "name": "domain", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Domain name (international names are converted to punycode); a subdomain is graded as itself, with its registered domain's registration", "example": "github.com" },
       "dkim": { "name": "dkim", "in": "query", "schema": { "type": "string" }, "description": "A DKIM selector to check as well as the common ones: the s= value in a message's DKIM-Signature header", "example": "selector1" },
       "dnsName": { "name": "name", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Domain name (international names are converted to punycode) or an IP address for reverse DNS", "example": "example.com" }
     },
@@ -308,6 +337,7 @@
       "RateLimited": { "description": "More than 30 uncached lookups in a minute from your address.", "headers": { "Retry-After": { "schema": { "type": "integer" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
       "Upstream": { "description": "A data source didn't respond. Try again in a moment.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }, "text/plain": { "schema": { "type": "string" } } } },
       "Mail": { "description": "Mail check.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Mail" } }, "text/plain": { "schema": { "type": "string" } } } },
+      "Grade": { "description": "Domain report card.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Grade" } }, "text/plain": { "schema": { "type": "string" } } } },
       "Dns": { "description": "DNS answer.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Dns" } }, "text/plain": { "schema": { "type": "string" } } } }
     },
     "schemas": {
@@ -457,6 +487,52 @@
           "unread": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Records the resolver couldn't read, with its answer (e.g. SPF: SERVFAIL, or DMARC: no answer): reported, not graded as missing. A subdomain without a DMARC record of its own has DMARC unread when a parent's _dmarc couldn't be read" },
           "subrequests": { "type": "integer", "description": "DNS queries and fetches the check took" },
           "source": { "type": "string", "const": "cloudflare-dns" }
+        }
+      },
+      "Grade": {
+        "type": "object",
+        "properties": {
+          "domain": { "type": "string" },
+          "status": { "type": "string", "enum": ["NOERROR", "NXDOMAIN", "SERVFAIL", "FORMERR", "NOTIMP", "REFUSED", "ERROR"], "description": "The resolver's answer for the domain. SERVFAIL with a grade is broken DNSSEC (grade F); otherwise only NOERROR is graded" },
+          "grade": { "type": ["string", "null"], "enum": ["A", "B", "C", "D", "F", null] },
+          "counts": { "type": "object", "properties": { "ok": { "type": "integer" }, "warn": { "type": "integer" }, "fail": { "type": "integer" }, "info": { "type": "integer" } } },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object", "required": ["section", "check", "status", "text"],
+              "properties": {
+                "section": { "type": "string", "enum": ["dns", "mail", "registration", "web"] },
+                "check": { "type": "string", "examples": ["DNSSEC", "IPv6", "CAA", "HTTPS record", "mail", "expiry", "transfer lock", "registration", "website", "HTTPS", "HTTP", "HSTS", "CSP", "nosniff", "frames", "referrer", "headers"] },
+                "status": { "type": "string", "enum": ["ok", "warn", "fail", "info"] },
+                "text": { "type": "string" },
+                "fix": { "type": "string", "description": "On warn and fail only" },
+                "details": { "type": "array", "items": { "type": "string" }, "description": "On the mail line: the mail check's main findings" },
+                "skipped": { "type": "string", "description": "On info lines for a part that couldn't be checked: what the grade leaves out" }
+              }
+            }
+          },
+          "notChecked": { "type": "array", "items": { "type": "string" }, "description": "Parts that couldn't be checked, e.g. \"security headers\" after a 403 or a timeout" },
+          "dns": { "type": "object", "properties": { "dnssec": { "type": "boolean" }, "broken": { "type": ["string", "null"], "description": "The Extended DNS Error when validation fails" }, "cname": { "type": "array", "items": { "type": "string" } }, "addresses": { "type": "array", "items": { "type": "string" } },
+            "caa": { "type": ["object", "null"], "properties": { "from": { "type": "string", "description": "The name the records were found at (the domain or its closest parent)" }, "issue": { "type": "array", "items": { "type": "string" } }, "issuewild": { "type": "array", "items": { "type": "string" } }, "records": { "type": "array", "items": { "type": "string" } } } },
+            "https": { "type": "array", "items": { "type": "object", "properties": { "priority": { "type": "integer" }, "target": { "type": "string" }, "alpn": { "type": "array", "items": { "type": "string" } }, "ech": { "type": "boolean" } } } } } },
+          "mail": { "type": ["object", "null"], "properties": { "grade": { "type": "string" }, "counts": { "type": "object" } } },
+          "registration": { "type": ["object", "null"], "properties": { "domain": { "type": "string", "description": "The registered domain" }, "registrar": { "type": ["string", "null"] }, "expires": { "type": ["string", "null"] }, "status": { "type": "array", "items": { "type": "string" } }, "dnssec": { "type": ["boolean", "null"] } } },
+          "web": { "type": ["object", "null"], "description": "skipped: noaddr or private when the site wasn't asked", "properties": {
+            "https": { "type": "object", "properties": { "start": { "type": "string" }, "final": { "type": ["string", "null"] }, "status": { "type": ["integer", "null"] }, "hops": { "type": "array", "items": { "type": "object", "properties": { "url": { "type": "string" }, "status": { "type": "integer" } } } }, "headers": { "type": ["object", "null"], "description": "The security headers read from the final page (lowercase names, values capped at 1,000 characters)" } } },
+            "http": { "type": "object", "properties": { "upgrades": { "type": "boolean" }, "to": { "type": "string" }, "plain": { "type": "boolean" }, "plainRedirect": { "type": "string" }, "error": { "type": "string" } } },
+            "skipped": { "type": "string", "enum": ["noaddr", "private"] } } },
+          "badge": { "type": "object", "description": "Only with a grade", "properties": { "endpoint": { "type": "string" }, "svg": { "type": "string" }, "shields": { "type": "string" }, "markdown": { "type": "string", "description": "A README badge drawn by shields.io" }, "markdownSvg": { "type": "string", "description": "The same badge served by ipterm" } } },
+          "checked": { "type": "string", "format": "date-time" },
+          "source": { "type": "string" },
+          "subrequests": { "type": "integer", "description": "DNS queries, the mail check's fetches and requests to the site for this card (not counting whois or cache reads)" }
+        }
+      },
+      "Badge": {
+        "type": "object", "required": ["schemaVersion", "label", "message"],
+        "description": "shields.io's endpoint schema, and nothing else (it refuses unknown keys).",
+        "properties": {
+          "schemaVersion": { "const": 1 }, "label": { "type": "string", "example": "domain security" }, "message": { "type": "string", "example": "A" },
+          "color": { "type": "string", "enum": ["brightgreen", "green", "yellow", "orange", "red", "lightgrey"] }, "isError": { "type": "boolean" }, "cacheSeconds": { "type": "integer", "minimum": 300 }
         }
       },
       "Whois": {

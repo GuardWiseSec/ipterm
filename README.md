@@ -14,6 +14,7 @@ curl ipterm.net/line                  # IP, network, country and data center on 
 curl ipterm.net/8.8.8.8/org           # one value for any address
 curl 'ipterm.net/8.8.8.8?format=text' # everything about an address, as aligned text
 curl ipterm.net/mail/gmail.com        # SPF, DMARC, DKIM and MTA-STS, graded A to F
+curl ipterm.net/grade/github.com      # a domain's report card: DNSSEC, email, expiry and security headers
 curl -4 ipterm.net/port/22            # is a port open on your own IP?
 curl ipterm.net/help                  # everything else
 ```
@@ -69,6 +70,7 @@ searches your history, and `ipterm.net/go?q=<anything>` works as a browser searc
 | `dig <name> [type]` | one DNS record type, with TTLs |
 | `whois <ip, ASN or domain>` | the registry record, over RDAP |
 | `mail <domain>` | email security (MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI), graded A to F |
+| `grade <domain>` | a domain's report card, graded A to F: DNSSEC, IPv6, CAA, email, expiry and transfer lock, the redirect to HTTPS and the security headers. `copy badge` gives a README badge drawn by shields.io, so your readers never contact ipterm |
 | `port <number>` | is a TCP port open on your own IP? It never tests any other address |
 | `cidr <range>` | subnet calculator, IPv4 and IPv6 |
 

@@ -487,6 +487,7 @@
   const apiDns = (name, type) => getJson('/api/dns?name=' + encodeURIComponent(name) + (type ? '&type=' + encodeURIComponent(type) : ''));
   const apiWhois = q => getJson('/api/whois?q=' + encodeURIComponent(q));
   const apiMail = (name, sel) => getJson('/api/mail?domain=' + encodeURIComponent(name) + (sel ? '&dkim=' + encodeURIComponent(sel) : ''));
+  const apiGrade = name => getJson('/api/grade?domain=' + encodeURIComponent(name));
   const apiAsn = n => getJson('/api/asn?asn=' + n);
   const apiRoute = q => getJson('/api/route?q=' + encodeURIComponent(q));
 
@@ -512,8 +513,10 @@
     if (!p) return 'whoami';
     const lr = /^leaktest\/r\/([0-9a-z]{1,8})$/i.exec(p);    // a shared result: shown again, never a test run
     if (lr) return 'leaktest --result ' + lr[1].toLowerCase();
-    const tool = { whois: 'whois', dns: 'dig', mail: 'mail', cidr: 'cidr', leaktest: 'leaktest', port: 'port', api: 'api' }[p.toLowerCase()];
+    const tool = { whois: 'whois', dns: 'dig', mail: 'mail', grade: 'grade', cidr: 'cidr', leaktest: 'leaktest', port: 'port', api: 'api' }[p.toLowerCase()];
     if (tool) return tool;
+    const gr = /^grade\/([^/]+)$/i.exec(p);
+    if (gr) return 'grade ' + gr[1];
     const pt = /^port\/(\d{1,5})$/i.exec(p);           // the page explains the port; Back never re-runs a check
     if (pt) return 'port ' + Number(pt[1]) + ' --info';
     const cd = /^cidr\/(.+)$/i.exec(p);
@@ -562,6 +565,7 @@
         const m = mailArgs(parts.slice(1));
         return '/mail' + (m.dom ? '/' + name(m.dom) + (m.sel ? '?dkim=' + encodeURIComponent(m.sel.toLowerCase()) : '') : '');
       }
+      case 'grade': return !a ? '/grade' : looksLikeDomain(a) && !parseIp(domainOf(a)) ? '/grade/' + domainOf(a).toLowerCase() : null;
       case 'cidr': {                                           // also "cidr 192.168.1.10 255.255.255.0"
         const rest = parts.slice(1).join(' ');
         if (!rest) return '/cidr';
@@ -1556,6 +1560,10 @@
       text: "mail checks a domain's email security: mail servers, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, graded A to F with a fix for each problem.",
       usage: 'usage: mail <domain> [--dkim <selector>]',
       ex: [['mail gmail.com', '/mail/gmail.com'], ['mail outlook.com', '/mail/outlook.com'], ['mail github.com', '/mail/github.com'], ['mail example.com', '/mail/example.com']] },
+    grade: { url: '/grade', title: 'Domain report card: DNSSEC, security headers, email and expiry, graded A to F | ipterm',
+      text: "grade gives a domain a report card, graded A to F: DNSSEC, IPv6, CAA and HTTPS records, the email security grade, the registration's expiry and transfer lock, and the website's HTTPS redirect and security headers, with a fix for each problem and a badge for your README.",
+      usage: 'usage: grade <domain>',
+      ex: [['grade github.com', '/grade/github.com'], ['grade cloudflare.com', '/grade/cloudflare.com'], ['grade example.com', '/grade/example.com'], ['grade wikipedia.org', '/grade/wikipedia.org']] },
     cidr: { url: '/cidr', title: 'Subnet calculator: CIDR, netmask and usable host range | ipterm',
       text: 'cidr works out a subnet: network and broadcast addresses, netmask, wildcard, usable host range and host count. IPv6 works too. For a public range it also shows how it is routed (route).',
       usage: 'usage: cidr <range>   also accepts an address and netmask: cidr 192.168.1.10 255.255.255.0',
@@ -1741,15 +1749,17 @@
     const mailNext = hasMail && [`mail ${d.name}`, `mail ${d.name}`, 'email security: SPF, DMARC and DKIM, graded A to F'];
     if (parseIp(d.name)) next([`lookup ${d.name}`, `lookup ${d.name}`, 'owner and approximate location'], [`whois ${d.name}`, `whois ${d.name}`, 'registry record'],
       PTR[0] && looksLikeDomain(PTR[0]) && [`dig ${PTR[0]}`, `dig ${PTR[0]}`, 'look the name up the other way']);
-    else if (single) next([`dig ${d.name}`, `dig ${d.name}`, 'all the common record types'], mailNext, [`whois ${d.name}`, `whois ${d.name}`, 'registrar, dates and status'], share);
-    else next([`whois ${d.name}`, `whois ${d.name}`, 'registrar, registration and expiry dates'], mailNext,
-      d.hosting && d.hosting.ip && [`lookup ${d.hosting.ip}`, `lookup ${d.hosting.ip}`, 'who runs the server, and where'],
-      !mailNext && [`dig ${d.name} SOA`, `dig ${d.name} SOA`, 'the zone: primary name server and serial'], share);
+    else if (single) next([`dig ${d.name}`, `dig ${d.name}`, 'all the common record types'], mailNext || gradeNext(d.name), [`whois ${d.name}`, `whois ${d.name}`, 'registrar, dates and status'], share);
+    else next([`whois ${d.name}`, `whois ${d.name}`, 'registrar, registration and expiry dates'], mailNext, gradeNext(d.name),
+      !mailNext && d.hosting && d.hosting.ip && [`lookup ${d.hosting.ip}`, `lookup ${d.hosting.ip}`, 'who runs the server, and where'], share);
     announce(parseIp(d.name) ? `${d.name}: reverse DNS ${PTR[0] || 'none'}.`
       : single ? `${d.name} ${single}: ${(R[single] || []).length} record(s).`
       : `${d.name}: ` + (A.length ? `resolves to ${A.slice(0, 2).join(', ')}` : 'no IPv4 address') + (MX.length ? `, mail by ${MX[0]}` : R.MX && R.MX.length ? ', accepts no mail' : '') +
         (d.hosting && d.hosting.org ? `, hosted by ${d.hosting.org}` : '') + '.');
   }
+
+  // The report card, offered after dig, whois and mail (it reads live DNS and the site, so not in the preview).
+  const gradeNext = name => live && [`grade ${name}`, `grade ${name}`, 'report card: DNSSEC, email, expiry and security headers, graded A to F'];
 
   /* ---------- mail check ----------
      mail <domain> [--dkim <selector>]: the Worker reads the records (MX, SPF, DMARC, DKIM, MTA-STS,
@@ -1789,7 +1799,7 @@
     }
     setUrl(path, `${d.domain} SPF, DMARC and DKIM check: grade ${d.grade} | ipterm`);
     await renderMail(d);
-    next([`dig ${d.domain} TXT`, `dig ${d.domain} TXT`, 'every TXT record, SPF included'], [`whois ${d.domain}`, `whois ${d.domain}`, 'registrar, dates and status'],
+    next(gradeNext(d.domain), [`dig ${d.domain} TXT`, `dig ${d.domain} TXT`, 'every TXT record, SPF included'],
       ['man mail', 'man mail', 'what each check means and how the grade works'], ['share', 'share', 'copy a link to this check']);
   }
 
@@ -1838,6 +1848,87 @@
     announce(`mail ${d.domain}: grade ${d.grade}, ${tally}.` + (worst ? ` First problem: ${worst.check}, ${worst.text}.` : ''));
   }
 
+  /* ---------- domain report card ----------
+     grade <domain>: the Worker reads DNS (DNSSEC, AAAA, CAA, HTTPS), the mail check, the registration (RDAP) and
+     the site's own headers (one HEAD to https:// and one to http://), and grades them A to F; this draws its
+     OK / WARN / FAIL / INFO lines like the mail check's, then the Markdown for a README badge. */
+  async function grade(args, pre) {
+    const dom = args[0];
+    const q = domainOf(dom || '').toLowerCase();
+    if (parseIp(q)) return line('grade needs a domain name, not an IP address. Example: grade github.com', 'err');
+    if (!looksLikeDomain(q)) return line(`"${dom}" is not a valid domain name. Example: grade github.com`, 'err');
+    let d = null;
+    if (pre) {
+      if (pre.error) return line(pre.error, 'err');
+      d = pre.data;
+    } else if (live) {
+      const ql = line('checking DNS, email, the registration and the website…', 'sys'); const t0 = performance.now();
+      d = await apiGrade(q);
+      if (d.error) { ql.textContent = d.error; ql.className = 'ln err'; announce(d.error); return; }
+      ql.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
+    } else return line('The report card reads live DNS and asks the site itself, so it works once the Worker is deployed.', 'warn');
+    const path = '/grade/' + d.domain;
+    if (!d.grade) {
+      setUrl(path, `${d.domain} report card | ipterm`);
+      line(d.status === 'NXDOMAIN' ? `${d.domain} does not exist (NXDOMAIN), so there is nothing to grade.`
+        : `The report card for ${d.domain} could not run: the resolver answered ${d.status}.`, 'warn');
+      return next([`whois ${d.domain}`, `whois ${d.domain}`, 'is the name registered?']);
+    }
+    setUrl(path, `${d.domain} security report card: grade ${d.grade} | ipterm`);
+    await renderGrade(d);
+    next([`mail ${d.domain}`, `mail ${d.domain}`, 'every email finding, with its fix'], [`dig ${d.domain}`, `dig ${d.domain}`, 'its DNS records'],
+      [`whois ${d.domain}`, `whois ${d.domain}`, 'registrar, dates and status'], ['copy badge', 'copy badge', 'copy a README badge for this grade, as Markdown']);
+  }
+
+  // The README badge as Markdown: shields.io's (it fetches /badge/<domain>.json, so readers never contact ipterm) and
+  // ipterm's own SVG. The same as badgeLinks() in worker.js.
+  function badgeMd(name) {
+    const o = live ? location.origin : 'https://your-domain', page = `${o}/grade/${name}`;
+    return { shields: `[![domain security grade](https://img.shields.io/endpoint?url=${encodeURIComponent(`${o}/badge/${name}.json`)})](${page})`,
+      svg: `[![domain security grade](${o}/badge/${name}.svg)](${page})` };
+  }
+  async function renderGrade(d) {
+    const badge = badgeMd(d.domain);
+    const head = el('div', 'head');
+    head.append(el('span', 'hip', 'grade ' + d.domain), el('span', 'tag pub', 'report card'), el('span', 'tag', 'grade ' + d.grade));
+    head.append(shareBar({ cmd: 'grade ' + d.domain, value: d.domain, what: 'the domain', path: '/grade/' + d.domain, badge: badge.shields }));
+    out.appendChild(head);
+    const frag = (...parts) => { const f = document.createDocumentFragment(); parts.forEach(p => f.append(p)); return f; };
+    const c = d.counts || {}, skipped = [...new Set(d.notChecked || [])];
+    const tally = c.fail || c.warn ? [c.fail && `${c.fail} FAIL`, c.warn && `${c.warn} WARN`].filter(Boolean).join(', ') : 'no problems found';
+    const rows = [['grade', d.grade, 'big'], ['', tally + (c.info ? `, plus ${c.info} INFO line${c.info > 1 ? "s that don't" : " that doesn't"} count` : '') +
+      (skipped.length ? `. Not checked: ${skipped.join(', ')}` : ''), 'plain']];
+    let prev = null, sec = null;
+    for (const x of d.checks || []) {             // one line per finding, the mail check's main ones under its line, a fix under each problem
+      if (sec && x.section !== sec) rows.push('sep');
+      sec = x.section;
+      rows.push([x.check === prev ? '' : x.check, frag(el('span', 'tag ' + (MAIL_TAG[x.status] || 'st-info'), x.status), ' ', x.text)]);
+      (x.details || []).forEach(t => rows.push(['', '  ' + t, 'plain']));
+      if (x.fix) rows.push(['', 'fix: ' + x.fix, 'plain']);
+      prev = x.check;
+    }
+    rows.push('sep');
+    const dn = d.dns || {}, r = d.registration, w = d.web && d.web.https;
+    // Addresses stay plain text: a link to /<ip> would let crawlers that run scripts spend IPinfo lookups.
+    if (dn.addresses && dn.addresses.length) rows.push(['addresses', dn.addresses.slice(0, 4).join('  ') + (dn.addresses.length > 4 ? `  and ${dn.addresses.length - 4} more` : '')]);
+    if (dn.caa) dn.caa.records.forEach((v, i) => rows.push([i ? '' : dn.caa.from !== d.domain ? `CAA (${dn.caa.from})` : 'CAA records', v]));
+    if (r && r.registrar) rows.push(['registrar', r.registrar]);
+    if (w && w.headers) rows.push(['page checked', w.final]);
+    await kv(rows);
+    // The badge: Markdown to paste into a README, with a copy button each (copy badge copies the first).
+    const snip = (label, md) => {
+      const b = el('button', 'share-btn', 'copy'); b.type = 'button'; b.setAttribute('aria-label', 'Copy the badge Markdown');
+      b.addEventListener('click', () => toClipboard(md).then(ok => (ok ? flash(b, 'copied the badge Markdown') : line('The clipboard is blocked here, so select the Markdown below and copy it by hand.', 'warn'))));
+      const t = el('div', 'ln sys badge-snip'); t.append(label + '  ', b);
+      out.append(t, el('div', 'ln snippet badge-snip', md));
+    };
+    snip("README badge (shields.io draws it, so your readers' browsers never contact ipterm):", badge.shields);
+    snip("or the same badge served by ipterm itself (each reader's browser fetches it from here):", badge.svg);
+    scroll();
+    const worst = (d.checks || []).find(x => x.status === 'fail') || (d.checks || []).find(x => x.status === 'warn');
+    announce(`grade ${d.domain}: ${d.grade}, ${tally}.` + (worst ? ` First problem: ${worst.check}, ${worst.text}.` : ''));
+  }
+
   async function whois(raw, pre) {
     raw = String(raw || '').trim();
     const asnM = /^(?:as)(\d{1,10})$/i.exec(raw), p = asnM ? null : parseIp(raw);
@@ -1875,7 +1966,7 @@
       await renderDomainWhois(d);
       return next([`dig ${d.domain}`, `dig ${d.domain}`, 'its DNS records and who hosts it'],
         live && !d.sample && [`mail ${d.domain}`, `mail ${d.domain}`, 'email security: SPF, DMARC and DKIM, graded A to F'],
-        [`dig ${d.domain} MX`, `dig ${d.domain} MX`, 'its mail servers'], share);
+        !d.sample ? gradeNext(d.domain) : [`dig ${d.domain} MX`, `dig ${d.domain} MX`, 'its mail servers'], share);
     }
     setUrl('/whois/' + q, `whois ${q}` + (d.org ? ` · ${d.org}` : '') + ' | ipterm');
     await renderWhois(d);
@@ -2028,6 +2119,7 @@
     ['lookup <domain>', 'DNS records, mail and name servers, hosting, DNSSEC', 'lookup example.com'],
     ['dig <name> [type]', 'one record type: A AAAA MX NS TXT CAA SOA CNAME SRV ... (dig <ip> = reverse)', 'dig gmail.com MX'],
     ['mail <domain>', 'email security: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT and BIMI, graded A to F', 'mail gmail.com'],
+    ['grade <domain>', 'report card, graded A to F: DNSSEC, CAA, email, expiry, HTTPS and security headers, with a README badge', 'grade github.com'],
     ['cidr <range>', 'subnet calculator: cidr 10.0.0.0/22, IP + netmask, or IPv6', 'cidr 10.0.0.0/22'],
     ['whois <ip|ASN|domain>', 'registry record: owner, registrar, dates, name servers, abuse contact', 'whois example.com'],
     ['asn <number>', 'network details, address blocks and upstreams, e.g. asn AS13335', 'asn AS13335'],
@@ -2037,7 +2129,7 @@
     ['ping [count]', 'round trip from your browser to the nearest Cloudflare data center', 'ping'],
     ['man <command>', 'details and examples for one command, e.g. man dig', 'man dig'],
     ['share', 'share a link to the current result (phones: the share sheet; after leaktest: your grade)', 'share'],
-    ['copy [md|link]', "copy the current result's address, domain, range or ASN; md: as Markdown", 'copy'],
+    ['copy [md|link|badge]', "copy the current result's address, domain, range or ASN; md: as Markdown; badge: after grade", 'copy'],
     ['privacy', 'what ipterm does and does not collect', 'privacy'],
     ['theme <name>', 'phosphor, amber, ice, contrast or paper', 'theme'],
     ['crt on|off', 'turn glow and scanlines on or off', 'crt'],
@@ -2052,7 +2144,7 @@
   // Other names each command answers to (run() goes by these too).
   const ALIASES = { myip: 'whoami', me: 'whoami', leaks: 'leaktest', leak: 'leaktest', privacycheck: 'leaktest', vpntest: 'leaktest',
     vpncheck: 'leaktest', dnsleak: 'leaktest', dnsleaktest: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
-    spf: 'mail', dmarc: 'mail', dkim: 'mail', email: 'mail', mailcheck: 'mail',
+    spf: 'mail', dmarc: 'mail', dkim: 'mail', email: 'mail', mailcheck: 'mail', report: 'grade', reportcard: 'grade', scorecard: 'grade', badge: 'grade',
     as: 'asn', bgp: 'route', rpki: 'route', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
     portcheck: 'port', shortcuts: 'keys', bindkey: 'keys', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
   // man <command>: [synopsis, description, examples, see also, curl paths]
@@ -2081,6 +2173,16 @@
         ['WARN', 'DMARC p=none, pct below 100, sp=none or no report address; SPF ?all, no all, or ptr; DKIM keys under 2048 bits; no TLS-RPT beside MTA-STS; a BIMI logo without DMARC enforcement'],
         ['DKIM', "selectors can't be listed, so only google, selector1, selector2, default, k1 and s1 are tried, and no key there is INFO (so is a selector the resolver couldn't read). Name yours with --dkim: it is the s= value in a message's DKIM-Signature header."],
         ['NULL MX', 'a domain that accepts no mail (MX 0 .) should have v=spf1 -all and DMARC p=reject; the other checks don\'t apply']]],
+    // The sixth entry: the grading rubric, the same as GRADE_GRADES in worker.js, the /grade page and docs/handbook.md.
+    grade: ['grade <domain>', "a domain's report card, graded A to F: DNSSEC, an AAAA record (IPv6), CAA and an HTTPS record from Cloudflare's resolver; the mail check's grade and its main findings; the registration's expiry and transfer lock, from the registry over RDAP; and the website, from one HEAD request to https://<domain>/ (HSTS, CSP, X-Content-Type-Options, frame protection, Referrer-Policy) and one to http://<domain>/ (the redirect to HTTPS). Redirects are followed only within the domain. A 403, a bot challenge or a timeout is \"couldn't check\", never a FAIL. Each line is OK, WARN, FAIL or INFO, with a fix under every problem. Cached for five minutes.",
+      ['grade github.com', 'grade cloudflare.com', 'grade example.com'], ['mail', 'dig', 'whois', 'copy'], ['/grade/github.com', '/grade/github.com?format=text', '/badge/github.com.json'],
+      [['GRADE', 'A: no FAIL and no WARN'], ['', 'B: no FAIL, one to three WARN'], ['', 'C: one FAIL, or four or more WARN'], ['', 'D: two FAIL'],
+        ['', 'F: three or more FAIL, an expired registration, or broken DNSSEC (validating resolvers refuse the domain)'], ['', "INFO lines, and parts that couldn't be checked, never count."],
+        ['FAIL', 'broken DNSSEC; a mail grade of C or worse; an expired or lapsing registration; https:// redirecting to plain http://'],
+        ['WARN', 'no DNSSEC; no AAAA record; no CAA record; a mail grade of B; expiry within 30 days; no transfer lock; http:// that doesn\'t redirect to HTTPS; HSTS missing or under 180 days; no CSP, or one that lets any inline script or any host run; no nosniff; no frame protection; Referrer-Policy unsafe-url or no-referrer-when-downgrade'],
+        ['INFO', "no HTTPS record; no Referrer-Policy (browsers default to strict-origin-when-cross-origin); anything that couldn't be checked"],
+        ['BADGE', "copy badge copies Markdown for a README badge that shields.io draws from /badge/<domain>.json, so your readers' browsers never contact ipterm. /badge/<domain>.svg is the same badge served by ipterm itself, which each reader's browser fetches from here (unless a proxy like GitHub's sits in between). Both are cached for an hour."],
+        ['CERTS', "certificates aren't checked: ipterm's server never sees them."]]],
     whois: ['whois <ip | ASN | domain>', 'the registry record. For addresses and networks: owner, address block and abuse contact. For domains: registrar, registration and expiry dates, status and name servers. Straight from the registries over RDAP.',
       ['whois example.com', 'whois 8.8.8.8', 'whois AS13335'], ['lookup', 'asn', 'dig'], ['/whois/example.com', '/whois/8.8.8.8', '/whois/example.com?format=text']],
     asn: ['asn <number>', "an autonomous system: a network such as an internet provider, a cloud or a large company. Shows its holder and registry, how many IPv4 and IPv6 prefixes it announces, largest first, and its main upstreams: the networks RIPEstat sees just before it in AS paths, usually its transit providers. The largest transit networks, with thousands of neighbours, get no upstream list.",
@@ -2096,8 +2198,8 @@
     traceroute: ['traceroute', "not possible from a browser: tracing a route needs raw ICMP or UDP packets. ping times the connection to ipterm's edge instead.", ['ping'], ['ping', 'asn']],
     share: ['share', "shares a link to the current result: the share sheet on phones, the clipboard elsewhere. Every lookup has its own page, so the link opens the same result. After whoami or a port check it shares the page itself (/ or /port/<n>), which shows each visitor their own result (check yours), never your address. After leaktest it shares your grade's link, /leaktest/r/<code>, which holds only the grade and which checks passed or leaked (no IP address, provider, location or resolver), or /leaktest when the run has no grade. Every result's header line has the same [share] button, and [copy] and [md] beside it; [md] leaves your address, provider and location out of your own results (see copy).",
       ['share'], ['copy', 'leaktest']],
-    copy: ['copy [md | link]', "copies the current result's main value: the IP address, the domain, the range or the AS number. copy md copies the whole result as a Markdown code block that starts with the command and ends with its link, for GitHub issues, Discord or Stack Overflow. For whoami, leaktest and port results, which are about you, it leaves out your address and everything that names or places you: your provider and the other networks (AS numbers too), your city, region and country, your time zones and the data center. Lines that hold only those are left out, and elsewhere they read [hidden]. After a second leaktest, the before → after lines show only each run's OK, LEAK or INFO. Other lookups (lookup 8.8.8.8, whois, dig) are copied whole. copy link copies the link. The sponsored line is never copied.",
-      ['copy', 'copy md', 'copy link'], ['share']],
+    copy: ['copy [md | link | badge]', "copies the current result's main value: the IP address, the domain, the range or the AS number. After grade, copy badge copies the Markdown for a README badge. copy md copies the whole result as a Markdown code block that starts with the command and ends with its link, for GitHub issues, Discord or Stack Overflow. For whoami, leaktest and port results, which are about you, it leaves out your address and everything that names or places you: your provider and the other networks (AS numbers too), your city, region and country, your time zones and the data center. Lines that hold only those are left out, and elsewhere they read [hidden]. After a second leaktest, the before → after lines show only each run's OK, LEAK or INFO. Other lookups (lookup 8.8.8.8, whois, dig) are copied whole. copy link copies the link. The sponsored line is never copied.",
+      ['copy', 'copy md', 'copy link', 'copy badge'], ['share', 'grade']],
     history: ['history [clear | off | on]', "lists the commands you ran, numbered (click one to run it again). They are saved in this browser's local storage, the newest 200 and never their results, so they are still there after a reload; nothing is sent anywhere. history clear deletes them, history off stops saving them (and deletes them) until history on. Up and Down recall them at the prompt either way, Ctrl+R searches them, Tab completes from them, !! runs the last one again and !<n> runs number n.",
       ['history', 'history clear', 'history off', 'history on'], ['keys', 'privacy']],
     keys: ['keys', "the keyboard shortcuts. Tab completes a command, a record type after dig <name>, a theme, or an address, domain, range or AS number from your history; when several match, Tab fills in what they share and then steps through them. On an empty prompt Tab moves focus on, as on any page. Ctrl+R searches your history as you type (Ctrl+R again for an older match, Enter runs it, Esc gives your line back). !! is the previous command and !<n> number n in history, also inside a line. Up and Down step through history; Ctrl+L clears the screen.",
@@ -2117,7 +2219,7 @@
   const guideLink = slug => { const g = GUIDES.find(x => x[0] === slug), a = el('a', 'cmd', g ? g[1] : slug); a.href = '/guides/' + slug; return a; };
   // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup),
   // unless the caller names one to prefer ("mal gmail.com" -> mail, not man).
-  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'lookup', 'nslookup', 'asn', 'route', 'port', 'ping', 'traceroute', 'dmarc',
+  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'grade', 'lookup', 'nslookup', 'asn', 'route', 'port', 'ping', 'traceroute', 'dmarc',
     'share', 'copy', 'privacy', 'clear', 'history', 'keys', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
   function osa(a, b) {
@@ -2414,7 +2516,7 @@
         body.push('', ...rows.map(x => (x ? x[0].padEnd(w) + '  ' + x[1] : '')), '');
       } else if (n.classList.contains('head')) {   // a section's own header, like the routing under a cidr result
         body.push('', [...n.querySelectorAll('.hip, .tag')].map(t => t.textContent).join(' · '));
-      } else if (n.classList.contains('ln') && !['sponsor', 'next', 'run-yours'].some(c => n.classList.contains(c))) {
+      } else if (n.classList.contains('ln') && !['sponsor', 'next', 'run-yours', 'badge-snip'].some(c => n.classList.contains(c))) {
         const t = textOf(n);
         if (t && !NOT_RESULT.test(t)) body.push(t);
       }
@@ -2444,9 +2546,16 @@
   }
   function copy(arg) {
     const a = String(arg || '').toLowerCase();
-    if (a && !/^(--?)?(md|markdown|link|url)$/.test(a)) return line('usage: copy   copy md   copy link', 'warn');
+    if (a && !/^(--?)?(md|markdown|link|url|badge)$/.test(a)) return line('usage: copy   copy md   copy link   copy badge', 'warn');
+    if (/badge/.test(a)) return copyBadge();
     if (!current) return line('Nothing to copy: run whoami or a lookup first.', 'warn');
     return /md|markdown/.test(a) ? copyMd(current) : a ? copyLink(current) : copyValue(current);
+  }
+  // copy badge: the shields.io badge's Markdown for the current report card (grade <domain>).
+  async function copyBadge() {
+    if (!current || !current.badge) return line('copy badge copies a README badge after a report card: run grade <domain> first, e.g. grade github.com', 'warn');
+    const ok = await toClipboard(current.badge);
+    line(ok ? 'copied the badge Markdown: paste it into your README' : 'The clipboard is blocked here, so select the Markdown above and copy it by hand.', ok ? 'sys' : 'warn');
   }
   function share() {
     // With no result on screen (a tool's page, the API reference) the page's own link is shared. After leaktest it
@@ -2457,7 +2566,7 @@
 
   async function privacy() {
     await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
-      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, and a mail check also fetches the domain\'s own MTA-STS policy file. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. Its share link holds only the grade and which checks passed, never your IP or location. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.',
+      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, a mail check also fetches the domain\'s own MTA-STS policy file, and a report card (grade) asks the domain\'s own website for its headers (from ipterm\'s server, never from your browser). Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. Its share link holds only the grade and which checks passed, never your IP or location. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.',
       'The commands you type are saved in your own browser (the newest 200, never their results) and never leave it: history clear deletes them, history off stops saving.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
     const d = el('div', 'ln sys'); const a = el('a', 'cmd', 'read the full privacy policy ↗'); a.href = '/privacy';
@@ -2488,6 +2597,7 @@
       [curlLine('/route/1.1.1.0/24'), 'routing as JSON: origin network, RPKI, visibility, AS paths (a prefix or an address)'],
       [curlLine('/dns/example.com'), 'DNS records as JSON (add /MX for one type)'],
       [curlLine('/mail/gmail.com'), 'email security check (SPF, DMARC, DKIM, MTA-STS) and its grade as JSON'],
+      [curlLine('/grade/github.com'), 'domain report card as JSON, graded A to F; /badge/github.com.json is its shields.io badge'],
       [curlLine('/port/22', '-4'), 'is TCP port 22 open on your own IP? (JSON; -4 tests IPv4)'],
       [curlLine('/leaktest/r/1bjp'), 'a leak test result someone shared, as JSON: the grade, whether a VPN was on, each check'],
       [curlLine('/8.8.8.8?format=text'), 'any lookup as aligned text lines instead of JSON'],
@@ -2525,7 +2635,7 @@
     out.appendChild(d); scroll();
   }
 
-  const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'route', 'dig', 'mail', 'lookup', 'asn', 'port']);
+  const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'route', 'dig', 'mail', 'grade', 'lookup', 'asn', 'port']);
   // save: false for what the page runs by itself (a tool page's command, Back and Forward), which isn't saved.
   async function run(raw, save = true) {
     let cmd = raw.trim(); echo(raw);
@@ -2560,6 +2670,9 @@
         if (!args.length) { await toolIntro('mail'); return next(['man mail', 'man mail', 'the checks, and how the grade works']); }
         // `dkim example.com selector1` names the selector without --dkim
         return mail(lc === 'dkim' && args[1] && !/^-/.test(args[1]) ? [args[0], '--dkim', args[1]] : args);
+      case 'grade':
+        if (!args.length) { await toolIntro('grade'); return next(['man grade', 'man grade', 'the checks, how the grade works, and the badge']); }
+        return grade(args);
       case 'lookup': return args[0] ? lookup(args[0]) : line('usage: lookup <ip, domain or ASN>   example: lookup 8.8.8.8', 'warn');
       case 'asn': return args[0] ? asn(args[0]) : line('usage: asn <number>   example: asn AS13335', 'warn');
       case 'route': return route(args.join(' '));
@@ -2597,7 +2710,7 @@
       case 'about':
         return lines([
           'ipterm shows who operates an IP address or network and roughly where it sits.',
-          "Your own address comes from Cloudflare's edge data. Other addresses come from IPinfo. Networks come from RIPEstat. Registry records (whois) come from the regional internet registries, and for domains from the domain's registry and registrar, via RDAP. DNS answers come from Cloudflare's public resolver (1.1.1.1), and so do mail checks, apart from the MTA-STS policy file, which comes from the domain's own server.",
+          "Your own address comes from Cloudflare's edge data. Other addresses come from IPinfo. Networks come from RIPEstat. Registry records (whois) come from the regional internet registries, and for domains from the domain's registry and registrar, via RDAP. DNS answers come from Cloudflare's public resolver (1.1.1.1), and so do mail checks, apart from the MTA-STS policy file, which comes from the domain's own server. A report card (grade) also reads the headers of the domain's own website.",
           "IP location is approximate. It usually points at the ISP's routing hub, not a street address.",
           'The map shows that uncertainty as lit dots. Click a map to switch between world view and zoomed in.',
           'Map data: Natural Earth (public domain).',
@@ -2656,8 +2769,8 @@
      Enter runs it, an arrow key or Tab keeps it for editing, Esc gives your line back. !! is the previous
      command and !<n> the nth in `history`, as in bash. */
   const COMMANDS = [...new Set([...HELP.map(r => r[0].split(' ')[0]).filter(w => /^[a-z]/.test(w)), 'traceroute'])];
-  const VALUE_ARGS = new Set(['lookup', 'whois', 'dig', 'mail', 'asn', 'cidr', 'route', 'ip', 'traceroute']);
-  const WORD_ARGS = { theme: () => THEMES, crt: () => ['on', 'off'], history: () => ['clear', 'off', 'on'], copy: () => ['md', 'link'],
+  const VALUE_ARGS = new Set(['lookup', 'whois', 'dig', 'mail', 'grade', 'asn', 'cidr', 'route', 'ip', 'traceroute']);
+  const WORD_ARGS = { theme: () => THEMES, crt: () => ['on', 'off'], history: () => ['clear', 'off', 'on'], copy: () => ['md', 'link', 'badge'],
     man: () => COMMANDS, help: () => COMMANDS, port: () => (PORTSLIB ? PORTSLIB.list().map(String) : []) };
   const hint = el('span', 'hint'); hint.hidden = true; hint.setAttribute('aria-hidden', 'true'); form.appendChild(hint);
   const showHint = t => { hint.textContent = t; hint.hidden = false; };
@@ -2830,7 +2943,7 @@
     const stat = document.getElementById('static');
     // The /api page's plain-text reference goes too: the terminal prints it with links (`api`).
     if (stat && (selfP || (init && (init.kind === 'notfound' || init.kind === 'leakshare')))) stat.remove();
-    else if (stat) stat.querySelectorAll('.head, dl, .api-ref').forEach(n => n.remove());
+    else if (stat) stat.querySelectorAll('.head, dl, .api-ref, .badge-ref').forEach(n => n.remove());   // the report card prints its own badge Markdown
     fast = hold = !!selfP;                                // swap the server's copy for the terminal's in one frame
     await lines(['ipterm 0.2 · IP address lookup', 'type help for commands, or enter any IP address, domain or ASN'], 'sys');
 
@@ -2848,7 +2961,7 @@
     }
     if (init && init.kind === 'tool' && (TOOL_INTRO[init.tool] || ['leaktest', 'port', 'api'].includes(init.tool))) {
       setLive(true);
-      const cmd = running = { whois: 'whois', dns: 'dig', mail: 'mail', cidr: 'cidr', leaktest: 'leaktest', port: 'port', api: 'api' }[init.tool];
+      const cmd = running = { whois: 'whois', dns: 'dig', mail: 'mail', grade: 'grade', cidr: 'cidr', leaktest: 'leaktest', port: 'port', api: 'api' }[init.tool];
       const mark = out.lastChild;
       navPush = false;
       try { await run(cmd, false); } finally { navPush = true; }
@@ -2868,18 +2981,19 @@
       flushNext();
       return focusInput();
     }
-    if (init && ['ip', 'asn', 'whois', 'dns', 'mail', 'cidr'].includes(init.kind) && init.query) {
+    if (init && ['ip', 'asn', 'whois', 'dns', 'mail', 'grade', 'cidr'].includes(init.kind) && init.query) {
       setLive(true);
       const mailCmd = ['mail', init.query, ...(init.dkim ? ['--dkim', init.dkim] : [])];
       const cmd = init.kind === 'cidr' ? 'cidr ' + init.query : init.kind === 'dns' ? 'dig ' + init.query + (init.qtype && init.qtype !== 'PTR' ? ' ' + init.qtype : '')
-        : init.kind === 'mail' ? mailCmd.join(' ') : (init.kind === 'asn' ? 'asn ' : init.kind === 'whois' ? 'whois ' : 'lookup ') + init.query;
+        : init.kind === 'mail' ? mailCmd.join(' ') : (init.kind === 'asn' ? 'asn ' : init.kind === 'whois' ? 'whois ' : init.kind === 'grade' ? 'grade ' : 'lookup ') + init.query;
       running = cmd;
       echo(cmd); addHist(cmd);
       const mark = out.lastChild;
       navPush = false;
       try {
         await (init.kind === 'asn' ? asn(init.query, init) : init.kind === 'whois' ? whois(init.query, init) : init.kind === 'dns' ? dns(init.query, init.qtype, init)
-          : init.kind === 'mail' ? mail(mailCmd.slice(1), init) : init.kind === 'cidr' ? cidr(init.query, init) : lookup(init.query, init));
+          : init.kind === 'mail' ? mail(mailCmd.slice(1), init) : init.kind === 'grade' ? grade([init.query], init)
+          : init.kind === 'cidr' ? cidr(init.query, init) : lookup(init.query, init));
       }
       finally { navPush = true; }
       if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
