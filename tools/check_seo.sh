@@ -1,0 +1,91 @@
+#!/bin/sh
+# Checks the search-engine groundwork: router-address typos redirect (301) to the exact address in
+# SITEMAP_PATHS and nowhere else, hostile paths never redirect off the list, pages for non-public addresses
+# are noindex unless curated, and the sitemap index and its files are there with the expected URL counts.
+# Run against `npx wrangler dev` (default) or the live site:
+#   sh tools/check_seo.sh
+#   sh tools/check_seo.sh https://ipterm.net
+#   ROUTES=1 sh tools/check_seo.sh      # also the /cidr routing section (asks RIPEstat; no IPinfo)
+# Nothing here makes an IPinfo lookup: every address is non-public, and the sitemap is generated in the Worker.
+# (Git Bash on Windows: run with MSYS_NO_PATHCONV=1 so paths like /192.168.l.l aren't rewritten.)
+B=${1:-http://127.0.0.1:8787}
+UA='Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+pass=0 fail=0
+ok() { pass=$((pass + 1)); printf 'PASS  %s\n' "$1"; }
+no() { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; }
+
+# path expected-status expected-location ('' = no Location header)
+redir() {
+  out=$(curl -s -o /dev/null -A "$UA" -w '%{http_code} %header{location}' "$B$1")
+  code=${out%% *}; loc=${out#* }; [ "$loc" = "$out" ] && loc=''
+  if [ "$code" = "$2" ] && [ "$loc" = "$3" ]; then ok "$1 -> $code ${3:-(no redirect)}"; else no "$1 -> $code [$loc], expected $2 [$3]"; fi
+}
+echo '-- typos of curated router addresses: 301 to the address in the list'
+redir '/192.168.l.l' 301 /192.168.1.1
+redir '/192.168.1.l' 301 /192.168.1.1
+redir '/192,168,1,1' 301 /192.168.1.1
+redir '/192.168.0.l' 301 /192.168.0.1
+redir '/10.0.0.l' 301 /10.0.0.1
+redir '/l92.168.1.1' 301 /192.168.1.1
+redir '/192.168.o.1' 301 /192.168.0.1
+redir '/192.168.001.001' 301 /192.168.1.1
+redir '/192.168.1.1.' 301 /192.168.1.1
+redir '/192%20168%201%201' 301 /192.168.1.1
+redir '/192;168;1;1' 301 /192.168.1.1
+redir '/192.168.l.254' 301 /192.168.1.254
+redir '/10.0.0.l38' 301 /10.0.0.138
+redir '/l.l.l.l' 301 /1.1.1.1
+redir '/192.168.l.l?next=//evil.example' 301 /192.168.1.1
+echo '-- valid addresses: no redirect'
+redir '/192.168.1.1' 200 ''
+redir '/10.0.0.1' 200 ''
+redir '/192.168.5.5' 200 ''
+echo '-- typos of addresses that are not curated: the 404 page with a "did you mean", no redirect'
+redir '/192.168.5.l' 404 ''
+redir '/10.0.0.13l' 404 ''
+echo '-- hostile paths: never a redirect off the list'
+for p in '//evil.example' '/%2F%2Fevil.example' '/%5Cevil.example' '/192.168.l.l%0d%0aSet-Cookie:x=1' \
+  '/192.168.l.l%2F..%2F..%2Fevil.example' '/192.168.1.1@evil.example' '/javascript:alert(1)' '/http://192.168.l.l' \
+  '/192.168.l.l%00' '/%E2%80%AE192.168.l.l' '/1.1.1.1.1' '/192.168.256.1' '/192.168.1.l/admin'; do
+  loc=$(curl -s -o /dev/null -A "$UA" -w '%header{location}' "$B$p")
+  case "$loc" in ''|/dns/*) ok "$p -> ${loc:-(no redirect)}" ;; *) no "$p -> $loc" ;; esac
+done
+
+# path: 1 if the page must carry noindex, 0 if it must not
+robots() {
+  meta=$(curl -s -A "$UA" "$B$1" | grep -o '<meta name="robots" content="[^"]*">')
+  case "$2$meta" in 1*noindex*|0) ok "$1 ${meta:-(indexable)}" ;; *) no "$1 ${meta:-(indexable)}, expected $([ "$2" = 1 ] && echo noindex || echo indexable)" ;; esac
+}
+echo '-- noindex for non-public addresses outside SITEMAP_PATHS'
+robots /192.168.5.5 1
+robots /10.20.30.40 1
+robots /100.64.1.1 1
+robots /203.0.113.5 1
+robots /fe80::1 1
+robots /192.168.1.1 0
+robots /10.0.0.1 0
+robots /127.0.0.1 0
+robots /169.254.1.1 0
+
+echo '-- sitemap index and files'
+idx=$(curl -s "$B/sitemap.xml")
+case "$idx" in *'<sitemapindex'*) ok "/sitemap.xml is a sitemap index" ;; *) no "/sitemap.xml is not a sitemap index" ;; esac
+for f in $(printf '%s\n' "$idx" | grep -o '<loc>[^<]*' | sed 's/<loc>//; s#^[a-z]*://[^/]*##'); do
+  body=$(curl -s "$B$f"); n=$(printf '%s\n' "$body" | grep -c '<url>'); u=$(printf '%s\n' "$body" | grep -o '<loc>[^<]*' | sort -u | wc -l | tr -d ' ')
+  if [ "$n" -gt 0 ] && [ "$n" -le 50000 ] && [ "$n" = "$u" ]; then ok "$f: $n URLs, all different"; else no "$f: $n URLs ($u different)"; fi
+  case "$f" in /sitemap-asn-*) printf '%s\n' "$body" | grep -q '<loc>[^<]*/AS[0-9]*</loc>' && ok "$f lists ASN pages" || no "$f lists no ASN pages" ;; esac
+done
+printf '%s\n' "$idx" | grep -q 'sitemap-asn-1.xml' && ok 'the index lists sitemap-asn-1.xml' || no 'the index lists no ASN sitemap'
+curl -s "$B/sitemap-pages.xml" | grep -q '<loc>[a-z]*://[^/]*/AS[0-9]*</loc>' && no 'sitemap-pages.xml still lists ASN pages' || ok 'sitemap-pages.xml leaves ASN pages to the ASN files'
+
+if [ -n "$ROUTES" ]; then
+  echo '-- routing on /cidr pages (RIPEstat)'
+  for p in /cidr/1.1.1.0/24 /cidr/8.8.8.0/24; do
+    curl -s -A "$UA" "$B$p" | grep -q 'is announced in BGP by AS' && ok "$p has a routing section" || no "$p has no routing section"
+  done
+  curl -s -A curl/8 "$B/route/8.8.8.8" | grep -q '"prefix": "8.8.8.0/24"' && ok '/route/8.8.8.8 is routed in 8.8.8.0/24' || no '/route/8.8.8.8'
+  curl -s -A "$UA" "$B/cidr/10.0.0.0/22" | grep -q 'announced in BGP' && no '/cidr/10.0.0.0/22 has a routing section' || ok '/cidr/10.0.0.0/22 (private) has no routing section'
+  code=$(curl -s -o /dev/null -w '%{http_code}' -A curl/8 "$B/route/192.168.1.0/24"); [ "$code" = 400 ] && ok '/route/192.168.1.0/24 is refused (400)' || no "/route/192.168.1.0/24 -> $code"
+fi
+echo "$pass passed, $fail failed"
+[ "$fail" = 0 ]

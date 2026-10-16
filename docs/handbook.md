@@ -11,8 +11,9 @@ ipterm is a terminal-style IP lookup site that runs on a single Cloudflare Worke
 - Fonts: `public/fonts/` (self-hosted, SIL Open Font License, licenses included)
 - The API, routing and security headers: `src/worker.js`
 - The `curl ipterm.net/me` card: `src/me.js`, with its world map in `src/landmask.js` (generated, see "The map")
+- The ASN sitemap's list of networks: `src/asn-sitemap.js` (generated, see "Shareable pages and search")
 - Settings: `wrangler.toml`
-- Scripts: `tools/` (deploy, land mask, guides, link-preview checks)
+- Scripts: `tools/` (deploy, land mask, guides, ASN sitemap, link-preview and SEO checks)
 - The DNS leak test's own DNS server: `dnsleak-server/` (runs on a small VPS outside Cloudflare; see
   [dnsleak-server/README.md](../dnsleak-server/README.md))
 
@@ -202,6 +203,9 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | VPN / proxy / Tor second opinion, VPN service name (optional) | proxycheck.io, with the `PROXYCHECK_KEY` secret | Free, 1,000 a day; falls back to IPinfo alone |
 | Reverse DNS (hostname) | Cloudflare DNS-over-HTTPS | Free |
 | Mail checks: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI | Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file | Free |
+| Networks (ASNs): holder, prefixes, main upstreams | RIPEstat (`as-overview`, `announced-prefixes`, `asn-neighbours`) | Free, no key |
+| Routing of a prefix: route, origin, RPKI, visibility, AS paths | RIPEstat (`prefix-overview`, `routing-status`, `rpki-validation`, `bgp-state`) | Free, no key |
+| The ASN sitemap's ranking (offline, `tools/build_asn_sitemap.mjs`) | RIPE NCC RIS table dump and AS names list (or CAIDA's prefix-to-AS file) | Free, run by hand |
 | Which DNS resolvers a visitor uses (leaktest) | ipterm's own DNS server for `dl.ipterm.net` (`dnsleak-server/`), plus IPinfo Lite for the resolvers' networks | The VPS, about $4 to $6 a month |
 
 Lookups of other IPs are cached at the edge for six hours.
@@ -211,7 +215,7 @@ Lookups of other IPs are cached at the edge for six hours.
 ipterm is MIT-licensed, so you can run your own copy. Follow "Deploy" above, then:
 
 1. In `wrangler.toml`, set `SELF_HOSTED = "true"`. Every page then carries `noindex` (an `X-Robots-Tag` header on
-   everything the Worker answers, and a robots meta tag in the pages), `/sitemap.xml` is empty, `public/sponsors.json`
+   everything the Worker answers, and a robots meta tag in the pages), `/sitemap.xml` and the other sitemap files are empty, `public/sponsors.json`
    is ignored so no sponsored line appears, and the footer, `about` and `/help` say the site is a copy of ipterm,
    not ipterm.net. Copies shouldn't compete with ipterm.net in search or carry its affiliate links.
 2. Set `SOURCE_URL` to your fork (or leave it empty), so the footer links the code you actually run.
@@ -260,7 +264,8 @@ curl https://your-domain              # your IP as plain text
 curl https://your-domain/me           # your IP, network and place as a card with a world map
 curl https://your-domain/json         # your details as JSON
 curl https://your-domain/8.8.8.8      # any IP as JSON
-curl https://your-domain/AS13335      # any network (ASN) as JSON
+curl https://your-domain/AS13335      # any network (ASN) as JSON, with its main upstreams
+curl https://your-domain/route/1.1.1.0/24  # how a prefix (or an address) is routed: origin, RPKI, AS paths
 curl https://your-domain/mail/gmail.com  # a domain's email security (SPF, DMARC, DKIM), graded
 curl -4 https://your-domain/port/22   # is TCP port 22 open on your own IP? (see "Port checker")
 curl https://your-domain/help         # the command-line reference as plain text
@@ -310,7 +315,7 @@ The map's location is Cloudflare's guess for the address, usually the provider's
 an `x-attribution` response header instead (it is in `/help`, `/api`, the OpenAPI file and `llms.txt` too).
 
 **Aligned text instead of JSON:** add `?format=text` to `/`, `/json`, `/<ip>`, `/AS<number>`, `/dns/...`,
-`/mail/...`, `/whois/...`, `/cidr/...` (and their `/api/...` forms) for key/value lines like the terminal draws.
+`/mail/...`, `/whois/...`, `/cidr/...`, `/route/...` (and their `/api/...` forms) for key/value lines like the terminal draws.
 Browsers get the text too. Results that include IPinfo data end with `IP address data powered by IPinfo
 (https://ipinfo.io)`, as IPinfo's free-data terms ask. JSON stays the default for command-line clients,
 and `curl ipterm.net` still prints the bare address. Shells such as zsh treat `?` as a wildcard, so the
@@ -351,7 +356,49 @@ lookup suggests `retry`). Commands typed while another runs wait their turn, as 
 network and broadcast addresses, netmask, wildcard, usable host range and count, a bit diagram, and how the
 block splits or combines. Pages live at `/cidr/<ip>/<prefix>` (canonicalized to the network address) and the
 cheat sheet is at `/guides/subnet-cheat-sheet`. The math is in `public/cidr.js`, shared by the page and the
-Worker, and makes no outside calls.
+Worker, and makes no outside calls: the JSON and `?format=text` answers are the calculation alone. The page for a
+public range adds how it is routed (see "Routing" below), and so does `cidr` in the terminal for a public range.
+
+### Routing (route)
+
+`route 1.1.1.0/24` or `route 8.8.8.8` in the terminal, `curl …/route/1.1.1.0/24` for JSON (`?format=text` for aligned
+lines), and a section on the `/cidr/<prefix>` page of every public range. Browsers that open `/route/...` are sent to
+that page (an address goes to the page of the route it is in). It shows, from [RIPEstat](https://stat.ripe.net/):
+
+- **the route**: the prefix itself when it is announced, or the less specific route it is part of (`8.8.0.0/16` is
+  routed as part of `8.0.0.0/12`), or, for a range that isn't announced as a whole, up to 8 of the more specific
+  routes inside it;
+- **the origin**: the network (AS) that announces the route, with its holder's name, and up to four when several do;
+- **RPKI**: whether a ROA allows that origin to announce the route (valid; invalid because of the origin or the
+  length; or not found, when no ROA covers it), for up to two origins;
+- **visibility**: how many RIS peers see the route, and when it was first seen;
+- **upstreams and AS paths**: the networks just before the origin in the routes the collectors see, and two or
+  three sample paths, the shortest through each of the most common of those networks.
+
+The data comes from five RIPEstat calls at most, cached for six hours (ten minutes when a part didn't answer):
+
+| Call | For | Limits |
+| --- | --- | --- |
+| `prefix-overview` | the route and its origins | 6 seconds, one retry, 200 KB |
+| `routing-status` | visibility, first seen | one try, 4 seconds (it is slow for big aggregates), 100 KB |
+| `rpki-validation` | each origin (up to two) | one try, 5 seconds, 50 KB |
+| `bgp-state` | AS paths | one try, 5 seconds, 400 KB, three collectors only: `rrcs=00,01,11` |
+
+The AS paths come from three RIS collectors: RRC00 (Amsterdam, multihop, with peers worldwide), RRC01 (London) and
+RRC11 (New York), about 100 routes for a typical prefix (about 12 KB). The full table from every collector would
+run to hundreds of kilobytes for a busy prefix, and parsing that would use up the Worker's CPU time. RIPEstat's
+`looking-glass` call ignores `rrcs=` and always answers from every collector, so it isn't used; `bgp-state` takes it.
+Only public ranges between /8 and /32 (IPv6 /16 to /128) are looked up; anything else is refused without a call.
+A lookup never uses IPinfo or proxycheck.io, so it can't spend their budgets; it counts as one of the visitor's 30
+lookups a minute when it isn't cached, and the `/cidr` page shows the calculation with a note instead when a visitor
+is over that limit or RIPEstat doesn't answer.
+
+**ASN pages** list the network's main upstreams: the five networks RIPEstat's `asn-neighbours` sees just before it
+in AS paths ("left" neighbours), by how many RIS peers see each, with their names (`as-overview`, in parallel).
+Those are usually its transit providers. A large transit network's neighbour list runs to thousands of entries and
+hundreds of kilobytes, and its "left" neighbours are customers and peers rather than upstreams, so a list over
+300 KB isn't read (`UPSTREAM_MAX`), and the page says so. If RIPEstat doesn't answer for the upstreams, the page goes
+out without them and is cached for ten minutes instead of six hours.
 
 ### DNS tools
 
@@ -621,7 +668,16 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   403). Both are matched by name (`PREVIEW_UA` and `CRAWLER_UA` in `src/worker.js`); `?format=json`
   and `?format=text` still win, and curl, scripts and other clients still get JSON.
 - Private addresses like `/192.168.1.1` get a page explaining the range and how to reach a router,
-  a popular search topic, without any upstream lookup.
+  a popular search topic, without any upstream lookup. Only the router and well-known addresses in `SITEMAP_PATHS`
+  (`/192.168.1.1`, `/10.0.0.1`, `/127.0.0.1` ...) are indexed; the page of any other non-public address (private,
+  CGNAT, loopback, link-local, documentation, IPv6 unique local ...) carries `<meta name="robots" content="noindex,
+  follow">`, since the private space is millions of near-identical pages (`curatedIps()` in `src/worker.js`).
+- Router-address typos get a 301 to the exact address in that list: `/192.168.l.l`, `/192.168.1.l`, `/192,168,1,1`,
+  `/192.168.0.l`, `/10.0.0.l`, `/l92.168.1.1`, `/192.168.o.1`, `/192.168.001.001`, `/192;168;1;1`, `/192.168.1.1.`
+  (l, i, I, `|` and `!` read as 1, o and O as 0, commas, semicolons, underscores and spaces as dots). The Location is
+  always the list's own string, never built from the request, so it can't redirect anywhere else, and a query string
+  is dropped (`routerTypo()`). A typo of an address that isn't in the list (`/192.168.5.l`) gets the 404 page with
+  "did you mean lookup 192.168.5.1", not a redirect. `tools/check_seo.sh` tests valid, typo and hostile paths.
 - `/whois`, `/dns`, `/mail` and `/cidr` on their own are landing pages for each tool (what it does, usage and
   example links), and typing `whois`, `dig`, `mail` or `cidr` with nothing after it shows the same thing.
   `/api` is the API docs page (the terminal runs `api`; the plain-text reference stays in the HTML for
@@ -632,10 +688,41 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   in the terminal instead of raw JSON. None of these pages are indexed by search engines.
 - Inside the terminal, every lookup updates the address bar, Back/Forward replay results, ASNs and
   prefixes are clickable, and the `share` command copies the current link. Prefixes on ASN pages
-  open the subnet calculator (`/cidr/<prefix>`), which makes no outside calls, so crawlers following
-  them don't spend the IPinfo budget.
-- `/robots.txt` and `/sitemap.xml` are generated. Add popular pages to `SITEMAP_PATHS` in
-  `src/worker.js`, then submit the sitemap in Google Search Console.
+  open the subnet calculator (`/cidr/<prefix>`), whose routing section asks RIPEstat only, and upstreams open their
+  own ASN pages (RIPEstat too), so crawlers following them never spend the IPinfo budget. Keep it that way: an ASN
+  page must not link to an IP lookup (`/<ip>`).
+- `/robots.txt` and the sitemaps are generated. `/sitemap.xml` is a sitemap index (submit that one in Google Search
+  Console and Bing Webmaster Tools) listing:
+
+  | File | What | URLs (October 2026) |
+  | --- | --- | --- |
+  | `/sitemap-pages.xml` | `SITEMAP_PATHS` in `src/worker.js`: the home page, tools, guides, popular ports, router and resolver addresses, subnet and routing examples, DNS, mail and whois pages | 90 |
+  | `/sitemap-asn-1.xml` | the 1,000 largest networks by announced IPv4 space | 1,000 |
+  | `/sitemap-asn-2.xml` | the rest of the 10,000 largest | 9,000 |
+
+  More ASN files, up to 40,000 URLs each (a sitemap file may hold 50,000), follow automatically if the list grows
+  (`ASN_TIERS`, `asnSitemapFiles()`). The tiers let Search Console show how each is indexed. The index gives each ASN
+  file a `<lastmod>`: the day the list was generated. Every file is checked against the sitemaps.org schemas.
+- **The ASN list** is `src/asn-sitemap.js`, generated by `tools/build_asn_sitemap.mjs` (`npm run asn-sitemap`) and
+  committed, since there is no build step. It ranks every origin AS in RIPE NCC's RIS table
+  (`riswhoisdump.IPv4.gz`, the data behind RIPEstat; `--caida` uses CAIDA's RouteViews prefix-to-AS file instead) by
+  the IPv4 addresses it announces, each counted once, from prefixes between /8 and /24 that at least 10 RIS peers see,
+  without non-public space or private and reserved AS numbers. Holder names come from RIPE NCC's AS names list
+  (`asn.txt`). Rerun it every few months and commit the result. In October 2026 the 10,000th network announced
+  8,448 addresses.
+- **Private individuals are left out of that list** (GDPR caution): many networks are registered to a person, and
+  the holder name is then the person's name. The rules are at the top of `tools/build_asn_sitemap.mjs`; in short, a
+  network is left out when it has no holder name or isn't in the names list; when the name shows a natural person
+  (sole proprietor, sole trader, individual or private entrepreneur, Einzelunternehmen, e.K., a patronymic such as
+  -ovich, or a PE / FOP / IP prefix before a person's name); when it is a partnership of named people (spolka jawna,
+  s.c., GbR, v.o.f.) with no other legal form; when "trading as" follows a person's name; when a common given name
+  is followed by another word and the name has no registered legal form (Inc, LLC, Ltd, GmbH, SA, BV, Oy ...) or
+  public body or institution (university, school, foundation, ministry, district ...); or, with no sign of an
+  organization at all, when the name is two to six plain words, the shape of a person's name. It errs on the side of
+  leaving a network out: some businesses that look like a person's name go too. In October 2026, 135 of the 10,135
+  largest networks were left out: 116 for those signs, 19 with no name or not in the names list. Their pages still
+  work; they just aren't in the sitemap. The list of what was left out is only printed (`--show-excluded`), never
+  saved to a file, so the repository doesn't collect those names.
 
 Network data comes from [RIPEstat](https://stat.ripe.net/) (free, no key). Results are cached for six hours.
 
@@ -649,8 +736,9 @@ Network data comes from [RIPEstat](https://stat.ripe.net/) (free, no key). Resul
   in the terminal.
 - **Share image:** `public/og.png` (1200×630) is used when any page is shared.
 - **Placeholders:** static pages use `%ORIGIN%`, which the Worker replaces with your site's address.
-- **Sitemap:** generated at `/sitemap.xml` from `SITEMAP_PATHS` in `src/worker.js` (guides, router addresses,
-  public DNS resolvers, major networks and the most searched port pages).
+- **Sitemap:** `/sitemap.xml` is an index of `/sitemap-pages.xml` (`SITEMAP_PATHS` in `src/worker.js`: guides,
+  router addresses, public DNS resolvers, the most searched port pages and more) and the ASN files
+  (`/sitemap-asn-<n>.xml`, from `src/asn-sitemap.js`). See "Shareable pages and search".
 
 ## Sponsored line (ads)
 
@@ -736,6 +824,24 @@ Object call, no rate-limiter call.
 **If you add a new static file** (an image, a script, like `cidr.js` was), add a `"!/<file>"` line to `run_worker_first`
 so it doesn't count against the limit. Watch usage under **Workers & Pages → ipterm → Metrics**.
 
+**What crawling the network pages costs.** The sitemap lists 10,000 ASN pages, each linking up to 30 prefixes to
+`/cidr` and up to 5 upstreams to other ASN pages. None of them ever reaches IPinfo or proxycheck.io. Measured under
+`wrangler dev` (subrequests by wrapping `fetch` and the Cache API; CPU time by running the Worker's own code in Node
+with RIPEstat's answers replayed, on a laptop, so treat it as an estimate):
+
+| Request | Subrequests (uncached / cached) | CPU time (uncached / cached) |
+| --- | --- | --- |
+| `/cidr/<public prefix>` page | 6 (4 RIPEstat, 2 cache) / 1 | about 1 ms (IPv6 about 2.4 ms) / 0.3 ms |
+| `/cidr/<private range>` page | 0 | under 0.5 ms |
+| `/AS<n>` page | 10 (3 RIPEstat, up to 5 names, 2 cache); 5 when the neighbour list is too large / 1 | 2 to 6 ms; 12 ms for AS13335, the largest prefix list (5,776 prefixes) / 0.3 ms |
+| `/sitemap-asn-2.xml` (9,000 URLs, 486 KB) | 0 | about 7 ms the first time in an isolate, then kept |
+
+Every one counts as one Worker request. An ASN page used to sort its prefixes with `localeCompare(..., { numeric:
+true })`, which builds a collator on every comparison: a quarter of a second of CPU for AS13335, far past the Workers
+limit. `largestFirst()` now sorts only the sizes it shows, on numeric keys. RIPEstat allows 8 concurrent requests
+from one address; one page makes at most 5 at once. Consider registering the `sourceapp=ipterm` identifier the
+Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a large crawl.
+
 ## Security
 
 | Protection | Where | How to change it |
@@ -749,6 +855,8 @@ so it doesn't count against the limit. Watch usage under **Workers & Pages → i
 | The mail check's one outside fetch, the MTA-STS policy, goes only to `https://mta-sts.<domain>/.well-known/mta-sts.txt` for a validated domain name: no redirects followed, 5-second limit, 64 KB cap. Policy lines, report addresses and logo links are checked before use (host names, plain emails, https URLs only) | `stsPolicy()`, `parseSts()`, `reportUris()`, `httpsUrl()` in `src/worker.js` | |
 | Cross-site browser access (CORS) off by default. Only the static `/openapi.json` and `/llms.txt` allow any origin | `PUBLIC_API` in `wrangler.toml`; `public/_headers` for the two documents | Set to `"true"` to offer a public browser API |
 | Private, loopback, CGNAT, multicast and documentation addresses rejected before any upstream call | `nonPublicReason()` in `src/worker.js` | |
+| Redirects for router-address typos take their Location from `SITEMAP_PATHS`, never from the request, so they can't be pointed anywhere else; the query string is dropped | `routerTypo()` in `src/worker.js`, tested by `tools/check_seo.sh` | |
+| RIPEstat answers are read with a size cap (a big network's answer can run to megabytes, which would use up the CPU limit), the AS paths come from three collectors only, and every value is checked before use (AS numbers, prefixes, dates) | `ripestat()`, `routeLookup()`, `upstreams()` in `src/worker.js` | |
 | Strict Content-Security-Policy (no inline scripts or styles; the only outside hosts are ipify, for the visitor's other IP version, and, once the DNS leak test is set up, `https://*.dl.ipterm.net` (the configured zone) for its lookups), nosniff, no framing, HSTS, no referrer, locked-down browser permissions | `secure()` and `cspFor()` in `src/worker.js` | Loosen the CSP if you add ads or analytics |
 | Only GET and HEAD accepted | `route()` in `src/worker.js` | |
 | IPinfo token kept server-side as a secret | `wrangler secret put` | |
@@ -792,6 +900,12 @@ your address as `127.0.0.1` locally, so it answers "not tested". `wrangler dev` 
 `CF-Connecting-IP` header through (Cloudflare's network replaces it), so sending your own public address
 in it exercises the whole check locally.
 
+Two scripts check a running copy (`wrangler dev` by default, or pass the site's address): `tools/check_previews.sh`
+(link previews and crawlers get HTML, curl gets JSON) and `tools/check_seo.sh` (typo redirects with valid, typo and
+hostile paths, noindex on non-public addresses, the sitemap index and its URL counts; `ROUTES=1` adds the routing
+section, which asks RIPEstat). Neither makes an IPinfo lookup. In Git Bash on Windows, run them with
+`MSYS_NO_PATHCONV=1` so paths like `/192.168.l.l` aren't rewritten.
+
 ## License
 
 The code is MIT-licensed (`LICENSE`). If you'd rather it name you, change "the ipterm authors" there. Other parts
@@ -805,3 +919,6 @@ IPinfo's data comes with its own attribution condition (see "Recommended: add a 
 - Bulk lookups.
 - IPv6 for the DNS leak test server (`DNSLEAK_NS_IPV6` and an AAAA record for `ns1.dl`), so resolvers that
   prefer IPv6 show their IPv6 addresses too.
+- `noindex` on the ASN pages of networks the sitemap leaves out as possible private individuals (the same
+  heuristic, run in the Worker on RIPEstat's holder name), so search engines that find them through links don't
+  index a person's name either.
