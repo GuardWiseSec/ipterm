@@ -369,9 +369,12 @@ one (`shareBar()` and `current` in `public/app.js`).
   tags, the table and the notes under it, then the permalink on the line after the fence, where it stays clickable.
   The fence is longer than any run of backticks in the result, so a TXT record can't end it early.
 - Nothing copied carries the sponsored line, the `next:` line, the map or buttons.
-- Results about the visitor's own connection (whoami, leaktest, a port check) never share their address. The link
-  is the page itself (`/`, `/leaktest`, `/port/<n>`), which shows each visitor their own result, so the share sheet
-  says "check yours". Their Markdown replaces the visitor's addresses with `[hidden]` and leaves out the rows that
+- Results about the visitor's own connection (whoami, leaktest, a port check) never share their address. After
+  whoami or a port check the link is the page itself (`/`, `/port/<n>`), which shows each visitor their own result,
+  so the share sheet says "check yours". After leaktest it is the grade's link (`/leaktest/r/<code>`, with the text
+  "my ipterm leak test grade: X"; see "Shared results"), or `/leaktest` with "check yours" when the run has no
+  grade. Their Markdown replaces the visitor's addresses with `[hidden]` (for leaktest also the DNS resolvers' and,
+  after a compare, the previous run's, whose lines the compare prints) and leaves out the rows that
   are the address in another form or point at it (`SELF_DROP`: hostname, the other IP version, postal code,
   coordinates, decimal, hex, binary, reverse-DNS zone). `copy` still copies your own IP after whoami: it goes to
   your own clipboard, not to anyone else.
@@ -407,7 +410,10 @@ search box on other sites (`goRoute()` in `src/worker.js`):
 | `someone@gmail.com`, `mailto:…`, `mail gmail.com --dkim google` | `/mail/gmail.com` (with `?dkim=`) |
 | `port 22`, `port:22`, `22/tcp` | `/port/22` (the page explains the port; nothing is checked) |
 | a terminal command: `dig gmail.com MX`, `whois AS13335`, `lookup 1.1.1.1` | its page |
-| a tool's name: `whois`, `dig`, `leaktest`, `port`, `help`; or nothing | `/whois`, `/dns`, `/leaktest`, `/port`, `/api`; `/` |
+| `route 1.1.1.0/24`, `bgp 8.8.8.8` (also `rpki`) | `/route/1.1.1.0/24`, `/route/8.8.8.8`: browsers go on to the `/cidr` page with the routing, `curl -L` gets the routing JSON. Space that isn't routed (`route 10.0.0.0/8`) gets its own `/cidr` or address page |
+| `leaktest --result 1bjp` | `/leaktest/r/1bjp` (only a valid code) |
+| a router address typo: `192.168.l.l`, `192,168,1,1`, `10.0.0.l` | the curated address's page, `/192.168.1.1`, as the same typo after the slash does (another address typo, like `10.0.0.13l`, is a 400) |
+| a tool's name: `whois`, `dig`, `leaktest`, `route`, `port`, `help`; or nothing | `/whois`, `/dns`, `/leaktest`, `/cidr`, `/port`, `/api`; `/` |
 
 Anything else is a 400: JSON for command-line clients, and for browsers a `noindex` page in the terminal's style
 with examples (a bare number is offered as both `asn AS<n>` and `port <n>`). `/go` is in `robots.txt`'s Disallow,

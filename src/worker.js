@@ -313,17 +313,20 @@ function routerTypo(bare) {
 /* ---------- address-bar search (/go) ----------
    GET /go?q=<anything> answers with a 302 to the page for what was typed: an IP address, an AS number, a
    domain or URL, a range (or an address and netmask), an email address (its mail check), port <n>, a
-   tool's name, or a terminal command such as `dig gmail.com MX` or `whois AS13335`. Browsers reach it from
-   the address bar through public/opensearch.xml, and wikis through the plain form on /api.
+   tool's name, a router address typo (192.168.l.l, as /192.168.l.l takes it), or a terminal command such as
+   `dig gmail.com MX`, `whois AS13335`, `route 1.1.1.0/24` or `leaktest --result 1bjp`. Browsers reach it
+   from the address bar through public/opensearch.xml, and wikis through the plain form on /api.
    The Location is put together only from values that were parsed and written out again (canonIp, "AS" and
-   a number, normalizeDomain, CIDR.calc, PORTS.parse, the DNS type list, dkimSelector), never from the
-   input itself, and goLocation() refuses anything but a plain path on this site, so /go can't send anyone
-   elsewhere: //evil.com is a 400 like any other input it can't read. Hostile inputs: tools/check_go.sh. */
+   a number, normalizeDomain, CIDR.calc, routeTarget, PORTS.parse, the DNS type list, dkimSelector, a decoded
+   leak code, a curated address from SITEMAP_PATHS), never from the input itself, and goLocation() refuses
+   anything but a plain path on this site, so /go can't send anyone elsewhere: //evil.com is a 400 like any
+   other input it can't read. /go itself makes no outside request. Hostile inputs: tools/check_go.sh. */
 const GO_TOOLS = {
   '': '/', whoami: '/', myip: '/', me: '/', ip: '/', ifconfig: '/', ipconfig: '/', lookup: '/',
   leaktest: '/leaktest', dnsleak: '/leaktest', vpntest: '/leaktest', whois: '/whois', rdap: '/whois', dig: '/dns', dns: '/dns',
   nslookup: '/dns', mail: '/mail', email: '/mail', spf: '/mail', dmarc: '/mail', dkim: '/mail', cidr: '/cidr', subnet: '/cidr',
-  ipcalc: '/cidr', port: '/port', ports: '/port', api: '/api', help: '/api', curl: '/api', privacy: '/privacy', guides: '/guides',
+  ipcalc: '/cidr', route: '/cidr', bgp: '/cidr', rpki: '/cidr', port: '/port', ports: '/port', api: '/api', help: '/api', curl: '/api',
+  privacy: '/privacy', guides: '/guides',
 };
 
 async function goRoute(io, html) {
@@ -362,6 +365,8 @@ function goTarget(raw) {
   // Control, zero-width and bidi characters never belong in a lookup.
   if (s.length > 300 || /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁩﻿]/.test(s)) return null;
   if (Object.hasOwn(GO_TOOLS, s.toLowerCase())) return GO_TOOLS[s.toLowerCase()];
+  const typo = routerTypo(s);                       // before the split: typoIp reads spaces as dots (192 168 1 1)
+  if (typo) return '/' + typo;
   const [w0, ...args] = s.split(' '), cmd = w0.toLowerCase();
   switch (cmd) {                                    // a terminal command
     case 'lookup': case 'ip': case 'geo': case 'iplookup': return args.length === 1 ? goValue(args[0]) : null;
@@ -370,7 +375,12 @@ function goTarget(raw) {
     case 'mail': case 'email': case 'spf': case 'dmarc': case 'dkim': case 'mailcheck': return goMail(args, cmd);
     case 'cidr': case 'subnet': case 'ipcalc': return args.length === 1 || args.length === 2 ? goCidr(args.join(' ')) : null;
     case 'asn': case 'as': return args.length === 1 ? goAsn(args[0]) : null;
+    case 'route': case 'bgp': case 'rpki': return args.length === 1 ? goRouteCmd(args[0]) : null;
     case 'port': case 'portcheck': return goPort(args);
+    case 'leaktest': case 'dnsleak': case 'vpntest': {   // leaktest --result <code>: a shared result, only a valid code
+      const r = args.length === 2 && /^--?result$/i.test(args[0]) && LEAKG.decode(args[1]);
+      return r ? '/leaktest/r/' + r.code : null;
+    }
   }
   if (args.length === 1 && parseIp(w0) && parseIp(args[0])) return goCidr(s);   // an address and a netmask
   return args.length ? null : goValue(w0);
@@ -386,8 +396,22 @@ function goValue(v) {
   if (/\/|-\d{1,3}$/.test(host)) { const c = goCidr(host); if (c) return c; }   // 10.0.0.0/22, or 10.0.0.0-22
   const at = host.lastIndexOf('@');
   if (at > 0) { const d = normalizeDomain(host.slice(at + 1)); return d ? '/mail/' + d : null; }
+  // A router address typo (lookup 192.168.l.l, http://192.168.l.l/admin) goes to the curated address, as
+  // /192.168.l.l does; another address typo (10.0.0.13l) isn't a domain, as on the 404 path.
+  const typo = routerTypo(host);
+  if (typo) return '/' + typo;
+  if (typoIp(host)) return null;
   const d = normalizeDomain(host);
   return d ? '/dns/' + d : null;
+}
+
+// route <prefix or address>: /route/, the routing (JSON for curl -L; browsers are sent on to the /cidr page that
+// shows it). Space that isn't routed (10.0.0.0/8, 192.168.1.1) gets its own /cidr or address page instead.
+function goRouteCmd(v) {
+  const host = urlHost(v), t = routeTarget(host);
+  if (!t.error) return '/route/' + t.query;
+  const p = !host.includes('/') && parseIp(host);
+  return p ? '/' + canonIp(p) : goCidr(host);
 }
 
 // A pasted http(s) URL's host (https://example.com/page -> example.com), or the input without IPv6 brackets.

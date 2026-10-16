@@ -1115,11 +1115,14 @@
       el('span', 'tag', warp ? 'warp on' : torListed ? 'tor' : vpn ? 'vpn on' : homeNet ? 'no vpn' : flagged ? 'vpn unclear' : vpnKnown ? 'no vpn detected' : 'vpn unknown'),
       el('span', 'tag', grade ? 'grade ' + grade : 'not graded'));
     // Share: your grade's link, whose code holds only the grade and each check's flag (leakgrade.js), or the check
-    // itself when the run has no grade. The Markdown keeps the findings but none of your addresses or resolvers.
+    // itself when the run has no grade. The Markdown keeps the findings but none of your addresses or resolvers:
+    // this run's, and the previous run's too, since the compare below prints its lines in the same block.
+    // (lastLeak is still the previous run here.) Each run keeps only its own, raw as the lines print them.
+    const mine = [d.ip, other, ...rtc.ips, ...rtc.local, ...(dns && Array.isArray(dns.resolvers) ? dns.resolvers.map(r => r && r.ip) : [])].filter(Boolean);
     head.append(shareBar({ cmd: 'leaktest', value: verdict, what: 'the verdict', path: leakCode ? '/leaktest/r/' + leakCode : '/leaktest',
       self: !leakCode, text: leakCode ? `my ipterm leak test grade: ${grade}` : null,
       note: leakCode ? '   (it holds only the grade and which checks passed or leaked: no IP address, provider, location or DNS resolver; opening it never runs the test)' : null,
-      hide: [d.ip, other, ...rtc.ips, ...rtc.local, ...(dns && Array.isArray(dns.resolvers) ? dns.resolvers.map(r => r && r.ip) : [])] }));
+      hide: lastLeak ? [...mine, ...lastLeak.hide] : mine }));
     out.appendChild(head);
     await kv([['leaks', grade || '–', 'big'],
       ['', frag(tally + (skipped.length ? `; not tested: ${skipped.join(', ')}` : '') + '. ', cmdButton('how the grade works', 'man leaktest')), 'plain'],
@@ -1137,7 +1140,7 @@
     }
 
     // Compare with the previous run in this tab, then keep this one (in memory only) for the next.
-    const run = { at: Date.now(), vpnState, tunnel, grade, lines: new Map(results.map(r => [r.key, r])),
+    const run = { at: Date.now(), hide: mine, vpnState, tunnel, grade, lines: new Map(results.map(r => [r.key, r])),
       ips: known, asns: new Set([d.asn, otherInfo && !otherInfo.error ? otherInfo.asn : null].filter(Boolean).map(up)), dnsAsns: new Set(dnsAsns) };
     if (lastLeak) await compareLeaks(lastLeak, run);
     lastLeak = run;
@@ -1203,6 +1206,10 @@
     setUrl('/leaktest/r/' + r.code, `This browser got ${L.article(r.grade)} on ipterm's leak test | ipterm`);
     const head = el('div', 'head');
     head.append(el('span', 'hip', 'leaktest'), el('span', 'tag pub', 'shared result'), el('span', 'tag', 'grade ' + r.grade));
+    // The code holds no one's addresses, so nothing needs hiding: the link is this page, copy takes the grade.
+    head.append(shareBar({ cmd: 'leaktest --result ' + r.code, value: r.grade, what: 'the grade', path: '/leaktest/r/' + r.code,
+      text: `an ipterm leak test grade: ${r.grade}`,
+      note: '   (it holds only the grade and which checks passed or leaked: no IP address, provider, location or DNS resolver; opening it never runs the test)' }));
     out.appendChild(head);
     const st = v => (v === L.LEAK ? 'warn' : v === L.PASS ? 'ok' : 'info');
     await kv([['leaks', r.grade, 'big'], ['', says + '.', 'plain'],
@@ -1381,18 +1388,24 @@
     ql.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
     const page = d.kind === 'ip' ? d.prefix : d.query, o = d.origins[0];
     if (page) setUrl('/cidr/' + page, o ? routeTitle(page, d.kind === 'ip' ? { ...d, status: 'announced' } : d) : `${page} routing | ipterm`);
-    await renderRoute(d);
+    // Its own [share] [copy] [md]: the link is the page the address bar now shows (an unrouted address has
+    // none, so /route/<ip>, which sends browsers to its /cidr page). copy takes the route itself.
+    await renderRoute(d, { cmd: 'route ' + d.query, value: d.prefix || d.query,
+      what: d.prefix ? 'the route' : d.kind === 'ip' ? 'the address' : 'the prefix', path: page ? '/cidr/' + page : '/route/' + d.query });
     next(o && [`asn ${o.asn}`, `asn ${o.asn}`, 'the network that announces it'],
       d.prefix && [`cidr ${d.prefix}`, `cidr ${d.prefix}`, 'subnet math for the route, on its own page'],
       d.prefix && [`whois ${d.prefix.split('/')[0]}`, `whois ${d.prefix.split('/')[0]}`, 'who the block is registered to'],
-      page && ['share', 'share', 'copy a link to this route']);
+      ['share', 'share', 'copy a link to this route']);
   }
 
-  async function renderRoute(d) {
+  // bar: route's own share bar. cidr() draws the routing under its own result without one, so the cidr result
+  // stays the current one and its [md] takes in both.
+  async function renderRoute(d, bar) {
     const head = el('div', 'head'), o = d.origins[0];
     head.append(el('span', 'hip', 'route ' + d.query), el('span', 'tag ' + (d.prefix ? 'pub' : 'priv'), { announced: 'announced', covered: 'routed', split: 'split', unrouted: 'not routed' }[d.status] || d.status));
     if (o && o.rpki) head.append(el('span', 'tag', o.rpki === 'not-found' ? 'no roa' : 'rpki ' + o.rpki.replace('-', ' ')));
     head.append(el('span', 'tag', 'ripestat'));
+    if (bar) head.append(shareBar(bar));
     out.appendChild(head);
     const asLink = a => cmdLink(a, 'asn ' + a, '/' + a);
     const pfxLink = p => cmdLink(p, 'cidr ' + p, '/cidr/' + p);
@@ -2070,8 +2083,8 @@
     ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
       ['ping', 'ping 10'], ['whoami', 'traceroute']],
     traceroute: ['traceroute', "not possible from a browser: tracing a route needs raw ICMP or UDP packets. ping times the connection to ipterm's edge instead.", ['ping'], ['ping', 'asn']],
-    share: ['share', "shares a link to the current result: the share sheet on phones, the clipboard elsewhere. Every lookup has its own page, so the link opens the same result. After whoami, leaktest or a port check it shares the page itself, which shows each visitor their own result (check yours), never your address. Every result's header line has the same [share] button, and [copy] and [md] beside it.",
-      ['share'], ['copy']],
+    share: ['share', "shares a link to the current result: the share sheet on phones, the clipboard elsewhere. Every lookup has its own page, so the link opens the same result. After whoami or a port check it shares the page itself (/ or /port/<n>), which shows each visitor their own result (check yours), never your address. After leaktest it shares your grade's link, /leaktest/r/<code>, which holds only the grade and which checks passed or leaked (no IP address, provider, location or resolver), or /leaktest when the run has no grade. Every result's header line has the same [share] button, and [copy] and [md] beside it.",
+      ['share'], ['copy', 'leaktest']],
     copy: ['copy [md | link]', "copies the current result's main value: the IP address, the domain, the range or the AS number. copy md copies the whole result as a Markdown code block that starts with the command and ends with its link, for GitHub issues, Discord or Stack Overflow (your own address is left out of whoami, leaktest and port results). copy link copies the link. The sponsored line is never copied.",
       ['copy', 'copy md', 'copy link'], ['share']],
     history: ['history [clear | off | on]', "lists the commands you ran, numbered (click one to run it again). They are saved in this browser's local storage, the newest 200 and never their results, so they are still there after a reload; nothing is sent anywhere. history clear deletes them, history off stops saving them (and deletes them) until history on. Up and Down recall them at the prompt either way, Ctrl+R searches them, Tab completes from them, !! runs the last one again and !<n> runs number n.",
@@ -2265,8 +2278,10 @@
      the result's main value (the address, domain, range or AS number). copy md takes a fenced Markdown
      block for GitHub issues, Discord or Stack Overflow: the command, the result's lines, then its
      permalink. Nothing copied carries the sponsored line or the next: line. A result about your own
-     connection (whoami, leaktest, a port check) never shares your address: its link is the page itself,
-     which shows each visitor their own ("check yours"), and its Markdown leaves your addresses out. */
+     connection never shares your address: after whoami or a port check its link is the page itself, which
+     shows each visitor their own ("check yours"); after leaktest it is the grade's /leaktest/r/<code> (only
+     the grade and per-check flags, see leakgrade.js), or /leaktest when the run has no grade. Its Markdown
+     leaves your addresses out (leaktest's: also its resolvers, and the previous run's in the compare). */
   let current = null;              // { cmd, value, what, path, self, hide: [your addresses], drop: [row labels], bar, text, note }
   // Rows of your own result that are your address in another form (or would point at it).
   const SELF_DROP = ['hostname', 'IPv4', 'IPv6', 'postal', 'coords', 'decimal', 'hex', 'binary', 'rdns zone', 'expanded', '/64 prefix'];
@@ -2281,9 +2296,12 @@
     };
     bar.append(btn('share', r.self ? 'Share a link to this page (it shows each visitor their own result, never yours)' : 'Share a link to this result', b => shareResult(r, b)),
       btn('copy', 'Copy ' + r.what, b => copyValue(r, b)),
-      btn('md', 'Copy this result as Markdown' + (r.self ? ' (your address left out)' : ''), b => copyMd(r, b)));
+      btn('md', 'Copy this result as Markdown' + (hidesYours(r) ? ' (your address left out)' : ''), b => copyMd(r, b)));
     return bar;
   }
+  // Whether the Markdown leaves your addresses out: your own result, or one with addresses to hide (a graded
+  // leaktest shares its grade's link, not the page itself, but its Markdown still hides them).
+  function hidesYours(r) { return !!(r.self || (r.hide || []).some(Boolean)); }
   // A button answers in place: its label says "copied" for a moment, and screen readers hear what was copied.
   function flash(b, spoken) {
     if (!b.dataset.label) b.dataset.label = b.textContent;
@@ -2314,16 +2332,22 @@
   async function copyMd(r, b) {
     const head = r.bar.isConnected ? r.bar.closest('.head') : null;
     if (!head) return line('That result is no longer on the screen. Run it again to copy it.', 'warn');
-    const ok = await toClipboard(markdown(r, head)), what = 'copied the result as Markdown' + (r.self ? ' (your address left out)' : '');
+    const ok = await toClipboard(markdown(r, head)), what = 'copied the result as Markdown' + (hidesYours(r) ? ' (your address left out)' : '');
     if (ok && b) return flash(b, what);
     line(ok ? what : 'The clipboard is blocked here, so select the result and copy it by hand.', ok ? 'sys' : 'warn');
   }
   // The result as text, from its header line up to the next command: the header's tags, the table and
   // the notes under it, without the map, buttons, the sponsored line or the next: line.
-  const NOT_RESULT = /^(ok|done) · (\d+ ms|sample data)$|^queued: |^Click a prefix/;
+  // Progress lines, not results: "ok · 12 ms", and cidr's "routing: ok · 12 ms" (or "routing: asking RIPEstat…"
+  // while it waits; an error there stays, as a note).
+  const NOT_RESULT = /^(routing: )?(ok|done) · (\d+ ms|sample data)$|^routing: asking RIPEstat|^queued: |^Click a prefix/;
   const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // An address to hide, wherever it stands on its own: also before a sentence's "." or ":" ("address 192.168.1.5.",
+  // "203.0.113.7: unless…") and an IPv4 before ":port", but never inside a longer address (1.2.3.45, 1.2.3.4.5,
+  // 4.3.2.1.in-addr.arpa, 2001:db8::1:5).
+  const hideRe = ip => new RegExp(`(?<![\\w.:])${reEsc(ip)}` + (ip.includes(':') ? '(?!\\w|[.:][\\w:])' : '(?!\\w|\\.\\w)'), 'gi');
   function markdown(r, head) {
-    const hide = (r.hide || []).filter(x => x && parseIp(x)).map(ip => new RegExp(`(?<![\\w.:])${reEsc(ip)}(?![\\w.:])`, 'gi'));
+    const hide = (r.hide || []).filter(x => x && parseIp(x)).map(hideRe);
     const clean = t => hide.reduce((s, re) => s.replace(re, '[hidden]'), t.replace(/\s*↗/g, '').replace(/\s*\n\s*/g, ' ').trimEnd());
     const textOf = node => {                     // status tags read [OK], [LEAK]...; buttons and outside links go
       const c = node.cloneNode(true);
@@ -2348,7 +2372,9 @@
         }
         const w = Math.max(0, ...rows.filter(Boolean).map(x => x[0].length));
         body.push('', ...rows.map(x => (x ? x[0].padEnd(w) + '  ' + x[1] : '')), '');
-      } else if (n.classList.contains('ln') && !n.classList.contains('sponsor') && !n.classList.contains('next')) {
+      } else if (n.classList.contains('head')) {   // a section's own header, like the routing under a cidr result
+        body.push('', [...n.querySelectorAll('.hip, .tag')].map(t => t.textContent).join(' · '));
+      } else if (n.classList.contains('ln') && !['sponsor', 'next', 'run-yours'].some(c => n.classList.contains(c))) {
         const t = textOf(n);
         if (t && !NOT_RESULT.test(t)) body.push(t);
       }
@@ -2458,7 +2484,7 @@
     out.appendChild(d); scroll();
   }
 
-  const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'dig', 'mail', 'lookup', 'asn', 'port']);
+  const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'route', 'dig', 'mail', 'lookup', 'asn', 'port']);
   // save: false for what the page runs by itself (a tool page's command, Back and Forward), which isn't saved.
   async function run(raw, save = true) {
     let cmd = raw.trim(); echo(raw);
@@ -2589,7 +2615,7 @@
      Enter runs it, an arrow key or Tab keeps it for editing, Esc gives your line back. !! is the previous
      command and !<n> the nth in `history`, as in bash. */
   const COMMANDS = [...new Set([...HELP.map(r => r[0].split(' ')[0]).filter(w => /^[a-z]/.test(w)), 'traceroute'])];
-  const VALUE_ARGS = new Set(['lookup', 'whois', 'dig', 'mail', 'asn', 'cidr', 'ip', 'traceroute']);
+  const VALUE_ARGS = new Set(['lookup', 'whois', 'dig', 'mail', 'asn', 'cidr', 'route', 'ip', 'traceroute']);
   const WORD_ARGS = { theme: () => THEMES, crt: () => ['on', 'off'], history: () => ['clear', 'off', 'on'], copy: () => ['md', 'link'],
     man: () => COMMANDS, help: () => COMMANDS, port: () => (PORTSLIB ? PORTSLIB.list().map(String) : []) };
   const hint = el('span', 'hint'); hint.hidden = true; hint.setAttribute('aria-hidden', 'true'); form.appendChild(hint);
