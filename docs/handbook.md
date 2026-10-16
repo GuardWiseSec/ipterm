@@ -719,11 +719,18 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   Einzelunternehmen, e.K., a patronymic such as -ovich, or a PE / FOP / IP prefix before a person's name); when it is
   a partnership of named people (spolka jawna, s.c., GbR, v.o.f.) with no other legal form; when "trading as" follows
   a person's name; when a common given name is followed by another word and the name has no registered legal form
-  (Inc, LLC, Ltd, GmbH, SA, BV, Oy ...) or public body or institution (university, school, foundation, ministry,
-  district ...); or, with no sign of an organization at all, when the name is two to six plain words, the shape of a
-  person's name. It errs on the side of leaving a network out: some businesses that look like a person's name go too.
-  In October 2026, 135 of the 10,135 largest networks were left out: 116 for those signs, 19 with no name or not in
-  the names list. The list of what was left out is only printed (`--show-excluded`), never saved to a file, so the
+  (Inc, LLC, Ltd, GmbH, SA, BV, Oy, spolka akcyjna ...) or public body or institution (university, school,
+  foundation, ministry, district ...); or, with no sign of an organization at all (a legal form, an institution, a
+  word such as network or telecom, a country or region, also in its own language: "Orange Polska"), when the name is
+  two to six plain words, the shape of a person's name. It errs on the side of leaving a network out: some
+  businesses that look like a person's name go too. In October 2026, 118 of the 10,118 largest networks were left
+  out: 99 for those signs, 19 with no name or not in the names list. A review of that list added legal forms written
+  out or missing (spolka akcyjna, spolka z ograniczona odpowiedzialnoscia, sociedad anonima, S.c.p.A., Q.S.C.,
+  B.S.C., FZE, PJS ...) and place names (Polska, Türkiye written Turkiye, NSW, Hong Kong, American ...), which
+  brought back 17 organizations, among them AS5617 (Orange Polska), AS8781 (Ooredoo) and AS2594 (CSI Piemonte);
+  every network left out for a person sign (patronymic, trading as, sole trader, partnership, given name) stayed out,
+  and across all 122,000 names in `asn.txt` the only answers that changed were 207 "might be a person's name" that
+  are organizations. The list of what was left out is only printed (`--show-excluded`), never saved to a file, so the
   repository doesn't collect those names.
 - Those networks' pages still work, but they aren't in the sitemap, and search engines that find them through links
   (another network's upstreams, a shared link) are asked not to index them: `asnPage()` runs the same rules on
@@ -731,9 +738,10 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   ARIN, LACNIC and AFRINIC, `<HANDLE> <Name>` from RIPE and APNIC, or the name alone), and a name that may be a
   person's gets `<meta name="robots" content="noindex, follow">`. This covers every network, not only the 10,000
   largest, and the JSON and text answers are unchanged. RIPEstat and `asn.txt` give the same names, so the sitemap
-  and the noindex agree: in October 2026 all 116 networks left out for those signs, and a sample of 80 kept ones, got
-  the same answer from both (a holder that renames itself can differ until the list is regenerated).
-  `tools/check_seo.sh` checks AS35100 and AS50053 (noindex, not in the sitemap) against AS13335, AS15169 and AS3356.
+  and the noindex agree: in October 2026 all 99 networks left out for those signs, the 17 brought back by the review,
+  and a sample of 80 kept ones got the same answer from both (a holder that renames itself can differ until the list
+  is regenerated). `tools/check_seo.sh` checks AS35100 and AS50053 (noindex, not in the sitemap) against AS13335,
+  AS15169, AS3356 and AS5617.
   The check costs a few microseconds per page, plus about 3 ms the first time in an isolate.
 - **Other pages that name such a holder are noindex too, or leave the name out.** A noindex ASN page links to its
   whois record and its prefixes, and those pages name the holder as well:
@@ -958,9 +966,11 @@ IPinfo's data comes with its own attribution condition (see "Recommended: add a 
 - `/<ip>` pages name the address's network too ("operated by ..."), from IPinfo, next to its location, and crawlers
   reach them through links on `/whois/<ip>` and `/dns` pages. `personName(d.org)` in `ipPage()` would decide them the
   same way; it isn't done because checking it costs IPinfo lookups, which `tools/check_seo.sh` never makes.
-- Some large businesses look like people to the rules. In October 2026, for example, AS5617 (Orange Polska: "Spolka
-  Akcyjna", the Polish joint-stock company, isn't among the legal forms) and AS8167 (V.tal, written "V tal"): their
-  pages are noindex, they are out of the ASN sitemap, and indexed pages list them as upstreams by number only.
-  Reviewing `--show-excluded` and adding such legal forms to `src/holder-heuristic.js` fixes all three at once.
+- Some large businesses still look like people to the rules, because their names have no legal form, place or
+  business word: in October 2026 AS17858 ("LG POWERCOMM"), AS8167 and AS7738 (V.tal, written "V tal"), AS1906
+  (Northrop Grumman) and AS13692 ("Douglas FastNet", whose first word is a given name). Their pages are noindex, they
+  are out of the ASN sitemap, and indexed pages list them as upstreams by number only. The rules can't tell these
+  from a person's name without letting people through; a short list of reviewed AS numbers that are organizations,
+  in `src/holder-heuristic.js` so the tool and the Worker agree, would bring them back.
 - Domain whois pages show a registrant's name when the registrar publishes one, often a person's. The same caution
   could apply in `domainWhoisPage()`, though the rules were written for network holders' names.

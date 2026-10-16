@@ -75,6 +75,7 @@ robots /AS50053 1
 robots /AS13335 0
 robots /AS15169 0
 robots /AS3356 0
+robots /AS5617 0     # a large business whose name has a spelled-out legal form (Spolka Akcyjna)
 echo '-- ... and whois and /cidr pages that name one (RDAP and RIPEstat only)'
 robots /whois/AS35100 1
 robots /whois/AS50053 1
@@ -118,7 +119,7 @@ done
 printf '%s\n' "$idx" | grep -q 'sitemap-asn-1.xml' && ok 'the index lists sitemap-asn-1.xml' || no 'the index lists no ASN sitemap'
 # The same rules decide both: these two are large enough for the ASN sitemap, but left out, and their pages are noindex.
 for a in AS35100 AS50053; do case "$asns" in *"/$a</loc>"*) no "$a is in an ASN sitemap, but its page is noindex" ;; *) ok "$a (noindex) is in no ASN sitemap" ;; esac; done
-for a in AS13335 AS15169 AS3356; do case "$asns" in *"/$a</loc>"*) ok "$a is in an ASN sitemap" ;; *) no "$a is in no ASN sitemap" ;; esac; done
+for a in AS13335 AS15169 AS3356 AS5617; do case "$asns" in *"/$a</loc>"*) ok "$a is in an ASN sitemap" ;; *) no "$a is in no ASN sitemap" ;; esac; done
 curl -s "$B/sitemap-pages.xml" | grep -q '<loc>[a-z]*://[^/]*/AS[0-9]*</loc>' && no 'sitemap-pages.xml still lists ASN pages' || ok 'sitemap-pages.xml leaves ASN pages to the ASN files'
 
 if [ -n "$ROUTES" ]; then

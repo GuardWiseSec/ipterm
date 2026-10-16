@@ -11,19 +11,20 @@
 //   3. it is a partnership of named people ("spolka jawna", "s.c.", "GbR", "v.o.f.", "s.n.c.") with no other
 //      legal form;
 //   4. "trading as" (t/a, d/b/a) follows a person's part, or a sole-trader form (PE, FOP, IE, IP, SP, ChP,
-//      FLP) comes before one: "Jonas Frey trading as Probe Networks" goes, "Hartana GmbH trading as ACS
-//      Hartmann GmbH & Co. KG" stays;
-//   5. a common given name is followed by another word ("Marc Pauls (AlphaCron Datensysteme)"), unless the
-//      name also has a registered legal form (Inc, LLC, Ltd, GmbH, SA, BV, Oy, s.r.o. ...) or names a public
-//      body or institution (university, school, foundation, ministry, district, hospital ...), which makes it
-//      a company or institution named after someone: "Robert Bosch GmbH", "George Mason University";
+//      FLP) comes before one: "Max Mustermann trading as Musternet" goes, "Muster GmbH trading as Musternet
+//      GmbH & Co. KG" stays;
+//   5. a common given name is followed by another word ("Max Mustermann (Musternet Datensysteme)"), unless the
+//      name also has a registered legal form (Inc, LLC, Ltd, GmbH, SA, BV, Oy, s.r.o., spolka akcyjna ...) or
+//      names a public body or institution (university, school, foundation, ministry, district, hospital ...),
+//      which makes it a company or institution named after someone: "Robert Bosch GmbH", "George Mason University";
 //   6. with no sign of an organization at all (the legal forms and institutions above, or a word such as
 //      network, telecom, internet, hosting, cloud or business, in several languages), the name is two to six
-//      plain words, the shape of a person's name ("Kai Rottleb"). One word ("Panix", "KISTI"), digits or "&"
+//      plain words, the shape of a person's name ("Erika Mustermann"). One word ("Panix", "KISTI"), digits or "&"
 //      ("PG&E"), a web address, an address with several commas, spelled-out initials, or a country or region
-//      ("MTN Sudan", "Air Canada") count as an organization.
+//      ("MTN Sudan", "Air Canada", "Orange Polska") count as an organization.
 // When in doubt it says person: "Paul Bunyan Communications" or "Independence Blue Cross" (both businesses)
-// look like people, so they go too.
+// look like people, so they go too, and so do "V tal" (V.tal) and "Douglas FastNet".
+// The examples of people here are made up; don't put real holders' names in this file.
 //
 // Cost: a few microseconds per name, after about 3 ms the first time in a Worker isolate and 2 ms the second (V8
 // compiling the regular expressions, then compiling them again to run fast). At startup it only builds the word sets.
@@ -35,7 +36,7 @@ export function holderOf(asName) {
   // A body of one word ("Polismyndigheten") is the name itself; "-" alone is no name.
   const holder = dash > 0 && !/\s/.test(body.slice(0, dash)) ? body.slice(dash + 3)
     : body.includes(' ') ? body.slice(body.indexOf(' ') + 1) : body.replace(/^-$/, '');
-  // RIPE lines have no " - ": the first word is usually the handle (SERGIOB, PISKOT-AS), but some lines have
+  // RIPE lines have no " - ": the first word is usually the handle (MAXM, MUSTERNET-AS), but some lines have
   // none ("University of Innsbruck"), so a first word that doesn't look like a handle is part of the name.
   const first = body.split(' ')[0];
   const handle = dash > 0 || /[-_\d]/.test(first) || (first.length > 1 && first === first.toUpperCase());
@@ -53,8 +54,8 @@ const PERSON = [
 // Partnerships of named people (Polish "spolka jawna" and "s.c.", German "GbR", Dutch "v.o.f.", Italian
 // "s.n.c.") carry the partners' names. Unless another legal form is there too (Romanian "S.C. ... S.R.L.").
 const PARTNERSHIP = /\bsp[oó][lł]ka\s+(jawna|cywilna)\b|\bsp\.\s?j\.?(?=\s|,|$)|(^|\s)s\.\s?c\.?(?=\s|,|$)|\bgbr\b|\bv\.o\.f\.?|\bs\.n\.c\.?(?=\s|,|$)/i;
-// Signs of a person only when the owner's part has no sign of an organization: "Jonas Frey trading as Probe
-// Networks" is a person, "Hartana GmbH trading as ACS Hartmann GmbH & Co. KG" is not. [pattern, owner's part]
+// Signs of a person only when the owner's part has no sign of an organization: "Max Mustermann trading as
+// Musternet" is a person, "Muster GmbH trading as Musternet GmbH & Co. KG" is not. [pattern, owner's part]
 const PERSON_IF = [
   [/\s(trading\s+as|t\/a|d\/b\/a|dba)\s/i, (h, m) => h.slice(0, m.index), 'trading as'],
   [/^(PE|FOP|FO-P|IE|IP|SP|ChP|CHP|FLP|SPD)\s+/, (h, m) => h.slice(m[0].length), 'leading sole-trader form'],
@@ -77,10 +78,16 @@ const LEGAL = words([
   'inc', 'incorporated', 'corp', 'co', 'cia', 'l\\.?l\\.?c', 'l\\.?l\\.?p', 'l\\.?p', 'ltd', 'ltda', 'ltee', 'limited', 'limitada', 'plc', 'p\\.?l\\.?c', 'pty', 'pte', 'pvt',
   'g\\.?m\\.?b\\.?h', 'ggmbh', 'mbh', 'ag', 'kg', 'kgaa', 'ug', 'eg', 'se', 's\\.? ?a', 's\\.?a\\.?s', 'sasu', 's\\.?a\\.?r\\.?l', 'eurl', 's\\.?l', 's\\.?l\\.?u', 's\\.?r\\.?l', 's\\.?p\\.?a',
   's\\.? ?de ?r\\.?l', 'c\\.?v', 'sac', 'spl', 'sem', 'sapem', 'b\\.?v', 'bvba', 'n\\.?v', 'c\\.?a', 'a\\.?c', 'l\\.?c', 'cc', 'sf', 'p\\/f', 'sh\\.?a', 'sh\\.?p\\.?k', 'ab', 'oy', 'oyj', 'as', 'a\\/s',
-  'asa', 'aps', 'a\\.s', 's\\.?r\\.?o', 'spol', 'sp\\.? ?z ?o\\.? ?o', 'z\\.?o\\.?o', 'z\\.?s\\.?p\\.?o', 'kft', 'zrt', 'nyrt', 'bt', 'd\\.?o\\.?o', 'dooel', 'd\\.?d', 'ad', 'ead', 'ood', 'eood',
+  'asa', 'aps', 'a\\.s', 's\\.?r\\.?o', 'spol', 'sp\\.? ?z ?o\\.? ?o', 'z\\.?o\\.?o', 'z\\.? ?o\\. ?o', 'z\\.?s\\.?p\\.?o', 'kft', 'zrt', 'nyrt', 'bt', 'd\\.?o\\.?o', 'dooel', 'd\\.?d', 'ad', 'ead', 'ood', 'eood',
   'jsc', 'pjsc', 'ojsc', 'cjsc', 'ooo', 'oao', 'zao', 'pao', 'ao', 'tov', 'too', 'uab', 'mb', 'sia', 'ou', 'osk', 'hf', 'ehf', 'kk', 'k\\.k', 'gk', 'bhd', 'berhad', 'sdn', 'tbk', 'pt', 'ep', 'pe',
   'e\\.?v', 'vzw', 'asbl', 'ry', 'sal', 'mepe', 'f\\.?m\\.?b\\.?a', 'w\\.?l\\.?l', 'opc', 'aor', 'emc', 'epa', 'remc', 'fcb', 's\\/a', 'sapi', 'eireli', 'scrl', 'sprl', 'srls', 'sccl', 'scoop',
   'anonim', 'fondation', 'vereniging', 'osuuskunta', 'etat', 'junta', 'forces', 'army', 'navy', 'gov', 'univ', 'dept', 'board', 'court', 'borough', 'capitol', 'commons', 'boces', 'suny', 'customs', 'revenue',
+  // spelled out, or written the way the entries above miss: Polish spolka akcyjna (S.A.) and spolka z ograniczona
+  // odpowiedzialnoscia (sp. z o.o.), Spanish and Portuguese sociedad anonima, Italian S.c.p.A., Gulf joint-stock
+  // companies (Qatar Q.S.C., Q.P.S.C., Bahrain B.S.C., Kuwait K.S.C.), Latvian akciju sabiedriba and VSIA, Uzbek
+  // MChJ, Iranian PJS, UAE free-zone companies (FZE, FZCO), Greek I.K.E., German public corporations (KdoR)
+  'sp[oó][lł]k[a-ząę]*\\s+akcyjn[a-ząę]*', 'z\\s+ograniczon[a-ząę]*\\s+odpowiedzi?alno[a-ząćęś]*', 'an[oóô]nima', 's\\.?c\\.?p\\.?a', 'q\\.?p?\\.?s\\.?c', 'b\\.s\\.c',
+  'k\\.s\\.c', 'akciju\\s+sabiedr[a-zī]*', 'vsia', 'mchj', 'pjs', 'fze', 'fzc', 'fzco', 'i\\.k\\.e', 'k\\.?d\\.?[oö]\\.?r', 'incorporation',
 ]);
 const INSTITUTION = stems([
   'compan', 'compa[nñ]', 'corporat', 'corporac', 'gesellschaft', 'aktien', 'aktiebolag', 'aktsiaselts', 'aktsion', 'obshchestvo', 'haftung', 'sirket', 'etaireia', 'anonym', 'spoldziel', 'cooperat', 'genossen',
@@ -91,7 +98,7 @@ const INSTITUTION = stems([
   'authorit', 'administr', 'verwaltung', 'legislat', 'senate', 'parliament', 'representatives', 'majesty', 'police', 'polizei', 'military', 'defen', 'hospital', 'hopita', 'hôpita', 'klinik', 'clinic',
   'health', 'helse', 'gesundheit', 'medical', 'medizin', 'medicin', 'center', 'centre', 'centro', 'centrum', 'zentrum', 'church', 'dioces', 'archdioc', 'facility', 'public', 'publiek', 'publique', 'pubbli',
 ]);
-const INSTITUTION_PART = /ministeri|regierung|hochschul|hogskol|högskol|univers|gesellschaft|genossenschaft|verwaltung|zentrum|rundfunk|omroep/i;   // inside compound words
+const INSTITUTION_PART = /ministeri|ministeer|regierung|hochschul|hogskol|högskol|univers|gesellschaft|genossenschaft|verwaltung|zentrum|keskus|verket\b|rundfunk|omroep/i;   // inside compound words
 // Weaker signs: what the network does.
 const BUSINESS = words([
   'net', 'netz', 'rede', 'redes', 'cabo', 'isp', 'ix', 'idc', 'asn', 'pcs', 'mpls', 'it', 'ict', 'iot', 'dsl', 'nap', 'thd', 'labs?', 'hosts?', 'news', 'media', 'medien', 'auto', 'shop', 'stores?',
@@ -110,7 +117,7 @@ const BUSINESS_STEM = stems([
 ]);
 const BUSINESS_PART = /dienst|zentral|wirtschaft|verarbeitung|telecom|telekom|network|hosting|internet/i;   // inside compound words
 // Common given names. One followed by another word, with no legal form or public body, is an owner's name:
-// "Marc Pauls (AlphaCron Datensysteme)", "Jerzy Krempa "Telpol"". (San Jose, St. John and the like are places.)
+// "Max Mustermann (Musternet Datensysteme)", "Jan Kowalski "Kownet"". (San Jose, St. John and the like are places.)
 const GIVEN_NAMES = `aaron adam adrian ahmad ahmed ahmet aleksander aleksandr aleksandra aleksei alex alexander alexandre alexei alexey ali alain alberto alejandro alessandro andre andrea andreas
   andrei andrej andres andrew andrey andriy andrzej andy anna anatoly anders anthony antonio anton antti arnaud artem artur arthur ashok bart bartosz benjamin benoit bernd bernhard bjorn bogdan bojan boris
   branko brian bruno burak carlos carl carmen cedric charles chris christoph christophe christopher claudia claudio damian damien daniel daniele dariusz dave david deepak dejan denis dennis didier diego
@@ -168,6 +175,12 @@ const PLACE_PHRASES = `american samoa|antigua & barbuda|ascension island|bosnia 
   st. vincent & grenadines|svalbard & jan mayen|são tomé & príncipe|trinidad & tobago|tristan da cunha|
   turks & caicos islands|u.s. outlying islands|u.s. virgin islands|united arab emirates|united kingdom|united nations|
   united states|vatican city|wallis & futuna|western sahara|åland islands`.split(/\|\s*/);
+// Not from ICU: country names in their own language ("Orange Polska"), adjectives ("American Red Cross"),
+// Australian states and a few regions, with the same care about names (no Italia, España, Victoria, Magyar).
+const PLACES_MORE = new Set(`polska turkiye deutschland österreich schweiz suisse nederland eesti latvija latvijas lietuva srbija
+  hrvatska slovenija slovensko česko sverige norge danmark suomi românia american australian afghan peruana norsk
+  nsw qld queensland tasmania piemonte alsace`.split(/\s+/));
+const PLACE_PHRASES_MORE = [' hong kong ', ' timor leste ', ' new south wales '];   // whole words: not "Zhong Kong"
 
 const strongOrg = s => LEGAL.test(s) || INSTITUTION.test(s) || INSTITUTION_PART.test(s) || /^the\s/i.test(s);
 const looksOrg = s => strongOrg(s) || BUSINESS.test(s) || BUSINESS_STEM.test(s) || BUSINESS_PART.test(s);
@@ -187,9 +200,10 @@ export function personReason(holder) {
   if (/[\d&+@/]|\.(com|net|org|io)\b/i.test(holder)) return null;
   // an address ("KuanggongLu, Pingdingshan, Henan"), or spelled-out initials ("C I C E S E")
   if ((holder.match(/,/g) || []).length >= 2 || words.every(w => w.replace(/\./g, '').length <= 2)) return null;
-  const lower = holder.toLowerCase();
-  if (words.some(w => PLACES.has(w.toLowerCase())) || PLACE_PHRASES.some(p => lower.includes(p))) return null;
-  // Two to six plain words with no sign of an organization ("Kai Rottleb", "Sergio Bejarano Romero"): could be a person.
+  const lower = holder.toLowerCase(), spaced = ` ${words.join(' ').toLowerCase()} `;
+  if (words.some(w => PLACES.has(w.toLowerCase()) || PLACES_MORE.has(w.toLowerCase())) || PLACE_PHRASES.some(p => lower.includes(p))
+    || PLACE_PHRASES_MORE.some(p => spaced.includes(p))) return null;
+  // Two to six plain words with no sign of an organization ("Erika Mustermann", "Fulano de Tal"): could be a person.
   if (words.length <= 6 && words.every(w => /^\p{L}[\p{L}'’.-]*$/u.test(w))) return "might be a person's name";
   return null;
 }
