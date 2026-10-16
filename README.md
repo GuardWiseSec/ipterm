@@ -144,6 +144,24 @@ curl https://your-domain/AS13335      # any network (ASN) as JSON
 
 Add `?format=json` to force JSON from a browser.
 
+The homepage itself carries the visitor's address: the Worker writes their IP, network and location into the
+HTML (`homePage()` in `src/worker.js`), so the number is there on first paint and without JavaScript, and the
+terminal draws it without a second request. Because it's personal, it's sent `private, no-store`, and it's
+kept out of search snippets (`data-nosnippet`), since a crawler would see its own address. Prefetches and
+prerenders (Chrome's prefetch proxy, from search results) get the plain page instead, because the address
+they'd carry may not be the visitor's; the terminal then asks the API as before.
+
+### Terminal commands
+
+`help` lists every command, and each one is a link that runs it (or an example of it). `man <command>`,
+`help <command>` and `<command> --help` show a manual with clickable examples, the matching curl line and
+related commands. A mistyped command gets a "did you mean" (`whos example.com` → `whois example.com`), and
+commands people type out of habit answer sensibly: `ifconfig`, `ipconfig` and `ip a` show whoami, `ping`
+times HTTPS round trips to the nearest Cloudflare data center (browsers can't send ICMP), and `traceroute`
+explains why it can't run in a browser. Every result ends with a `next:` line of up to four follow-ups
+picked from its own data (whoami suggests `leaktest` and your network; a domain suggests `whois`; a failed
+lookup suggests `retry`). Commands typed while another runs wait their turn, as in a real terminal (type-ahead).
+
 ### Subnet calculator
 
 `cidr 10.0.0.0/22`, `cidr 192.168.1.10 255.255.255.0`, `cidr 2001:db8::/48`, or just type a range. It shows the
@@ -316,9 +334,11 @@ page paints, so there is no flash of the default theme. Settings live in the vis
 
 The Worker only runs for pages and the API (`run_worker_first` in `wrangler.toml`). CSS, JavaScript,
 fonts, images and map data are served directly by Cloudflare, which is free and unlimited, and get their
-headers from `public/_headers`. A first visit costs about 2 Worker requests and each further lookup 1,
-so the free plan's 100,000 requests a day covers roughly 50,000 visits. The Workers Paid plan ($5/month)
-includes 10 million requests.
+headers from `public/_headers`. A first visit costs 1 Worker request (the homepage carries the visitor's
+address, so the terminal doesn't call the API) and each further lookup or page 1, so the free plan's 100,000
+requests a day covers up to about 100,000 visits. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
+which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
+requests.
 
 **If you add a new static file** (an image, a script, like `cidr.js` was), add a `"!/<file>"` line to `run_worker_first`
 so it doesn't count against the limit. Watch usage under **Workers & Pages → ipterm → Metrics**.
@@ -366,7 +386,8 @@ Logs name the service and error only: never the visitor's IP or your API token.
 npx wrangler dev
 ```
 
-Note that `request.cf` location data is limited when running locally.
+Note that `request.cf` location data is limited when running locally, and `ping` says it can't run there:
+it needs Cloudflare's edge, which answers `/cdn-cgi/trace` on the deployed site.
 
 ## Next steps worth considering
 

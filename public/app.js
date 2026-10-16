@@ -2,13 +2,17 @@
   const $ = s => document.querySelector(s);
   const out = $('#out'), screen = $('#screen'), form = $('#line'), input = $('#cmd'), modeEl = $('#mode');
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const sleep = ms => new Promise(r => setTimeout(r, reduced ? 0 : ms));
+  // fast: the server already sent this result (your IP on the homepage), so draw it at once, in the
+  // same frame that removes the server's copy, instead of typing it out.
+  // hold: during that swap, keep the screen where the server's copy had it instead of following the output.
+  let fast = false, hold = false;
+  const sleep = ms => (fast ? Promise.resolve() : new Promise(r => setTimeout(r, reduced ? 0 : ms)));
   let live = false, last = null, busy = false;
   const hist = []; let hIdx = 0;
 
   /* ---------- output helpers ---------- */
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-  const scroll = () => { screen.scrollTop = screen.scrollHeight; };
+  const scroll = () => { if (!hold) screen.scrollTop = screen.scrollHeight; };
   // On small screens a whole result doesn't fit; bring a key line (your IP) into view instead of the prompt.
   const reveal = node => {
     if (!node) return;
@@ -34,7 +38,8 @@
     for (const r of rows) {
       if (r === 'sep') { dl.appendChild(el('div', 'sep')); continue; }
       const [k, v, kind] = r;
-      const dt = el('dt', kind === 'big' ? 'bigl' : kind === 'plain' ? 'plainl' : '', k), dd = el('dd', kind === 'big' ? 'big' : kind === 'plain' ? 'plain' : '');
+      const dt = el('dt', kind === 'big' ? 'bigl' : kind === 'plain' ? 'plainl' : ''), dd = el('dd', kind === 'big' ? 'big' : kind === 'plain' ? 'plain' : '');
+      if (k instanceof Node) dt.appendChild(k); else dt.textContent = k;
       if (v instanceof Node) dd.appendChild(v); else dd.textContent = v;
       dl.append(dt, dd); scroll(); await sleep(16);
     }
@@ -473,9 +478,74 @@
     a.href = href;
     a.addEventListener('click', e => {
       if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button) return;
-      e.preventDefault(); exec(cmd);
+      e.preventDefault(); exec(cmd); focusInput();
     });
     return a;
+  }
+  // A command that has no page of its own (copy, share, ping...) is a button that looks like the links.
+  function cmdButton(text, cmd) {
+    const b = el('button', 'cmd', text); b.type = 'button';
+    b.addEventListener('click', () => { exec(cmd); focusInput(); });
+    return b;
+  }
+  // The page a command's result lives at (the reverse of cmdFor), or null if it has none. Paths are
+  // the canonical ones each command puts in the address bar, so a new tab or a copied link shows the
+  // same result as a click; input that isn't valid gets no page (and so becomes a button).
+  function hrefFor(cmd) {
+    const parts = cmd.trim().split(/\s+/), [c, a, b] = parts;
+    const name = v => (parseIp(v) ? v : domainOf(v));          // pasted URLs become their host name
+    switch (c) {
+      case 'whoami': return '/';
+      case 'leaktest': return '/leaktest';
+      case 'whois': return '/whois' + (a ? '/' + name(a) : '');
+      case 'dig': return '/dns' + (a ? '/' + name(a) + (b ? '/' + b.toUpperCase() : '') : '');
+      case 'cidr': {                                           // also "cidr 192.168.1.10 255.255.255.0"
+        const rest = parts.slice(1).join(' ');
+        if (!rest) return '/cidr';
+        const d = CIDRLIB && CIDRLIB.calc(rest);
+        return d && !d.error ? '/cidr/' + d.cidr : null;
+      }
+      case 'asn': {
+        const m = /^(?:as)?(\d{1,10})$/i.exec(a || ''), n = m ? Number(m[1]) : 0;
+        return n >= 1 && n <= 4294967295 ? '/AS' + n : null;
+      }
+      case 'lookup':
+        if (!a) return null;
+        if (parseIp(a)) return '/' + a;
+        if (/^as\d+$/i.test(a)) return hrefFor('asn ' + a);
+        if (looksLikeCidr(a)) return hrefFor('cidr ' + a);
+        return looksLikeDomain(a) ? '/dns/' + domainOf(a) : null;
+      default: return null;
+    }
+  }
+
+  /* ---------- next: suggested follow-ups ----------
+     Each result names up to four commands that make sense after it, picked from its own data, so no
+     result is a dead end. They print as one line after the command finishes (after any sponsored
+     line, which stays separate and labeled). Links only run when clicked, so they cost nothing. */
+  let nextItems = null;
+  // Each item: [label, command, hint], or [label, null, hint, href] for a plain link (a guide).
+  const next = (...items) => { nextItems = items.filter(Boolean).slice(0, 4); };
+  function flushNext() {
+    const items = nextItems; nextItems = null;
+    if (!items || !items.length) return;
+    const d = el('div', 'ln sys next'); d.append('next: ');
+    items.forEach(([label, cmd, hint, href], i) => {
+      if (i) d.append('  ·  ');
+      let n;
+      if (!cmd) { n = el('a', 'cmd', label); n.href = href; }
+      else { const h = hrefFor(cmd); n = h ? cmdLink(label, cmd, h) : cmdButton(label, cmd); }
+      if (hint) n.title = hint;
+      d.append(n);
+    });
+    out.appendChild(d); scroll();
+  }
+  // A data source hiccup or the rate limit (not a typo): offer to run the same command again.
+  const RETRYABLE = /didn't respond|Too many lookups|network error|HTTP \d/;
+  function failedUpstream(mark) {
+    for (let n = mark ? mark.nextSibling : out.firstChild; n; n = n.nextSibling)
+      if (n.classList && n.classList.contains('err') && RETRYABLE.test(n.textContent)) return true;
+    return false;
   }
   // A plain address becomes a mailto: link; anything else (extra fields, odd characters) stays text.
   const MAIL_RE = /^[A-Za-z0-9._%+'-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$/;
@@ -550,8 +620,15 @@
         else slot.append(`none detected (your connection looks IPv${p.v} only)`);
       });
     }
+    // (the preview has DNS samples for example.com only, so other names stay plain text there)
+    const domLink = v => (looksLikeDomain(v) && (live || DEMO_DNS[domainOf(v).toLowerCase()]) ? cmdLink(v, 'dig ' + v, '/dns/' + v) : v);
     if (d) {
-      if (d.hostname) rows.push(['hostname', d.hostname]);
+      if (d.hostname) rows.push(['hostname', domLink(d.hostname)]);
+      else if (d.ptrTimedOut) {                 // the homepage gives reverse DNS only a moment
+        const f = document.createDocumentFragment();
+        f.append('reverse DNS was slow to answer: ', cmdLink(`dig ${ipText}`, `dig ${ipText}`, `/dns/${ipText}`));
+        rows.push(['hostname', f]);
+      }
       if (d.asn || d.org) {
         const f = document.createDocumentFragment(), id = String(d.asn || '').toUpperCase();
         if (/^AS\d+$/.test(id)) f.append(cmdLink(id, 'asn ' + id, '/' + id)); else if (d.asn) f.append(document.createTextNode(d.asn));
@@ -559,7 +636,7 @@
         rows.push(['network', f]);
         if (classify(p)[0] === 'public') rows.push(['registry', cmdLink(`whois ${ipText}`, `whois ${ipText}`, `/whois/${ipText}`)]);
       }
-      if (d.asDomain) rows.push(['domain', d.asDomain]);
+      if (d.asDomain) rows.push(['domain', domLink(d.asDomain)]);
       const ctry = d.country ? d.country + (d.countryCode ? ' [' + d.countryCode + ']' : '') : d.countryCode;
       const place = [d.city, d.region, ctry].filter(Boolean).join(', ');
       if (place) rows.push(['location', place]);
@@ -790,7 +867,13 @@
     if (!leaks) announce(verdict);
     line('Not tested: DNS leaks (which DNS servers answer for you). Your VPN app usually has a setting for this.', 'sys');
     if (!vpn) await sponsor('check');
+    next(leaks && ['leaktest', 'leaktest', 'run the check again after a fix'], ['share', 'share', 'copy a link to this check, so others can run it'],
+      ['whoami', 'whoami', 'your IP, network and location']);
   }
+
+  const whoamiNext = d => next(['copy', 'copy', 'copy your IP address'], live && ['leaktest', 'leaktest', 'check what else your browser gives away'],
+    /^AS\d+$/i.test(d.asn || '') && (live || DEMO_ASN[d.asn.toUpperCase()]) && [`asn ${d.asn}`, `asn ${d.asn}`, "your provider's network"],
+    parseIp(d.ip) && classify(parseIp(d.ip))[0] === 'public' && [`whois ${d.ip}`, `whois ${d.ip}`, 'who your address is registered to']);
 
   async function whoami() {
     const q = line('querying…', 'sys');
@@ -802,10 +885,12 @@
       q.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
       last = d.ip; setUrl('/', TITLE_HOME);
       await render(p, d.ip, d, true);
+      whoamiNext(d);
       return sponsor('whoami');
     }
     q.textContent = 'ok · sample data';
     last = DEMO.self.ip; await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
+    whoamiNext(DEMO.self);
     return sponsor('whoami');
   }
 
@@ -824,7 +909,11 @@
       setUrl('/' + ipText, `${ipText} · non-public IPv${p.v} address | ipterm`);
       await render(p, ipText, null, false);
       line('This address is not routable on the public internet, so it has no owner or location to look up.', 'sys');
-      if (cls === 'private' || cls === 'ula') line(`If it's your router, open http://${p.v === 6 ? '[' + ipText + ']' : ipText} in a browser on the same network to reach its settings.`, 'sys');
+      const local = cls === 'private' || cls === 'ula';
+      if (local) line(`If it's your router, open http://${p.v === 6 ? '[' + ipText + ']' : ipText} in a browser on the same network to reach its settings.`, 'sys');
+      next(['whoami', 'whoami', 'your public IP address, the one websites see'],
+        p.v === 4 && (local || cls === 'cgnat') && [`cidr ${ipText}/24`, `cidr ${ipText}/24`, 'the /24 network around this address'],
+        local && ['router guide', null, "how to find your router's IP address", '/guides/find-router-ip']);
       return;
     }
     let d = null;
@@ -842,6 +931,12 @@
     if (d) setUrl('/' + ipText, ipTitle(ipText, d));
     await render(p, ipText, d, false);
     if (d) await sponsor('ip');
+    if (!d && live) return;                      // the lookup failed: retry is offered instead
+    const block = `${ipText}/${p.v === 4 ? 24 : 64}`;
+    next(d && [`whois ${ipText}`, `whois ${ipText}`, 'registry record: owner and abuse contact'],
+      d && /^AS\d+$/i.test(d.asn || '') && [`asn ${d.asn.toUpperCase()}`, `asn ${d.asn.toUpperCase()}`, 'the network this address belongs to'],
+      [`cidr ${block}`, `cidr ${block}`, `the /${p.v === 4 ? 24 : 64} block around this address`],
+      d && live && ['share', 'share', 'copy a link to this result']);
   }
 
   async function asn(raw, pre) {
@@ -866,6 +961,9 @@
     setUrl('/' + id, `${id} · ${d.name || d.holder || 'network'} | ipterm`);
     await renderAsn(d);
     await sponsor('asn');
+    const top = (d.v4 && d.v4.prefixes && d.v4.prefixes[0]) || (d.v6 && d.v6.prefixes && d.v6.prefixes[0]);
+    next([`whois ${id}`, `whois ${id}`, 'registry record: holder and abuse contact'],
+      top && [`cidr ${top}`, `cidr ${top}`, 'its largest address block'], live && ['share', 'share', 'copy a link to this network']);
   }
 
   // Sample registry records for the preview (deployed sites query the registries live).
@@ -896,6 +994,10 @@
     if (d.error) return line(d.error, 'err');
     setUrl('/cidr/' + d.cidr, (d.v === 4 ? `${d.cidr} subnet: ${d.netmask}, ${d.usableText} usable hosts` : `${d.cidr} IPv6 subnet`) + ' | ipterm');
     await renderCidr(d);
+    next(d.supernet && [`cidr ${d.supernet}`, `cidr ${d.supernet}`, 'the block twice this size'],
+      d.halves && d.halves[0] && [`cidr ${d.halves[0]}`, `cidr ${d.halves[0]}`, 'the first half of this block'],
+      d.range === 'public' ? [`whois ${d.network}`, `whois ${d.network}`, 'who this block is registered to']
+        : d.v === 4 && ['cheat sheet', null, 'subnet mask cheat sheet: /8 to /32', '/guides/subnet-cheat-sheet']);
   }
 
   async function cidrTable() {
@@ -1045,7 +1147,10 @@
     head.append(el('span', 'tag', d.dnssec ? 'dnssec ✓' : 'unsigned'));
     head.append(el('span', 'tag', d.sample ? 'sample data' : '1.1.1.1'));
     out.appendChild(head);
-    if (d.status === 'NXDOMAIN') { line(`${d.name} does not exist (NXDOMAIN).`, 'warn'); return; }
+    if (d.status === 'NXDOMAIN') {
+      line(`${d.name} does not exist (NXDOMAIN).`, 'warn');
+      return next([`whois ${d.name}`, `whois ${d.name}`, 'is the name registered? (a domain can be registered without DNS records)']);
+    }
     if (d.status && d.status !== 'NOERROR') { line(`The resolver answered ${d.status} for ${d.name}.`, 'warn'); return; }
     const R = d.records || {};
     const frag = () => document.createDocumentFragment();
@@ -1080,9 +1185,15 @@
     if (!parseIp(d.name)) rows.push(['DNSSEC', d.dnssec ? 'validated: answers are cryptographically signed' : 'not validated (the domain is not signed)']);
     if (!parseIp(d.name) && !single) rows.push(['registration', cmdLink(`whois ${d.name}`, `whois ${d.name}`, `/whois/${d.name}`)]);
     await kv(rows);
-    if (!single && !parseIp(d.name)) line(`Try: dig ${d.name} SOA, dig ${d.name} CNAME, or whois ${d.name} for the registrar and dates.`, 'sys');
     if (d.sample) line('Sample data with documentation addresses. The live version queries DNS directly.', 'sys');
     const A = (R.A || []).map(r => r.value), MX = (R.MX || []).map(r => r.value), PTR = (R.PTR || []).map(r => r.value);
+    const share = live && !d.sample && ['share', 'share', 'copy a link to these records'];
+    if (parseIp(d.name)) next([`lookup ${d.name}`, `lookup ${d.name}`, 'owner and approximate location'], [`whois ${d.name}`, `whois ${d.name}`, 'registry record'],
+      PTR[0] && looksLikeDomain(PTR[0]) && [`dig ${PTR[0]}`, `dig ${PTR[0]}`, 'look the name up the other way']);
+    else if (single) next([`dig ${d.name}`, `dig ${d.name}`, 'all the common record types'], [`whois ${d.name}`, `whois ${d.name}`, 'registrar, dates and status'], share);
+    else next([`whois ${d.name}`, `whois ${d.name}`, 'registrar, registration and expiry dates'],
+      d.hosting && d.hosting.ip && [`lookup ${d.hosting.ip}`, `lookup ${d.hosting.ip}`, 'who runs the server, and where'],
+      [`dig ${d.name} SOA`, `dig ${d.name} SOA`, 'the zone: primary name server and serial'], share);
     announce(parseIp(d.name) ? `${d.name}: reverse DNS ${PTR[0] || 'none'}.`
       : single ? `${d.name} ${single}: ${(R[single] || []).length} record(s).`
       : `${d.name}: ` + (A.length ? `resolves to ${A.slice(0, 2).join(', ')}` : 'no IPv4 address') + (MX.length ? `, mail by ${MX[0]}` : '') +
@@ -1098,6 +1209,7 @@
     if (p && classify(p)[0] !== 'public') {
       setUrl('/whois/' + q, `whois ${q} | ipterm`);
       line(`${q} is a non-public address (${classify(p)[1] || classify(p)[0]}), so no internet registry holds a record for it.`, 'sys');
+      next([`lookup ${q}`, `lookup ${q}`, 'what this range is for'], ['whoami', 'whoami', 'your public IP address']);
       return announce(`${q} is not a public address, so there is no registry record.`);
     }
     let d = null;
@@ -1115,15 +1227,21 @@
     }
     if (!d.found) {
       line(d.message || `No registry record was found for ${q}.`, 'warn');
-      if (d.kind === 'domain' && d.reason === 'no-rdap') line(`DNS still works for it: dig ${q}`, 'sys');
+      if (d.kind === 'domain' && d.reason === 'no-rdap') line('DNS still works for it.', 'sys');
+      if (d.kind === 'domain') next([`dig ${q}`, `dig ${q}`, 'its DNS records']);
       return;
     }
+    const share = live && !d.sample && ['share', 'share', 'copy a link to this record'];
     if (d.kind === 'domain') {
       setUrl('/whois/' + d.domain, `whois ${d.domain}` + (d.registrar && d.registrar.name ? ` · ${d.registrar.name}` : '') + ' | ipterm');
-      return renderDomainWhois(d);
+      await renderDomainWhois(d);
+      return next([`dig ${d.domain}`, `dig ${d.domain}`, 'its DNS records and who hosts it'], [`dig ${d.domain} MX`, `dig ${d.domain} MX`, 'its mail servers'], share);
     }
     setUrl('/whois/' + q, `whois ${q}` + (d.org ? ` · ${d.org}` : '') + ' | ipterm');
     await renderWhois(d);
+    const block = (d.cidrs || [])[0];
+    if (d.kind === 'asn') next([`asn ${d.query}`, `asn ${d.query}`, 'announced prefixes and address space'], share);
+    else next([`lookup ${d.query}`, `lookup ${d.query}`, 'network and approximate location'], block && [`cidr ${block}`, `cidr ${block}`, 'the registered address block'], share);
   }
 
   function relDays(iso) {                       // "in 41 days", "3 years ago"
@@ -1166,7 +1284,7 @@
       rows.push(['abuse email', a]);
     } else rows.push(['abuse contact', "not listed; use the registrar's website"]);
     if (d.abuse && d.abuse.phone) rows.push(['abuse phone', d.abuse.phone]);
-    rows.push(['DNS records', cmdLink(`dig ${d.domain}`, `lookup ${d.domain}`, '/dns/' + d.domain)]);
+    rows.push(['DNS records', cmdLink(`dig ${d.domain}`, `dig ${d.domain}`, '/dns/' + d.domain)]);
     await kv(rows);
     if (d.abuse && d.abuse.email) line("Report phishing, spam or malware on this domain to the registrar's abuse contact, with the full URL and when you saw it.", 'sys');
     if (d.sample) line('Sample data. The live version queries the domain registry and the registrar (RDAP).', 'sys');
@@ -1250,28 +1368,177 @@
     if (d.sample) line('Sample data. The live version lists the largest announced prefixes and counts the full address space.', 'sys');
   }
 
+  /* ---------- help, man pages and typo suggestions ---------- */
+  // [what to type, what it does, what clicking it runs (an example for commands that take one)]
   const HELP = [
-    ['whoami', 'show your own IP, network and location'],
-    ['leaktest', 'privacy check: WebRTC, IPv6 and time-zone leaks, VPN detection'],
-    ['lookup <ip>', 'look up any IPv4 or IPv6 address'],
-    ['lookup <domain>', 'DNS records, mail and name servers, hosting, DNSSEC'],
-    ['dig <name> [type]', 'one record type: A AAAA MX NS TXT CAA SOA CNAME SRV ... (dig <ip> = reverse)'],
-    ['cidr <range>', 'subnet calculator: cidr 10.0.0.0/22, IP + netmask, or IPv6'],
-    ['whois <ip|ASN|domain>', 'registry record: owner, registrar, dates, name servers, abuse contact'],
-    ['asn <number>', 'network details and address blocks, e.g. asn AS13335'],
-    ['<ip> or <ASN>', 'same as lookup'],
-    ['share', 'copy a link to the current result'],
-    ['privacy', 'what ipterm does and does not collect'],
-    ['copy', 'copy the last address to the clipboard'],
-    ['theme <name>', 'phosphor, amber, ice, contrast or paper'],
-    ['crt on|off', 'turn glow and scanlines on or off'],
-    ['access', 'accessibility and display options'],
-    ['reset', 'forget display settings and return to the defaults'],
-    ['api', 'use ipterm from curl or scripts'],
-    ['history', 'list commands from this session'],
-    ['about', 'where the data comes from'],
-    ['clear', 'clear the screen (Ctrl+L)'],
+    ['whoami', 'show your own IP, network and location', 'whoami'],
+    ['leaktest', 'privacy check: WebRTC, IPv6 and time-zone leaks, VPN detection', 'leaktest'],
+    ['lookup <ip>', 'look up any IPv4 or IPv6 address', 'lookup 8.8.8.8'],
+    ['lookup <domain>', 'DNS records, mail and name servers, hosting, DNSSEC', 'lookup example.com'],
+    ['dig <name> [type]', 'one record type: A AAAA MX NS TXT CAA SOA CNAME SRV ... (dig <ip> = reverse)', 'dig gmail.com MX'],
+    ['cidr <range>', 'subnet calculator: cidr 10.0.0.0/22, IP + netmask, or IPv6', 'cidr 10.0.0.0/22'],
+    ['whois <ip|ASN|domain>', 'registry record: owner, registrar, dates, name servers, abuse contact', 'whois example.com'],
+    ['asn <number>', 'network details and address blocks, e.g. asn AS13335', 'asn AS13335'],
+    ['<ip> or <ASN>', 'same as lookup', null],
+    ['ping [count]', 'round trip from your browser to the nearest Cloudflare data center', 'ping'],
+    ['man <command>', 'details and examples for one command, e.g. man dig', 'man dig'],
+    ['share', 'copy a link to the current result', 'share'],
+    ['copy', 'copy the last address to the clipboard', 'copy'],
+    ['privacy', 'what ipterm does and does not collect', 'privacy'],
+    ['theme <name>', 'phosphor, amber, ice, contrast or paper', 'theme'],
+    ['crt on|off', 'turn glow and scanlines on or off', 'crt'],
+    ['access', 'accessibility and display options', 'access'],
+    ['reset', 'forget display settings and return to the defaults', null],
+    ['api', 'use ipterm from curl or scripts', 'api'],
+    ['history', 'list commands from this session', 'history'],
+    ['about', 'where the data comes from', 'about'],
+    ['clear', 'clear the screen (Ctrl+L)', null],
   ];
+  // Other names each command answers to (run() goes by these too).
+  const ALIASES = { myip: 'whoami', me: 'whoami', leaks: 'leaktest', leak: 'leaktest', privacycheck: 'leaktest', vpntest: 'leaktest',
+    vpncheck: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
+    as: 'asn', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
+    tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
+  // man <command>: [synopsis, description, examples, see also, curl paths]
+  const MAN = {
+    whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
+      ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/json']],
+    leaktest: ['leaktest', 'privacy check: is your IP a known VPN, and does WebRTC, IPv6 or your time zone give away more than your IP? Runs in your browser in a few seconds; nothing is stored.',
+      ['leaktest'], ['whoami']],
+    lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
+      ['lookup 8.8.8.8', 'lookup 2606:4700:4700::1111', 'lookup github.com'], ['whois', 'asn', 'dig'], ['/8.8.8.8']],
+    dig: ['dig <domain> [type]   or   dig <ip>', "DNS records from Cloudflare's resolver (1.1.1.1). With a type, just that type with its TTLs: A AAAA CNAME MX NS TXT CAA SOA SRV PTR DS DNSKEY HTTPS. With an IP address, its reverse DNS name.",
+      ['dig example.com', 'dig gmail.com MX', 'dig github.com TXT', 'dig 8.8.8.8'], ['lookup', 'whois'], ['/dns/example.com', '/dns/gmail.com/MX']],
+    whois: ['whois <ip | ASN | domain>', 'the registry record. For addresses and networks: owner, address block and abuse contact. For domains: registrar, registration and expiry dates, status and name servers. Straight from the registries over RDAP.',
+      ['whois example.com', 'whois 8.8.8.8', 'whois AS13335'], ['lookup', 'asn', 'dig'], ['/whois/example.com', '/whois/8.8.8.8']],
+    asn: ['asn <number>', 'an autonomous system: a network such as an internet provider, a cloud or a large company. Shows its holder and registry, and how many IPv4 and IPv6 prefixes it announces, largest first.',
+      ['asn AS13335', 'asn 15169'], ['whois', 'cidr'], ['/AS13335']],
+    cidr: ['cidr <range>   or   cidr <ip> <netmask>', 'subnet calculator: network and broadcast addresses, netmask, wildcard, usable host range and count, and how the block splits and combines. IPv6 too. Calculated in your browser.',
+      ['cidr 192.168.1.0/24', 'cidr 10.0.0.0/22', 'cidr 192.168.1.10 255.255.255.0', 'cidr 2001:db8::/48'], ['whois', 'asn'], ['/cidr/10.0.0.0/22']],
+    ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
+      ['ping', 'ping 10'], ['whoami', 'traceroute']],
+    traceroute: ['traceroute', "not possible from a browser: tracing a route needs raw ICMP or UDP packets. ping times the connection to ipterm's edge instead.", ['ping'], ['ping', 'asn']],
+    share: ['share', 'copies a link to the current result. Every lookup has its own page, so the link opens the same result.', ['share'], ['copy']],
+    copy: ['copy', 'copies the last IP address shown to the clipboard.', ['copy'], ['share']],
+    history: ['history', 'lists the commands you ran in this tab. Up and Down recall them at the prompt. Nothing is saved after you close the tab.', ['history'], ['clear']],
+    theme: ['theme [phosphor | amber | ice | contrast | paper]', 'changes the colors; with no name, moves to the next theme. Remembered on this device only.', ['theme amber', 'theme paper', 'theme contrast'], ['crt', 'access']],
+    crt: ['crt [on | off]', 'turns the CRT glow, scanlines and vignette on or off; with neither, switches. Remembered on this device only.', ['crt off', 'crt on'], ['theme', 'access']],
+    api: ['api', 'how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP).', ['api'], ['whoami'], ['', '/json', '/8.8.8.8']],
+    man: ['man <command>', 'shows the manual for a command: what it does, examples to click and related commands. help <command> and <command> --help do the same.', ['man dig', 'man whois'], ['help']],
+    help: ['help [command]', 'lists every command; click one to run it. With a command name, shows its manual.', ['help', 'help dig'], ['man']],
+  };
+  // The guides, for `ls guides`, the guide pages' own `man <topic>` prompts, and the GUIDE line of a manual.
+  const GUIDES = [['find-router-ip', "How to find your router's IP address", 'router-ip'], ['private-ip-ranges', 'Private IP address ranges explained', 'private-ip'],
+    ['what-your-ip-reveals', 'What your IP address reveals', 'ip-privacy'], ['ipv4-vs-ipv6', 'IPv4 vs IPv6', 'ipv6'],
+    ['what-is-an-asn', 'What is an ASN?', null], ['subnet-cheat-sheet', 'Subnet mask cheat sheet', null]];
+  const MAN_GUIDE = { whoami: 'what-your-ip-reveals', leaktest: 'what-your-ip-reveals', asn: 'what-is-an-asn', cidr: 'subnet-cheat-sheet' };
+  const guideLink = slug => { const g = GUIDES.find(x => x[0] === slug), a = el('a', 'cmd', g ? g[1] : slug); a.href = '/guides/' + slug; return a; };
+  // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup).
+  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'whois', 'cidr', 'subnet', 'dig', 'lookup', 'nslookup', 'asn', 'ping', 'traceroute',
+    'share', 'copy', 'privacy', 'clear', 'history', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
+  // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
+  function osa(a, b) {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 1; j <= b.length; j++) d[0][j] = j;
+    for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+    return d[a.length][b.length];
+  }
+  function closest(word) {
+    if (!word || word.length > 20) return null;
+    let best = null, bestD = Infinity;
+    for (const k of KNOWN) { const x = osa(word, k); if (x < bestD) { bestD = x; best = k; } }
+    return bestD <= (word.length <= 4 ? 1 : 2) ? best : null;     // short words need a closer match
+  }
+  const runnable = (label, cmd) => { const h = hrefFor(cmd); return h ? cmdLink(label, cmd, h) : cmdButton(label, cmd); };
+  const joined = nodes => { const f = document.createDocumentFragment(); nodes.forEach((n, i) => { if (i) f.append('  ·  '); f.append(n); }); return f; };
+
+  async function help() {
+    await kv(HELP.map(([k, v, cmd]) => {
+      if (!cmd) return [k, v];
+      const n = runnable(k, cmd); n.title = 'run: ' + cmd;
+      return [n, v];
+    }));
+    line('Click a command to run it (the ones with <…> run an example). man <command> shows details, e.g. man dig.', 'sys');
+    announce('Command list. Each command runs when you activate it. Type man and a command name for details.');
+  }
+
+  async function man(topic) {
+    const t = String(topic || '').toLowerCase(), name = ALIASES[t] || t;
+    const m = MAN[name], h = HELP.find(r => r[0].split(' ')[0] === name);
+    const topicGuide = GUIDES.find(g => g[2] === t);
+    if (!m && !h && topicGuide) {                 // the guide pages head themselves with `man router-ip` and so on
+      const d = el('div', 'ln sys'); d.append(`${t} is a guide: `, guideLink(topicGuide[0]));
+      out.appendChild(d); scroll();
+      return announce(`${t} is a guide: ${topicGuide[1]}.`);
+    }
+    if (!m && !h) {
+      line(`No manual entry for ${topic}.`, 'err');
+      const g = closest(t);
+      return next(g && (MAN[g] || HELP.some(r => r[0].split(' ')[0] === g)) && [`man ${g}`, `man ${g}`], ['help', 'help', 'all commands']);
+    }
+    const head = el('div', 'head');
+    head.append(el('span', 'hip', 'man ' + name), el('span', 'tag', 'manual'));
+    out.appendChild(head);
+    const also = Object.keys(ALIASES).filter(a => ALIASES[a] === name && a !== '?');
+    const rows = [['NAME', `${name} - ${m ? m[1] : h[1]}`], ['SYNOPSIS', m ? m[0] : h[0]]];
+    if (m) rows.push(['EXAMPLES', joined(m[2].map(c => runnable(c, c)))]);
+    if (also.length) rows.push(['ALSO', also.join(', ')]);
+    if (m && m[4]) {
+      const base = live ? location.origin : 'https://your-domain';
+      m[4].forEach((p, i) => rows.push([i ? '' : 'CURL', `curl ${base}${p}`]));
+    }
+    if (m && m[3].length) rows.push(['SEE ALSO', joined(m[3].map(c => cmdButton(c, 'man ' + c)))]);
+    if (MAN_GUIDE[name]) rows.push(['GUIDE', guideLink(MAN_GUIDE[name])]);
+    await kv(rows);
+    announce(`Manual for ${name}: ${m ? m[1] : h[1]}`);
+  }
+
+  /* ---------- ping and traceroute ----------
+     Browsers can't send ICMP, so ping times HTTPS requests to /cdn-cgi/trace: Cloudflare's edge answers
+     that itself (it never reaches the Worker, so it costs nothing and nothing is logged by ipterm) and
+     names the data center. The connection is already open, so the time is a real round trip. */
+  async function ping(args = []) {
+    // The count is a bare number or follows -c / -n / --count (Linux and Windows habits); the host is the
+    // first other argument that isn't a flag or a flag's value.
+    let count = 4, host = null;
+    args.forEach((x, i) => {
+      const prev = args[i - 1] || '';
+      if (/^\d+$/.test(x) && (/^(-[cn]|--count)$/i.test(prev) || !/^-/.test(prev))) count = Math.max(1, Math.min(10, Number(x)));
+      else if (!host && !/^-/.test(x) && !/^-/.test(prev)) host = x;
+    });
+    if (host) line(`Browsers can't send ICMP, so ${host} can't be pinged from a web page. Timing your connection to ipterm's edge instead.`, 'sys');
+    if (!live) return line('ping times your connection to the deployed site, so it only works there.', 'warn');
+    line(`PING ${location.host}: ${count} HTTPS round trip${count > 1 ? 's' : ''} to the nearest Cloudflare data center`, 'sys');
+    const times = []; let colo = '';
+    for (let i = 1; i <= count; i++) {
+      if (i > 1) await new Promise(r => setTimeout(r, 500));
+      const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 5000), t0 = performance.now();
+      try {
+        const r = await fetch('/cdn-cgi/trace', { cache: 'no-store', credentials: 'omit', signal: ctrl.signal });
+        const m = /^colo=(\w+)$/m.exec(await r.text()), ms = performance.now() - t0;
+        // An answer that isn't a trace means Cloudflare's edge isn't in front (e.g. `wrangler dev`).
+        if ((!r.ok || !m) && i === 1) return line("ping needs Cloudflare's edge, which answers /cdn-cgi/trace, and it isn't there (for example under wrangler dev). It works on the deployed site.", 'warn');
+        if (!r.ok || !m) throw new Error('no trace');
+        colo = m[1]; times.push(ms);
+        line(`reply from ${colo}: seq=${i} time=${ms.toFixed(1)} ms`);
+      } catch { line(`seq=${i}: no reply`, 'warn'); } finally { clearTimeout(timer); }
+    }
+    line(`--- ${count} sent, ${times.length} received, ${Math.round((count - times.length) / count * 100)}% lost`, 'sys');
+    if (times.length) {
+      const s = [...times].sort((a, b) => a - b), avg = times.reduce((a, b) => a + b, 0) / times.length;
+      line(`round trip min/avg/max = ${s[0].toFixed(1)}/${avg.toFixed(1)}/${s[s.length - 1].toFixed(1)} ms · data center ${colo}`, 'sys');
+      announce(`ping: ${times.length} of ${count} replies, average ${Math.round(avg)} milliseconds to ${colo}.`);
+    } else announce('ping: no replies.');
+    next(count < 10 && ['ping 10', 'ping 10', 'a longer run'], ['whoami', 'whoami', 'your IP address and network']);
+  }
+  function traceroute(arg) {
+    line("traceroute can't run in a browser: tracing a route needs raw ICMP or UDP packets, which web pages can't send.", 'sys');
+    const t = arg && (parseIp(arg) || /^as\d+$/i.test(arg) || looksLikeDomain(arg)) ? arg : null;
+    next(['ping', 'ping', 'time your connection to the nearest Cloudflare data center'], t && [`lookup ${t}`, `lookup ${t}`, 'who runs it, and where']);
+  }
 
   const THEMES = ['phosphor', 'amber', 'ice', 'contrast', 'paper'];
   function setTheme(name) {
@@ -1343,8 +1610,8 @@
     clip(url, 'copied link: ' + url, 'link: ' + url + '   (the clipboard is blocked here, so copy it by hand)');
   }
 
-  function privacy() {
-    lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
+  async function privacy() {
+    await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
       'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
     const d = el('div', 'ln sys'); const a = el('a', 'cmd', 'read the full privacy policy ↗'); a.href = '/privacy';
@@ -1371,31 +1638,55 @@
     const cmd = raw.trim(); echo(raw);
     if (!cmd) return;
     hist.push(cmd); hIdx = hist.length;
-    const [c, ...args] = cmd.split(/\s+/);
-    switch (c.toLowerCase()) {
-      case 'help': case '?': case 'man': return kv(HELP);
-      case 'whoami': case 'myip': case 'me': return whoami();
-      case 'leaktest': case 'leaks': case 'leak': case 'privacycheck': case 'vpntest': case 'vpncheck': return leaktest();
-      case 'whois': case 'rdap':
-        return args[0] ? whois(args[0]) : toolIntro('whois');
-      case 'cidr': case 'subnet': case 'ipcalc': return cidr(args.join(' '));
-      case 'dig': case 'dns': case 'nslookup': case 'host':
-        return args[0] ? dns(args[0], args[1]) : toolIntro('dns');
-      case 'lookup': case 'geo':
-        return args[0] ? lookup(args[0]) : line('usage: lookup <ip or ASN>   example: lookup 8.8.8.8', 'warn');
-      case 'asn': case 'as':
-        return args[0] ? asn(args[0]) : line('usage: asn <number>   example: asn AS13335', 'warn');
-      case 'share': case 'link': return share();
+    const [c0, ...args] = cmd.split(/\s+/);
+    const lc = c0.toLowerCase(), c = ALIASES[lc] || lc;
+    if (args.length === 1 && /^(--help|-h)$/.test(args[0]) && (MAN[c] || HELP.some(r => r[0].split(' ')[0] === c))) return man(c);
+    const localNote = () => line("Browsers can't read your device's own network addresses. This is the public address websites see:", 'sys');
+    switch (c) {
+      case 'help': case 'man': return args[0] ? man(args[0]) : help();
+      case 'whoami': return whoami();
+      case 'ifconfig': case 'ipconfig': localNote(); return whoami();
+      case 'ip':                                  // `ip a` from Linux; `ip 8.8.8.8` is a lookup
+        if (args[0] && (parseIp(args[0]) || /^as\d+$/i.test(args[0]) || looksLikeDomain(args[0]))) return lookup(args[0]);
+        localNote(); return whoami();
+      case 'leaktest': return leaktest();
+      case 'whois': return args[0] ? whois(args[0]) : toolIntro('whois');
+      case 'cidr':                                // `cidr --table` heads the subnet cheat sheet guide
+        if (/^--?table$/i.test(args[0] || '') && CIDRLIB) return cidrTable();
+        return cidr(args.join(' '));
+      case 'dig': return args[0] ? dns(args[0], args[1]) : toolIntro('dns');
+      case 'lookup': return args[0] ? lookup(args[0]) : line('usage: lookup <ip, domain or ASN>   example: lookup 8.8.8.8', 'warn');
+      case 'asn': return args[0] ? asn(args[0]) : line('usage: asn <number>   example: asn AS13335', 'warn');
+      case 'ping': return ping(args);
+      case 'traceroute': return traceroute(args[0]);
+      case 'share': return share();
       case 'privacy': return privacy();
-      case 'clear': case 'cls': out.textContent = ''; return;
+      case 'clear': out.textContent = ''; return;
       case 'history':
         return hist.length > 1 ? lines(hist.slice(0, -1).map((h, i) => String(i + 1).padStart(4) + '  ' + h)) : line('No history yet.', 'sys');
       case 'theme': return theme(args[0]);
-      case 'crt': case 'fx': return crt(args[0]);
+      case 'crt': return crt(args[0]);
       case 'reset': return reset();
-      case 'access': case 'a11y': case 'accessibility': return access();
+      case 'access': return access();
       case 'copy': return copy();
-      case 'api': case 'curl': return apiHelp();
+      case 'api': return apiHelp();
+      // what people type out of habit in other terminals (and the prompts shown on the site's own pages)
+      case 'ls':
+        if (/^guides\/?$/i.test(args[0] || '')) {
+          GUIDES.forEach(([slug]) => { const d = el('div', 'ln'); d.append(guideLink(slug)); out.appendChild(d); });
+          return scroll();
+        }
+        line('No files here, just commands:', 'sys'); return help();
+      case 'cat':
+        if (/^privacy(\.txt)?$/i.test(args[0] || '')) return privacy();
+        return line('cat: no files here, just commands. Type help to see them.', 'sys');
+      case 'cd': return line('cd: there is only one directory here. Type help to see what you can do.', 'sys');
+      case 'pwd': return line('/home/guest', 'sys');
+      case 'sudo': return line('guest is not in the sudoers file. (Nothing is reported: ipterm logs nothing about visitors.)', 'sys');
+      case 'exit': return line('There is no session to end: no account, no cookies and nothing kept on the server, so you can just close the tab.', 'sys');
+      case 'date': return line(new Date().toUTCString(), 'sys');
+      case 'echo': return line(args.join(' '));
+      case 'uname': return line('ipterm 0.2 (Cloudflare Workers)', 'sys');
       case 'about':
         return lines([
           'ipterm shows who operates an IP address or network and roughly where it sits.',
@@ -1405,17 +1696,47 @@
           'Map data: Natural Earth (public domain).',
           'No cookies and no tracking. Sponsored lines are labeled and are plain links. Type privacy for details.',
         ], 'sys');
-      default:
-        if (parseIp(c) || /^as\d+$/i.test(c)) return lookup(c);
+      default: {
+        if (parseIp(c0) || /^as\d+$/i.test(c0)) return lookup(c0);
         if (looksLikeCidr(cmd)) return cidr(cmd);
-        if (looksLikeDomain(c)) return dns(c);
-        line(`command not found: ${c}. Type help for the list.`, 'err');
+        if (looksLikeDomain(c0)) return dns(c0);
+        const guess = closest(lc);
+        if (!guess) return line(`command not found: ${c0}. Type help for the list.`, 'err');
+        line(`command not found: ${c0}`).className = 'ln err';     // spoken once, with the suggestion, below
+        const fix = [guess, ...args].join(' '), d = el('div', 'ln sys');
+        d.append('did you mean ', runnable(fix, fix), '?');
+        out.appendChild(d); scroll();
+        announce(`command not found: ${c0}. Did you mean ${fix}? Type help for the list.`);
+      }
     }
   }
 
+  // Type-ahead, as in a real terminal: a command entered while another runs waits its turn (a few at
+  // most). If the one running is a slow one, a note says so; quick ones just finish first.
+  let running = 'whoami', startedAt = 0;
+  const queued = [];
+  const runQueued = () => { if (queued.length) setTimeout(() => exec(queued.shift()), 0); };
   async function exec(v) {
-    if (busy) return; busy = true;
-    try { await run(v); } finally { busy = false; scroll(); }
+    if (busy) {
+      if (!String(v).trim() || queued.length >= 5) return;
+      queued.push(v);
+      if (performance.now() - startedAt > 400) {
+        const msg = `queued: ${String(v).trim()} (runs after ${running})`;
+        line(msg, 'sys'); announce(msg);
+      }
+      return;
+    }
+    busy = true; running = String(v).trim(); startedAt = performance.now(); nextItems = null;
+    const mark = out.lastChild;
+    try { await run(v); } finally {
+      busy = false;
+      if (!nextItems && failedUpstream(mark)) next(['retry', running, 'run the same command again']);
+      flushNext(); scroll();
+      // On phones a result rarely fits on screen: start at its top (the command) rather than its last line.
+      const first = mark ? mark.nextSibling : out.firstChild;
+      if (!hasMouse() && first && first.isConnected) reveal(first);
+      runQueued();
+    }
   }
 
   /* ---------- wiring ---------- */
@@ -1465,37 +1786,65 @@
     try { return JSON.parse(s.textContent); } catch { return null; }
   }
 
+  // Whatever the first page runs counts as running, so input meanwhile waits its turn (see exec).
   async function boot() {
+    busy = true; startedAt = performance.now();
+    try { await start(); } finally { busy = false; fast = hold = false; runQueued(); }
+  }
+
+  async function start() {
     const init = readInitial();
+    // The homepage carries your address (kind "self"), so there is nothing to ask the API for.
+    const selfP = init && init.kind === 'self' && init.data ? parseIp(init.data.ip) : null;
     // Server summary for no-JS visitors and crawlers. The terminal redraws its heading line and table,
-    // so only those go; the summary sentence and links stay for crawlers that run scripts. A 404 is
-    // drawn in full by the terminal (and isn't indexed), so its summary goes too.
+    // so only those go; the summary sentence and links stay for crawlers that run scripts. A 404 and
+    // the homepage's whoami are drawn in full by the terminal, so their server copies go entirely.
     const stat = document.getElementById('static');
-    if (stat && init && init.kind === 'notfound') stat.remove();
+    if (stat && (selfP || (init && init.kind === 'notfound'))) stat.remove();
     else if (stat) stat.querySelectorAll('.head, dl').forEach(n => n.remove());
+    fast = hold = !!selfP;                                // swap the server's copy for the terminal's in one frame
     await lines(['ipterm 0.2 · IP address lookup', 'type help for commands, or enter any IP address, domain or ASN'], 'sys');
 
     if (init && init.kind === 'notfound') { setLive(true); notFound(init); return focusInput(); }
     if (init && init.kind === 'tool' && (TOOL_INTRO[init.tool] || init.tool === 'leaktest')) {
       setLive(true);
-      const cmd = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest' }[init.tool];
-      hist.push(cmd); hIdx = hist.length;
+      const cmd = running = { whois: 'whois', dns: 'dig', cidr: 'cidr', leaktest: 'leaktest' }[init.tool];
+      const mark = out.lastChild;
       navPush = false;
       try { await run(cmd); } finally { navPush = true; }
+      if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
+      flushNext();
       return focusInput();
     }
     if (init && ['ip', 'asn', 'whois', 'dns', 'cidr'].includes(init.kind) && init.query) {
       setLive(true);
       const cmd = init.kind === 'cidr' ? 'cidr ' + init.query : init.kind === 'dns' ? 'dig ' + init.query + (init.qtype && init.qtype !== 'PTR' ? ' ' + init.qtype : '')
         : (init.kind === 'asn' ? 'asn ' : init.kind === 'whois' ? 'whois ' : 'lookup ') + init.query;
+      running = cmd;
       echo(cmd); hist.push(cmd); hIdx = hist.length;
+      const mark = out.lastChild;
       navPush = false;
       try { await (init.kind === 'asn' ? asn(init.query, init) : init.kind === 'whois' ? whois(init.query, init) : init.kind === 'dns' ? dns(init.query, init.qtype, init) : init.kind === 'cidr' ? cidr(init.query, init) : lookup(init.query, init)); }
       finally { navPush = true; }
+      if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
+      flushNext();
       return focusInput();
     }
 
-    echo('whoami');
+    echo('whoami'); hist.push('whoami'); hIdx = hist.length;
+    if (selfP) {
+      setLive(true);
+      const d = init.data;
+      last = d.ip; await render(selfP, d.ip, d, true);
+      fast = false;
+      whoamiNext(d);
+      await sponsor('whoami');
+      flushNext();
+      hold = false;
+      reveal(out.querySelector('dt.bigl'));               // only scrolls if your IP is out of view
+      return focusInput();
+    }
+    fast = hold = false;
     const q = line('querying…', 'sys');
     const t0 = performance.now();
     const d = await api('');
@@ -1504,18 +1853,22 @@
       setLive(true);
       q.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
       last = d.ip; await render(p, d.ip, d, true);
+      whoamiNext(d);
       await sponsor('whoami');
-      reveal(out.querySelector('dt.bigl'));
     } else if (d && d.error && d.error !== 'no-api' && !/^network/.test(d.error)) {
       setLive(true);                                     // the server is there but refused (e.g. rate limit)
       q.textContent = d.error; q.className = 'ln err'; announce(q.textContent);
+      next(['retry', 'whoami', 'ask again']);
     } else {
       setLive(false);
       q.textContent = 'No lookup API at /api/lookup, so this preview runs on sample data. Deploy the Worker to go live.';
       q.className = 'ln warn'; announce(q.textContent);
       last = DEMO.self.ip; await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
+      whoamiNext(DEMO.self);
       await sponsor('whoami');
     }
+    flushNext();
+    reveal(out.querySelector('dt.bigl'));
     focusInput();
   }
   boot();

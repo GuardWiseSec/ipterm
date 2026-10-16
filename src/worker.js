@@ -1,7 +1,7 @@
 // ipterm: Cloudflare Worker that serves the terminal page, the shareable IP and ASN pages, and the API.
 //
 // Routes (pages answer browsers with HTML and curl/scripts with JSON)
-//   GET /                   the terminal (curl/wget get your IP as plain text)
+//   GET /                   the terminal, with your IP already in the page (curl/wget get it as plain text)
 //   GET /ip                 your IP as plain text
 //   GET /json               your IP details as JSON
 //   GET /<ip>               page for any IPv4/IPv6 address        (add ?format=json to force JSON)
@@ -70,7 +70,7 @@ async function route(request, env, ctx) {
   const html = wantsHtml(request, url, ua);
   const io = { request, env, ctx, url, me };
 
-  if (path === '/') return CLI_UA.test(ua) ? text(me + '\n') : shell(io, { status: 200 });
+  if (path === '/') return CLI_UA.test(ua) ? text(me + '\n') : homePage(io);
   if (path === '/ip') return text(me + '\n');
   if (path === '/robots.txt') return robots(url);
   if (path === '/sitemap.xml') return sitemap(url);
@@ -405,14 +405,16 @@ async function checkData(io) {
   return { ...self, network };
 }
 
-async function selfInfo(io) {
+async function selfInfo(io, quick = false) {
   await limit(io);
   const cf = io.request.cf || {}, ip = io.me, p = parseIp(ip);
+  const hostname = await ptr(ip, quick);
   return {
     ip,
     version: p ? p.v : null,
     source: 'edge',
-    hostname: await ptr(ip),
+    hostname: hostname || null,
+    ...(hostname === undefined && quick ? { ptrTimedOut: true } : {}),   // the page offers a reverse lookup instead
     asn: cf.asn ? 'AS' + cf.asn : null,
     org: cf.asOrganization || null,
     city: cf.city || null,
@@ -724,20 +726,23 @@ function v4Addresses(prefixes) {
   return total;
 }
 
-// Reverse DNS through Cloudflare's DNS-over-HTTPS resolver.
-async function ptr(ip) {
+// Reverse DNS through Cloudflare's DNS-over-HTTPS resolver. Returns null when there is no PTR record
+// and undefined when the resolver didn't answer. quick (the homepage): one short try, so a slow
+// resolver never holds up the first paint.
+async function ptr(ip, quick = false) {
   const p = parseIp(ip);
   if (!p) return null;
   const name = p.v === 4
     ? [...p.o].reverse().join('.') + '.in-addr.arpa'
     : p.g.map(x => x.toString(16).padStart(4, '0')).join('').split('').reverse().join('.') + '.ip6.arpa';
+  const url = `https://cloudflare-dns.com/dns-query?name=${name}&type=PTR`, init = { headers: { accept: 'application/dns-json' } };
   try {
-    const r = await fetchRetry(`https://cloudflare-dns.com/dns-query?name=${name}&type=PTR`, { headers: { accept: 'application/dns-json' } }, 'dns', 3000);
+    const r = quick ? await fetch(url, { ...init, signal: AbortSignal.timeout(400) }) : await fetchRetry(url, init, 'dns', 3000);
     const d = await r.json();
     const a = (d.Answer || []).find(x => x.type === 12);
     return a ? String(a.data).replace(/\.$/, '') : null;
   } catch {
-    return null;
+    return undefined;
   }
 }
 
@@ -1112,7 +1117,7 @@ async function loadShell(io) {
 // Fills the terminal page with a title, description, share tags, a static summary that works
 // without JavaScript (and for search engines), and the data the terminal boots from. Pages other
 // than the homepage get their own h1 (the title without " | ipterm") in place of the generic one.
-async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null }) {
+async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null, cache = null }) {
   let h = await loadShell(io);
   const canonical = io.url.origin + (path === '/' ? '/' : encodePath(path));
   // Replacements use functions: with a plain string, "$`", "$'" and "$&" in page text (which can come
@@ -1136,16 +1141,66 @@ async function shell(io, { status = 200, title, desc, path = '/', body = '', ini
   if (path !== '/') h = h.replace(/\s*<p class="intro">[\s\S]*?<\/p>/, '');   // the plain-English line is for the homepage
   const h1 = path !== '/' && title ? title.replace(/\s*\|\s*ipterm$/, '') : null;
   if (h1) h = h.replace(/<h1 class="sr-only">[^<]*<\/h1>/, () => `<h1 class="sr-only">${esc(h1)}</h1>`);
+  // The homepage terminal shows the reader's own address (a crawler's, when a crawler renders it): never a snippet.
+  if (path === '/') h = h.replace('<div id="out"', () => '<div id="out" data-nosnippet');
   h = h.replace('<!--SEO-->', () => head).replace('<!--STATIC-->', () => body).replaceAll('%ORIGIN%', () => io.url.origin);
   if (initial) h = h.replace('<!--INITIAL-->', () => `<script type="application/json" id="ipterm-initial">${safeJson(initial)}</script>`);
   return new Response(h, {
     status,
     headers: {
       'content-type': 'text/html; charset=utf-8',
-      'cache-control': status === 200 ? 'public, max-age=300' : 'no-store',
+      'cache-control': cache || (status === 200 ? 'public, max-age=300' : 'no-store'),
       vary: 'Accept, User-Agent',
     },
   });
+}
+
+// The homepage answers "what is my IP" in its HTML: the number is there on first paint (and without
+// JavaScript), and the terminal draws the same data without asking the API again. The page is
+// personal, so no shared cache may keep it. If the lookup fails (rate limited, say), the plain shell
+// goes out and the terminal asks for itself, as before. So does a prefetch or prerender: it may come
+// through a proxy (Chrome's private prefetch proxy, from search results) or be shown minutes later,
+// and either way the address it would carry might not be the visitor's.
+async function homePage(io) {
+  const cache = 'private, no-store';
+  const purpose = io.request.headers.get('sec-purpose') || io.request.headers.get('purpose') || '';
+  if (io.request.method === 'HEAD' || /prefetch|prerender/i.test(purpose)) return shell(io, { status: 200, cache });
+  let d = null;
+  try { d = await selfInfo(io, true); } catch {}
+  const p = d && parseIp(d.ip);
+  if (!p) return shell(io, { status: 200, cache });
+  return shell(io, { status: 200, cache, initial: { kind: 'self', data: d }, body: homeStatic(d, p) });
+}
+
+// The top of what the terminal draws for whoami (boot lines, heading, an empty map frame of the same
+// size, then the same rows in the same order down to the location), so swapping it for the live
+// terminal doesn't move anything. Parts that only make sense with scripts (the map frame, the other IP
+// version still "checking") are hidden without them (app.css). Kept out of search snippets, since a
+// crawler would see its own address here. Matches boot() and render() in app.js.
+function homeStatic(d, p) {
+  const ctry = d.country ? d.country + (d.countryCode ? ` [${d.countryCode}]` : '') : d.countryCode;
+  const place = [d.city, d.region, ctry].filter(Boolean).join(', ');
+  const city = d.lat != null && d.lon != null;
+  const map = city || d.countryCode
+    ? `<figure class="geo" aria-hidden="true"><canvas></canvas><figcaption class="geo-cap"><span>${esc(city ? 'approximate area' : 'country-level only · ' + (d.country || d.countryCode))}</span></figcaption></figure>`
+    : '';
+  const link = (href, text) => `<a class="cmd" href="${esc(encodePath(href))}">${esc(text)}</a>`;
+  const row = (k, html, cls = '') => `<dt${cls ? ` class="${cls}${cls === 'js-only' ? '' : 'l'}"` : ''}>${esc(k)}</dt><dd${cls ? ` class="${cls}"` : ''}>${html}</dd>`;
+  const pub = !nonPublicReason(p);
+  const asn = /^AS\d{1,10}$/.test(d.asn || '') ? d.asn : null;
+  const host = d.hostname ? (normalizeDomain(d.hostname) ? link('/dns/' + d.hostname, d.hostname) : esc(d.hostname))
+    : d.ptrTimedOut ? 'reverse DNS was slow to answer: ' + link('/dns/' + d.ip, 'dig ' + d.ip) : null;
+  const net = (asn ? link('/' + asn, asn) : d.asn ? esc(d.asn) : '') + (d.org ? (d.asn ? '  ' : '') + esc(d.org) : '');
+  return `<div class="static" id="static" data-nosnippet>` +
+    `<div class="ln sys">ipterm 0.2 · IP address lookup</div><div class="ln sys">type help for commands, or enter any IP address, domain or ASN</div>` +
+    `<div class="ln echo"><span class="ps1">guest@ipterm:~$ </span>whoami</div>` +
+    `<div class="head"><span class="hip">whoami</span><span class="tag">IPv${p.v}</span><span class="tag ${pub ? 'pub' : 'priv'}">${pub ? 'public' : 'non-public'}</span><span class="tag">cloudflare edge</span></div>` +
+    map + `<dl class="kv">` + row('your ip', esc(d.ip), 'big') +
+    row('', 'This is your public IP address: the number websites and apps see when you connect. Its location is roughly where your internet provider is, not your home.', 'plain') +
+    row(p.v === 4 ? 'IPv6' : 'IPv4', '<span class="ttl">checking…</span>', 'js-only') +
+    (host ? row('hostname', host) : '') + (net ? row('network', net) : '') +
+    (net && pub ? row('registry', link('/whois/' + d.ip, 'whois ' + d.ip)) : '') +
+    (place ? row('location', esc(place)) : '') + `</dl></div>`;
 }
 
 function homeJsonLd(origin) {

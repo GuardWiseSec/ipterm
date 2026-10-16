@@ -38,11 +38,11 @@
   <nav class="chips" aria-label="Quick commands">
     <span>run</span>
     <button type="button" data-cmd="whoami">whoami</button>
-    <button type="button" data-cmd="lookup 8.8.8.8">lookup 8.8.8.8</button>
-    <button type="button" data-cmd="lookup github.com">lookup github.com</button>
     <button type="button" data-cmd="leaktest">leaktest</button>
-    <button type="button" data-cmd="lookup 192.168.1.1">lookup 192.168.1.1</button>
-    <button type="button" data-cmd="theme">theme</button>
+    <button type="button" data-cmd="lookup 8.8.8.8">lookup 8.8.8.8</button>
+    <button type="button" data-cmd="whois github.com">whois github.com</button>
+    <button type="button" data-cmd="dig gmail.com MX">dig gmail.com MX</button>
+    <button type="button" data-cmd="cidr 192.168.1.0/24">cidr 192.168.1.0/24</button>
     <button type="button" data-cmd="help">help</button>
   </nav>
   <footer class="foot"><span class="foot-links"><a href="/privacy">privacy policy</a><button type="button" class="foot-btn" data-cmd="access">accessibility</button></span><span>no cookies · no tracking · sponsored links are labeled</span></footer>
@@ -55,6 +55,15 @@
     <p class="below-lede">ipterm is a free IP address lookup that works like a terminal. Run <code>whoami</code> to see your public IP address, the network (ISP) it belongs to and its approximate location, check whether your browser or VPN leaks more than that with <code>leaktest</code>, or look up any IPv4 or IPv6 address, any domain's DNS records, registry (whois) records and any autonomous system (ASN). Every result has its own page you can share. No accounts, no cookies, no tracking.</p>
 
     <div class="below-grid">
+      <div>
+        <h3>Tools</h3>
+        <ul class="link-list">
+          <li><a href="/leaktest" data-cmd="leaktest">VPN leak test</a> WebRTC, IPv6, time zone</li>
+          <li><a href="/whois" data-cmd="whois">Whois lookup</a> domains, IPs, networks</li>
+          <li><a href="/dns" data-cmd="dig">DNS lookup</a> A, MX, TXT and more</li>
+          <li><a href="/cidr" data-cmd="cidr">Subnet calculator</a> CIDR and netmasks</li>
+        </ul>
+      </div>
       <div>
         <h3>Public DNS resolvers</h3>
         <ul class="link-list">
