@@ -42,14 +42,16 @@ ipterm started as a terminal-style "what's my IP" page and grew a command-line l
 
 The card takes ?w=$COLUMNS to fit your terminal, ?color=0, and ?redact to hide the IP for screenshots. (In Windows PowerShell, type curl.exe: plain curl there is Invoke-WebRequest.)
 
-What I tried to do differently: no cookies, no analytics, no accounts, and nothing about visitors is stored. The CSP is default-src 'none', with scripts and styles only from the site itself and one outside host (ipify, so the page can show your other IP version). Values from DNS and the registries are stripped of control characters before they reach your terminal. It's MIT-licensed, and the footer shows the commit that's deployed, so you can read the code that is running: <REPO URL>
+What I tried to do differently: no cookies, no analytics, no accounts, and nothing about visitors is stored. The CSP is default-src 'none', with scripts and styles only from the site itself; the only other hosts the page may talk to are ipify (so it can show your other IP version) and ipterm's own DNS-leak-test zone. Values from DNS and the registries are stripped of control characters before they reach your terminal. It's MIT-licensed, and the footer shows the commit that's deployed, so you can read the code that is running: <REPO URL>
 
 How it's run: one Cloudflare Worker, vanilla JS, no build step. Your own address comes from Cloudflare's edge; other addresses from IPinfo (with a daily budget for city-level lookups), networks from RIPEstat, whois over RDAP, DNS from 1.1.1.1. Uncached lookups are limited to 30 a minute per address. The port checker only ever connects to the address the request came from, one port at a time, 10 a minute.
 
-The browser version at ipterm.net is the same thing as a terminal, plus a VPN leak test (WebRTC, IPv6, time zone) and a subnet calculator. Happy to answer questions, and I'd like to hear what you'd want from the command line.
+The browser version at ipterm.net is the same thing as a terminal, plus a VPN leak test (WebRTC, IPv6, DNS, time zone) and a subnet calculator. Happy to answer questions, and I'd like to hear what you'd want from the command line.
 ```
 
-Before posting, replace `<REPO URL>`, and run every line in the text from a clean shell (see the checklist).
+Before posting, replace `<REPO URL>`, and run every line in the text from a clean shell (see the checklist). If the
+DNS leak test's server isn't running by launch day, take "DNS, " out of the leak test's list and "and ipterm's own
+DNS-leak-test zone" out of the CSP sentence: without it, leaktest says DNS wasn't tested and the CSP doesn't name the zone.
 
 ### What it looks like
 
@@ -134,6 +136,9 @@ A screenshot of the colored version (taken with `?redact`) is worth putting at t
       for i in $(seq 1 12); do curl -4 -s -o /dev/null -w '%{http_code}\n' https://ipterm.net/port/443; done | sort | uniq -c
       ```
 
+- [ ] DNS leak test (optional for launch): set up `dnsleak-server/` on its VPS and the `DNSLEAK_KEY` secret as
+      `dnsleak-server/README.md` describes, then run `leaktest` on the live site and check that its DNS line names
+      your resolver. Until then it says DNS leaks weren't tested, which is fine to launch with.
 - [ ] Check `/me`, `/line` and `/expect` live, where `request.cf` has real data: `curl ipterm.net/me`,
       `curl 'ipterm.net/me?w=40&color=0'`, `curl 'ipterm.net/me?redact'`, `curl ipterm.net/line`,
       `curl -fsS ipterm.net/expect/$(curl -s ipterm.net/asn) && echo match` and `curl -fsS ipterm.net/expect/AS1 || echo "412 as it should"`.
@@ -176,7 +181,9 @@ falls back to Lite, so a scraper can't run up the bill. Your own address never g
 **What do you log?** ipterm logs nothing about visitors: no Workers Logs, no analytics, no Analytics Engine, no
 cookies. What exists briefly: the rate limiter counts requests per address (per /64 for IPv6) for a minute; the
 per-visitor share of the Core budget is a salted hash held in memory, with the salt replaced every hour; and lookups
-of *other* addresses are cached for up to six hours, keyed by the address looked up, not by who asked. Cloudflare,
+of *other* addresses are cached for up to six hours, keyed by the address looked up, not by who asked. The DNS
+leak test's own DNS server (a small VPS) sees your resolver's address, not yours, keeps it in memory for under two
+minutes until the check collects it, and keeps no logs. Cloudflare,
 which runs the site, processes requests like any host (its own privacy policy applies). The code is public, so all
 of this can be checked.
 

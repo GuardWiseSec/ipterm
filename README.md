@@ -213,6 +213,8 @@ ipterm is MIT-licensed, so you can run your own copy. Follow "Deploy" above, the
    not ipterm.net. Copies shouldn't compete with ipterm.net in search or carry its affiliate links.
 2. Set `SOURCE_URL` to your fork (or leave it empty), so the footer links the code you actually run.
 3. Change the two `namespace_id`s under `[[ratelimits]]` if your account already uses 1001 or 1002.
+   `DNSLEAK_ZONE` and `DNSLEAK_API` point at ipterm.net's own leak-test server: the test stays off without the
+   `DNSLEAK_KEY` secret, but change them to your own (`dnsleak-server/README.md`) or delete both lines.
 4. Edit what names ipterm.net: the contact address in `public/privacy.html` (and anything in the policy your copy
    does differently) and the URLs in `public/openapi.json` and `public/llms.txt`. Canonical and share links use your
    own address automatically.
