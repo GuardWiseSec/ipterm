@@ -7,7 +7,7 @@
   // hold: during that swap, keep the screen where the server's copy had it instead of following the output.
   let fast = false, hold = false;
   const sleep = ms => (fast ? Promise.resolve() : new Promise(r => setTimeout(r, reduced ? 0 : ms)));
-  let live = false, last = null, busy = false;
+  let live = false, busy = false;
   const hist = []; let hIdx = 0;
 
   /* ---------- output helpers ---------- */
@@ -648,6 +648,9 @@
     const head = el('div', 'head');
     head.append(el('span', 'hip', isSelf ? 'whoami' : ipText), el('span', 'tag', 'IPv' + p.v), el('span', 'tag ' + (cls === 'public' ? 'pub' : 'priv'), cls));
     if (d && d.source) head.append(el('span', 'tag', SRC[d.source] || d.source));
+    const res = isSelf ? { cmd: 'whoami', value: ipText, what: 'your IP address', path: '/', self: true, hide: [ipText], drop: SELF_DROP }
+      : { cmd: 'lookup ' + ipText, value: ipText, what: 'the address ' + ipText, path: '/' + ipText };
+    head.append(shareBar(res));
     out.appendChild(head);
     const fig = geoBlock(d);
     if (fig) { out.appendChild(fig); kick(); scroll(); }
@@ -659,6 +662,7 @@
       rows.push(['IPv' + want, slot]);
       otherFamily(p.v).then(other => {
         slot.textContent = '';
+        if (other) res.hide.push(other);           // copy md leaves it out too
         if (other) { slot.className = ''; slot.append(cmdLink(other, 'lookup ' + other, '/' + other)); announce(`Your IPv${want} address is ${other}.`); }
         else slot.append(`none detected (your connection looks IPv${p.v} only)`);
       });
@@ -958,19 +962,21 @@
         "set your device's time zone to match the VPN location, or use a browser that reports UTC (Tor Browser, or Firefox with privacy.resistFingerprinting turned on)");
     }
 
+    const leaks = results.filter(r => r[0] === 'warn').length;
+    const verdict = leaks ? `${leaks} possible leak${leaks > 1 ? 's' : ''} found. The lines marked LEAK show what gives you away` + (unsure ? ' if you use a VPN.' : '.')
+      : vpn ? 'No leaks found: sites see your VPN, not you.'
+      : homeNet ? "Nothing leaks beyond your IP address, but that address shows your provider and rough location. A VPN would hide them."
+      : "Nothing leaks beyond your IP address. Without a VPN, that address still shows your provider and rough location; a VPN would hide it.";
     const head = el('div', 'head');
     head.append(el('span', 'hip', 'leaktest'), el('span', 'tag pub', 'privacy check'), el('span', 'tag', vpn ? 'vpn on' : homeNet ? 'no vpn' : flagged ? 'vpn unclear' : vpnKnown ? 'no vpn detected' : 'vpn unknown'));
+    // The link is the check itself, never your result; the Markdown keeps the findings but not your addresses.
+    head.append(shareBar({ cmd: 'leaktest', value: verdict, what: 'the verdict', path: '/leaktest', self: true, hide: [d.ip, other, ...rtc.ips, ...rtc.local] }));
     out.appendChild(head);
     const STATUS = { ok: 'ok', warn: 'leak', info: 'info' };
     await kv(results.flatMap(([st, label, v, fix]) => {
       const x = document.createDocumentFragment(); x.append(el('span', 'tag st-' + st, STATUS[st]), ' ', v);
       return st === 'warn' && fix ? [[label, x], ['', 'fix: ' + fix, 'plain']] : [[label, x]];
     }));
-    const leaks = results.filter(r => r[0] === 'warn').length;
-    const verdict = leaks ? `${leaks} possible leak${leaks > 1 ? 's' : ''} found. The lines marked LEAK show what gives you away` + (unsure ? ' if you use a VPN.' : '.')
-      : vpn ? 'No leaks found: sites see your VPN, not you.'
-      : homeNet ? "Nothing leaks beyond your IP address, but that address shows your provider and rough location. A VPN would hide them."
-      : "Nothing leaks beyond your IP address. Without a VPN, that address still shows your provider and rough location; a VPN would hide it.";
     line(verdict, leaks ? 'warn' : 'sys');
     if (!leaks) announce(verdict);
     // Before the DNS test server is set up, or when it can't say anything this time, the check says so.
@@ -996,13 +1002,13 @@
       const p = parseIp(d.ip);
       if (!p) { q.textContent = 'The server returned an address this page cannot read.'; q.className = 'ln err'; announce(q.textContent); return; }
       q.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
-      last = d.ip; setUrl('/', TITLE_HOME);
+      setUrl('/', TITLE_HOME);
       await render(p, d.ip, d, true);
       whoamiNext(d);
       return sponsor('whoami');
     }
     q.textContent = 'ok · sample data';
-    last = DEMO.self.ip; await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
+    await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
     whoamiNext(DEMO.self);
     return sponsor('whoami');
   }
@@ -1016,7 +1022,6 @@
     if (!p && looksLikeDomain(raw)) return dns(raw);
     if (!p) return line(`"${raw}" is not a valid IP address, ASN or domain. Examples: lookup 8.8.8.8, asn AS13335, lookup example.com`, 'err');
     const ipText = p.v === 4 ? p.o.join('.') : raw.toLowerCase();
-    last = ipText;
     const [cls] = classify(p);
     if (cls !== 'public') {
       setUrl('/' + ipText, `${ipText} · non-public IPv${p.v} address | ipterm`);
@@ -1152,6 +1157,7 @@
     setUrl('/port/' + n, portTitle(n, s));
     const head = el('div', 'head');
     head.append(el('span', 'hip', `port ${n}`), el('span', 'tag', s ? s.proto : 'tcp'), el('span', 'tag', 'about'));
+    head.append(shareBar({ cmd: `port ${n} --info`, value: String(n), what: 'the port number', path: '/port/' + n }));
     out.appendChild(head);
     const rows = s ? [['service', s.name], ['used for', s.use], ['protocol', PORTSLIB.protoText(s.proto)], ['if closed', s.tips]]
       : [['protocol', 'TCP'], ['', `Port ${n} isn't one of the common ports ipterm describes, but it can still be checked.`, 'plain']];
@@ -1179,6 +1185,7 @@
     const head = el('div', 'head');
     head.append(el('span', 'hip', `port ${n}`), el('span', 'tag', 'tcp'), el('span', 'tag ' + cls, label));
     if (d.version) head.append(el('span', 'tag', 'IPv' + d.version));
+    head.append(shareBar({ cmd: `port ${n}`, value: String(n), what: 'the port number', path: '/port/' + n, self: true, hide: [d.ip], drop: SELF_DROP }));
     out.appendChild(head);
     const rows = [['port', `${n}/tcp` + (svc ? '  ' + svc.name : '')]];
     if (d.ip) rows.push(['your address', `${d.ip}  (IPv${d.version}: the address you connected from, the only one ipterm tests)`]);
@@ -1270,6 +1277,7 @@
   async function renderCidr(d) {
     const head = el('div', 'head');
     head.append(el('span', 'hip', 'cidr ' + d.cidr), el('span', 'tag', 'IPv' + d.v), el('span', 'tag ' + (d.range === 'public' ? 'pub' : 'priv'), d.range), el('span', 'tag', 'calculated'));
+    head.append(shareBar({ cmd: 'cidr ' + d.cidr, value: d.cidr, what: 'the range', path: '/cidr/' + d.cidr }));
     out.appendChild(head);
     const link = c => cmdLink(c, 'cidr ' + c, '/cidr/' + c);
     const both = list => { const f = document.createDocumentFragment(); list.forEach((c, i) => { if (i) f.append('  ·  '); f.append(link(c)); }); return f; };
@@ -1352,6 +1360,8 @@
     head.append(el('span', 'hip', (single ? `dig ${d.name} ${single}` : d.name)), el('span', 'tag pub', 'dns'));
     head.append(el('span', 'tag', d.dnssec ? 'dnssec ✓' : 'unsigned'));
     head.append(el('span', 'tag', d.sample ? 'sample data' : '1.1.1.1'));
+    const one = single && !parseIp(d.name) ? single : '';   // a reverse lookup's page is /dns/<ip>
+    head.append(shareBar({ cmd: `dig ${d.name}${one ? ' ' + one : ''}`, value: d.name, what: 'the name', path: `/dns/${d.name}${one ? '/' + one : ''}` }));
     out.appendChild(head);
     if (d.status === 'NXDOMAIN') {
       line(`${d.name} does not exist (NXDOMAIN).`, 'warn');
@@ -1456,6 +1466,8 @@
   async function renderMail(d) {
     const head = el('div', 'head');
     head.append(el('span', 'hip', 'mail ' + d.domain), el('span', 'tag pub', 'email'), el('span', 'tag', 'grade ' + d.grade), el('span', 'tag', '1.1.1.1'));
+    head.append(shareBar({ cmd: 'mail ' + d.domain + (d.selector ? ' --dkim ' + d.selector : ''), value: d.domain, what: 'the domain',
+      path: '/mail/' + d.domain + (d.selector ? '?dkim=' + encodeURIComponent(d.selector) : '') }));
     out.appendChild(head);
     const frag = (...parts) => { const f = document.createDocumentFragment(); parts.forEach(p => f.append(p)); return f; };
     const c = d.counts || {};
@@ -1553,6 +1565,7 @@
     head.append(el('span', 'hip', 'whois ' + d.domain), el('span', 'tag pub', 'domain'));
     if (d.registry) head.append(el('span', 'tag', d.registry));
     head.append(el('span', 'tag', d.sample ? 'sample data' : 'rdap'));
+    head.append(shareBar({ cmd: 'whois ' + d.domain, value: d.domain, what: 'the domain', path: '/whois/' + d.domain }));
     out.appendChild(head);
     if (d.query && d.query !== d.domain && d.query !== 'www.' + d.domain) line(`${d.query} is part of ${d.domain}, so this is that domain's registration.`, 'sys');
     const date = v => (v ? String(v).slice(0, 10) : null);
@@ -1595,6 +1608,7 @@
     head.append(el('span', 'hip', 'whois ' + d.query), el('span', 'tag pub', 'registry'));
     if (d.registry) head.append(el('span', 'tag', d.registry));
     head.append(el('span', 'tag', d.sample ? 'sample data' : 'rdap'));
+    head.append(shareBar({ cmd: 'whois ' + d.query, value: d.query, what: d.kind === 'asn' ? 'the AS number' : 'the address', path: '/whois/' + d.query }));
     out.appendChild(head);
     const date = v => (v ? String(v).slice(0, 10) : null);
     const rows = [];
@@ -1630,6 +1644,7 @@
     head.append(el('span', 'hip', d.asn), el('span', 'tag pub', 'asn'));
     if (d.registry) head.append(el('span', 'tag', d.registry));
     head.append(el('span', 'tag', d.sample ? 'sample data' : 'ripestat'));
+    head.append(shareBar({ cmd: 'asn ' + d.asn, value: d.asn, what: 'the AS number', path: '/' + d.asn }));
     out.appendChild(head);
 
     const v4 = d.v4 || { prefixes: [] }, v6 = d.v6 || { prefixes: [] };
@@ -1681,8 +1696,8 @@
     ['<ip> or <ASN>', 'same as lookup', null],
     ['ping [count]', 'round trip from your browser to the nearest Cloudflare data center', 'ping'],
     ['man <command>', 'details and examples for one command, e.g. man dig', 'man dig'],
-    ['share', 'copy a link to the current result', 'share'],
-    ['copy', 'copy the last address to the clipboard', 'copy'],
+    ['share', 'share a link to the current result (phones: the share sheet)', 'share'],
+    ['copy [md|link]', "copy the current result's address, domain, range or ASN; md: as Markdown", 'copy'],
     ['privacy', 'what ipterm does and does not collect', 'privacy'],
     ['theme <name>', 'phosphor, amber, ice, contrast or paper', 'theme'],
     ['crt on|off', 'turn glow and scanlines on or off', 'crt'],
@@ -1729,8 +1744,10 @@
     ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
       ['ping', 'ping 10'], ['whoami', 'traceroute']],
     traceroute: ['traceroute', "not possible from a browser: tracing a route needs raw ICMP or UDP packets. ping times the connection to ipterm's edge instead.", ['ping'], ['ping', 'asn']],
-    share: ['share', 'copies a link to the current result. Every lookup has its own page, so the link opens the same result.', ['share'], ['copy']],
-    copy: ['copy', 'copies the last IP address shown to the clipboard.', ['copy'], ['share']],
+    share: ['share', "shares a link to the current result: the share sheet on phones, the clipboard elsewhere. Every lookup has its own page, so the link opens the same result. After whoami, leaktest or a port check it shares the page itself, which shows each visitor their own result (check yours), never your address. Every result's header line has the same [share] button, and [copy] and [md] beside it.",
+      ['share'], ['copy']],
+    copy: ['copy [md | link]', "copies the current result's main value: the IP address, the domain, the range or the AS number. copy md copies the whole result as a Markdown code block that starts with the command and ends with its link, for GitHub issues, Discord or Stack Overflow (your own address is left out of whoami, leaktest and port results). copy link copies the link. The sponsored line is never copied.",
+      ['copy', 'copy md', 'copy link'], ['share']],
     history: ['history', 'lists the commands you ran in this tab. Up and Down recall them at the prompt. Nothing is saved after you close the tab.', ['history'], ['clear']],
     theme: ['theme [phosphor | amber | ice | contrast | paper]', 'changes the colors; with no name, moves to the next theme. Remembered on this device only.', ['theme amber', 'theme paper', 'theme contrast'], ['crt', 'access']],
     crt: ['crt [on | off]', 'turns the CRT glow, scanlines and vignette on or off; with neither, switches. Remembered on this device only.', ['crt off', 'crt on'], ['theme', 'access']],
@@ -1871,9 +1888,9 @@
     setTheme(name); announce('Theme set to ' + name); line('theme: ' + name, 'sys');
   }
 
+  const toClipboard = t => { try { return navigator.clipboard.writeText(t).then(() => true, () => false); } catch { return Promise.resolve(false); } };
   function clip(textValue, okMsg, failMsg) {
-    const ok = () => line(okMsg, 'sys'), fail = () => line(failMsg, 'warn');
-    try { navigator.clipboard.writeText(textValue).then(ok, fail); } catch { fail(); }
+    return toClipboard(textValue).then(ok => { line(ok ? okMsg : failMsg, ok ? 'sys' : 'warn'); });
   }
   function crt(arg) {
     const d = document.documentElement, off = arg ? /^(off|0|no|false)$/i.test(arg) : d.dataset.fx !== 'off';
@@ -1911,14 +1928,116 @@
     announce('Accessibility options listed: theme contrast, theme paper, crt off.');
   }
 
-  function copy() {
-    if (!last) return line('Nothing to copy yet. Run whoami or lookup first.', 'warn');
-    clip(last, 'copied ' + last, 'The clipboard is blocked here. Select the address above and copy it by hand.');
+  /* ---------- share, copy and copy md ----------
+     Each result's header line ends in [share] [copy] [md], tied to that result, so an older result's
+     buttons still act on it; share, copy and copy md at the prompt act on the newest result (`current`).
+     share opens the phone's share sheet where there is one and copies the link everywhere else. copy takes
+     the result's main value (the address, domain, range or AS number). copy md takes a fenced Markdown
+     block for GitHub issues, Discord or Stack Overflow: the command, the result's lines, then its
+     permalink. Nothing copied carries the sponsored line or the next: line. A result about your own
+     connection (whoami, leaktest, a port check) never shares your address: its link is the page itself,
+     which shows each visitor their own ("check yours"), and its Markdown leaves your addresses out. */
+  let current = null;              // { cmd, value, what, path, self, hide: [your addresses], drop: [row labels], bar }
+  // Rows of your own result that are your address in another form (or would point at it).
+  const SELF_DROP = ['hostname', 'IPv4', 'IPv6', 'postal', 'coords', 'decimal', 'hex', 'binary', 'rdns zone', 'expanded', '/64 prefix'];
+  function shareBar(r) {
+    current = r;
+    const bar = r.bar = el('span', 'share');
+    const btn = (label, name, act) => {
+      const b = el('button', 'share-btn', label); b.type = 'button';
+      b.setAttribute('aria-label', name); b.title = name;
+      b.addEventListener('click', () => act(b));
+      return b;
+    };
+    bar.append(btn('share', r.self ? 'Share a link to this page (it shows each visitor their own result, never yours)' : 'Share a link to this result', b => shareResult(r, b)),
+      btn('copy', 'Copy ' + r.what, b => copyValue(r, b)),
+      btn('md', 'Copy this result as Markdown' + (r.self ? ' (your address left out)' : ''), b => copyMd(r, b)));
+    return bar;
+  }
+  // A button answers in place: its label says "copied" for a moment, and screen readers hear what was copied.
+  function flash(b, spoken) {
+    if (!b.dataset.label) b.dataset.label = b.textContent;
+    b.textContent = 'copied'; announce(spoken);
+    clearTimeout(b.flashTimer); b.flashTimer = setTimeout(() => { b.textContent = b.dataset.label; }, 1600);
+  }
+  async function shareResult(r, b) {
+    if (!live) return line('Sharing works once the site is deployed. Every lookup gets its own link, like https://your-domain/8.8.8.8', 'sys');
+    if (!hasMouse() && navigator.share) {          // phones and tablets: the system share sheet
+      try { return await navigator.share({ title: 'ipterm', text: r.self ? 'check yours' : r.cmd, url: location.origin + r.path }); }
+      catch (e) { if (e && e.name === 'AbortError') return; }   // turned down: nothing to do. Failed: copy instead
+    }
+    return copyLink(r, b);
+  }
+  async function copyLink(r, b) {
+    const url = (live ? location.origin : 'https://your-domain') + r.path;
+    const note = r.self ? '   (check yours: it shows each visitor their own result, never yours)' : '';
+    const ok = await toClipboard(url);
+    if (ok && b) return flash(b, 'copied link: ' + url);
+    line(ok ? 'copied link: ' + url + note : 'link: ' + url + '   (the clipboard is blocked here, so copy it by hand)', ok ? 'sys' : 'warn');
+  }
+  async function copyValue(r, b) {
+    const shown = r.value.length > 60 || /\s/.test(r.value) ? r.what : r.value;
+    const ok = await toClipboard(r.value);
+    if (ok && b) return flash(b, 'copied ' + shown);
+    line(ok ? 'copied ' + shown : `The clipboard is blocked here. Select ${r.what} above and copy it by hand.`, ok ? 'sys' : 'warn');
+  }
+  async function copyMd(r, b) {
+    const head = r.bar.isConnected ? r.bar.closest('.head') : null;
+    if (!head) return line('That result is no longer on the screen. Run it again to copy it.', 'warn');
+    const ok = await toClipboard(markdown(r, head)), what = 'copied the result as Markdown' + (r.self ? ' (your address left out)' : '');
+    if (ok && b) return flash(b, what);
+    line(ok ? what : 'The clipboard is blocked here, so select the result and copy it by hand.', ok ? 'sys' : 'warn');
+  }
+  // The result as text, from its header line up to the next command: the header's tags, the table and
+  // the notes under it, without the map, buttons, the sponsored line or the next: line.
+  const NOT_RESULT = /^(ok|done) · (\d+ ms|sample data)$|^queued: |^Click a prefix/;
+  const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  function markdown(r, head) {
+    const hide = (r.hide || []).filter(x => x && parseIp(x)).map(ip => new RegExp(`(?<![\\w.:])${reEsc(ip)}(?![\\w.:])`, 'gi'));
+    const clean = t => hide.reduce((s, re) => s.replace(re, '[hidden]'), t.replace(/\s*↗/g, '').replace(/\s*\n\s*/g, ' ').trimEnd());
+    const textOf = node => {                     // status tags read [OK], [LEAK]...; buttons and outside links go
+      const c = node.cloneNode(true);
+      c.querySelectorAll('button, a[target="_blank"]').forEach(x => x.remove());
+      c.querySelectorAll('.tag').forEach(t => t.replaceWith(`[${t.textContent.toUpperCase()}]`));
+      return c.textContent.trim();
+    };
+    const body = [];
+    for (let n = head; n && (n === head || !n.classList.contains('echo')); n = n.nextElementSibling) {
+      if (n === head) {
+        const hip = n.querySelector('.hip').textContent, tags = [...n.querySelectorAll('.tag')].map(t => t.textContent);
+        body.push((r.cmd.includes(hip) ? tags : [hip, ...tags]).join(' · '));
+      } else if (n.tagName === 'DL') {
+        const rows = []; let drop = false;
+        for (const k of n.children) {
+          if (k.classList.contains('sep')) { rows.push(null); continue; }
+          if (k.tagName === 'DT') {
+            const label = k.textContent.trim();
+            if (label) drop = !!(r.drop && r.drop.includes(label));
+            if (!drop) rows.push([label, '']);
+          } else if (k.tagName === 'DD' && !drop && rows.length && rows[rows.length - 1]) rows[rows.length - 1][1] = textOf(k);
+        }
+        const w = Math.max(0, ...rows.filter(Boolean).map(x => x[0].length));
+        body.push('', ...rows.map(x => (x ? x[0].padEnd(w) + '  ' + x[1] : '')), '');
+      } else if (n.classList.contains('ln') && !n.classList.contains('sponsor') && !n.classList.contains('next')) {
+        const t = textOf(n);
+        if (t && !NOT_RESULT.test(t)) body.push(t);
+      }
+    }
+    const text = body.map(clean).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    // A fence longer than any run of backticks in the result, so a TXT record can't end the block early.
+    const fence = '`'.repeat(Math.max(3, ...(text.match(/`+/g) || []).map(x => x.length + 1)));
+    return `${fence}\n$ ${clean(r.cmd)}\n${text}\n${fence}\n${live ? location.origin : 'https://your-domain'}${r.path}\n`;
+  }
+
+  function copy(arg) {
+    const a = String(arg || '').toLowerCase();
+    if (a && !/^(--?)?(md|markdown|link|url)$/.test(a)) return line('usage: copy   copy md   copy link', 'warn');
+    if (!current) return line('Nothing to copy: run whoami or a lookup first.', 'warn');
+    return /md|markdown/.test(a) ? copyMd(current) : a ? copyLink(current) : copyValue(current);
   }
   function share() {
-    if (!live) return line('Sharing works once the site is deployed. Every lookup gets its own link, like https://your-domain/8.8.8.8', 'sys');
-    const url = location.origin + location.pathname;
-    clip(url, 'copied link: ' + url, 'link: ' + url + '   (the clipboard is blocked here, so copy it by hand)');
+    // With no result on screen (a tool's page, the API reference) the page's own link is shared.
+    return shareResult(current || { cmd: document.title.replace(/\s*\|\s*ipterm$/, ''), path: location.pathname });
   }
 
   async function privacy() {
@@ -1976,6 +2095,7 @@
     out.appendChild(d); scroll();
   }
 
+  const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'dig', 'mail', 'lookup', 'asn', 'port']);
   async function run(raw) {
     const cmd = raw.trim(); echo(raw);
     if (!cmd) return;
@@ -1984,6 +2104,8 @@
     const lc = c0.toLowerCase(), c = ALIASES[lc] || lc;
     if (args.length === 1 && /^(--help|-h)$/.test(args[0]) && (MAN[c] || HELP.some(r => r[0].split(' ')[0] === c))) return man(c);
     const localNote = () => line("Browsers can't read your device's own network addresses. This is the public address websites see:", 'sys');
+    // A new lookup replaces the current result, even if it fails, so copy never copies an older one.
+    if (RESULTS.has(c)) current = null;
     switch (c) {
       case 'help': case 'man': return args[0] ? man(args[0]) : help();
       case 'whoami': return whoami();
@@ -2008,14 +2130,14 @@
       case 'traceroute': return traceroute(args[0]);
       case 'share': return share();
       case 'privacy': return privacy();
-      case 'clear': out.textContent = ''; return;
+      case 'clear': out.textContent = ''; current = null; return;
       case 'history':
         return hist.length > 1 ? lines(hist.slice(0, -1).map((h, i) => String(i + 1).padStart(4) + '  ' + h)) : line('No history yet.', 'sys');
       case 'theme': return theme(args[0]);
       case 'crt': return crt(args[0]);
       case 'reset': return reset();
       case 'access': return access();
-      case 'copy': return copy();
+      case 'copy': return copy(args[0]);
       case 'api': return apiHelp();
       // what people type out of habit in other terminals (and the prompts shown on the site's own pages)
       case 'ls':
@@ -2044,6 +2166,7 @@
           'No cookies and no tracking. Sponsored lines are labeled and are plain links. Type privacy for details.',
         ], 'sys').then(about);
       default: {
+        current = null;                            // an address, range or domain on its own is a lookup too
         if (parseIp(c0) || /^as\d+$/i.test(c0)) return lookup(c0);
         if (looksLikeCidr(cmd)) return cidr(cmd);
         if (looksLikeDomain(c0)) return dns(c0);
@@ -2199,7 +2322,7 @@
     if (selfP) {
       setLive(true);
       const d = init.data;
-      last = d.ip; await render(selfP, d.ip, d, true);
+      await render(selfP, d.ip, d, true);
       fast = false;
       whoamiNext(d);
       await sponsor('whoami');
@@ -2216,7 +2339,7 @@
     if (p) {
       setLive(true);
       q.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
-      last = d.ip; await render(p, d.ip, d, true);
+      await render(p, d.ip, d, true);
       whoamiNext(d);
       await sponsor('whoami');
     } else if (d && d.error && d.error !== 'no-api' && !/^network/.test(d.error)) {
@@ -2227,7 +2350,7 @@
       setLive(false);
       q.textContent = 'No lookup API at /api/lookup, so this preview runs on sample data. Deploy the Worker to go live.';
       q.className = 'ln warn'; announce(q.textContent);
-      last = DEMO.self.ip; await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
+      await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
       whoamiNext(DEMO.self);
       await sponsor('whoami');
     }
