@@ -15,7 +15,7 @@
       'Usually closed on purpose, which is right. If a device needs it, reach it from your own network or over a VPN.',
       'Telnet sends everything, passwords included, in plain text, and open Telnet ports are a favorite of botnets such as Mirai. Keep it closed to the internet.'],
     [25, 'SMTP', 'tcp', 'SMTP: mail servers delivering email to each other.',
-      "ipterm can't test it: Cloudflare, which runs ipterm, doesn't allow connections to port 25 (to stop spam), and most home internet providers block port 25 too. Self-hosted mail usually needs a business line or an outgoing relay service."],
+      'Most home internet providers block port 25 to stop spam, so self-hosted mail usually needs a business line or an outgoing relay service.'],
     [53, 'DNS', 'tcp+udp', 'DNS: a name server or resolver such as Pi-hole, AdGuard Home or BIND. Lookups use UDP; TCP carries large answers and zone transfers.',
       'A home DNS server such as Pi-hole should only answer your own network, so closed is the right result. Only open it if you run the authoritative name server for a domain.',
       'An open resolver on port 53 gets abused for DDoS amplification attacks.'],
@@ -106,6 +106,9 @@
     [64738, 'Mumble', 'tcp+udp', 'Mumble voice chat servers (Murmur), over TCP and UDP.',
       'Forward 64738 TCP and UDP to the server.'],
   ];
+  // Ports ipterm can't check at all, and why: the Worker refuses them before connecting, and their pages
+  // and the terminal say so instead of offering a check.
+  const UNTESTABLE = { 25: "Cloudflare, which runs ipterm, doesn't allow connections to port 25 (email), to stop spam." };
   const BY = new Map(LIST.map(([port, name, proto, use, tips, risk]) => [port, { port, name, proto, use, tips, risk: risk || null }]));
   const PROTO = { tcp: 'TCP', udp: 'UDP (this check can only test TCP)', 'tcp+udp': 'TCP and UDP (the check tests TCP)' };
   const valid = n => Number.isInteger(n) && n >= 1 && n <= 65535;
@@ -113,6 +116,8 @@
     get: n => BY.get(Number(n)) || null,
     list: () => [...BY.keys()],
     protoText: p => PROTO[p] || 'TCP',
+    // why ipterm can't check port n (one sentence), or null when it can
+    untestable: n => UNTESTABLE[Number(n)] || null,
     // "22", " 022 " -> 22; anything else (ranges, lists, words) -> null
     parse: s => { const t = String(s == null ? '' : s).trim(); const n = /^\d{1,5}$/.test(t) ? Number(t) : NaN; return valid(n) ? n : null; },
   };

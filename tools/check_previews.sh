@@ -1,5 +1,7 @@
 #!/bin/sh
-# Checks that link-preview bots get the HTML page and curl/scripts get JSON (or plain text for /).
+# Checks that link-preview bots and search crawlers get the HTML page and curl/scripts get JSON (or plain
+# text for /). No line starts a port check: crawlers get the /port/22 page, and other callers there get
+# a 403 (JSON).
 # Run against `npx wrangler dev` (default) or the live site:
 #   sh tools/check_previews.sh
 #   sh tools/check_previews.sh https://ipterm.net /8.8.8.8
@@ -29,6 +31,15 @@ check $H 'Mozilla/5.0 (compatible; Embedly/0.2; +http://support.embed.ly/)'
 check $H 'Iframely/1.3.1 (+https://iframely.com/docs/about)'
 check $H 'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)' '*/*' /cidr/10.0.0.0/22
 check $H 'Twitterbot/1.0' '*/*' /whois
+BING='Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)'
+GOOG='Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+check $H "$BING"
+check $H "$BING" '*/*' /port/22
+check $H "$BING" '*/*' /cidr/10.0.0.0/22
+check $H "$GOOG"
+check $H "$GOOG" '*/*' /port/22
+check $J "$BING" '*/*' "/port/22?format=json"
+check $J "$BING" '*/*' "/api/port?n=22"
 check $J 'curl/8.7.1'
 check $J 'Wget/1.21.4'
 check $J 'python-requests/2.32.3'
@@ -39,6 +50,7 @@ check $J 'Mozilla/5.0 (Windows NT; Windows NT 10.0; en-US) WindowsPowerShell/5.1
 check $J 'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)' '*/*' "$P?format=json"
 check $J 'curl/8.7.1' 'text/html' # CLI wins even if it asks for HTML
 check $J 'curl/8.7.1' '*/*' /cidr/10.0.0.0/22
+check $J 'python-requests/2.32.3' '*/*' /port/22
 check text/plain 'curl/8.7.1' '*/*' /
 check $H 'Twitterbot/1.0' '*/*' /
 printf 'Vary on a JSON answer:  '; curl -s -o /dev/null -D - -A 'curl/8.7.1' "$B$P" | grep -i '^vary'

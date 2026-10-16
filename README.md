@@ -307,6 +307,7 @@ aligned lines). It reads a domain's mail records through Cloudflare's resolver a
   no mail; see below.
 - **SPF**: exactly one `v=spf1` record. `include:` and `redirect=` are followed to count DNS lookups against RFC 7208's
   limit of 10 (include, a, mx, ptr, exists and redirect each cost one, and so does everything inside an include).
+  One with a macro (`%{d}` and the like) depends on the sender, so it is counted but not followed.
   Flags `+all` (anywhere it lets any server pass, including inside an include), `?all`, no `all`, `ptr`, syntax
   errors, includes without an SPF record, and two or more records.
 - **DMARC**: the policy, `pct`, `sp`, `t=y` and the report addresses (`rua`). A subdomain without its own record
@@ -341,7 +342,7 @@ INFO lines never count. What each check reports:
 | MX | a null MX beside other MX records | no MX records | |
 | SPF | no record; two or more; over 10 lookups; `+all` (also inside an include); syntax errors; an include or redirect with no SPF record | `?all` or no `all`; `ptr`; an include that didn't answer | macros (`%{…}`), counted but not followed |
 | DMARC | no record; two or more; no valid `p=` | `p=none`; `pct` below 100; `t=y`; `sp=none`; no `rua` | |
-| DKIM | | an RSA key under 2048 bits | no key at the selectors tried; a revoked key |
+| DKIM | | an RSA key under 2048 bits | no key at the selectors tried; a revoked key; a selector that couldn't be read |
 | MTA-STS | two records or no `id`; the policy can't be fetched or is invalid; `mode: enforce` leaving out an MX host | `mode: testing` leaving out an MX host; `max_age` under a day; not served as `text/plain` | not set up; `mode: testing` or `none` |
 | TLS-RPT | | no record while MTA-STS is set up; no valid `rua`; two records | not set up |
 | BIMI | | a logo while DMARC isn't at quarantine or reject; no valid `l=` | no record; a declined logo (empty `l=`) |
@@ -358,7 +359,8 @@ The records, the common selectors and a named selector are cached separately for
 selector costs one query and can't be used to make ipterm fetch a domain's MTA-STS policy again and again. A fresh
 check counts as two or three of the visitor's 30 lookups a minute. When the resolver can't read a record
 (SERVFAIL, even after one retry), the line says so instead of calling it missing, and that answer is kept for a
-minute. No IPinfo or proxycheck.io budget is ever used.
+minute. The same goes for a parent's DMARC record when a subdomain has none of its own, and for each DKIM
+selector. No IPinfo or proxycheck.io budget is ever used.
 
 ### Registry records (whois)
 
@@ -417,9 +419,9 @@ and `port` on its own lists the common ports.
 | Result | Meaning |
 | --- | --- |
 | open | the connection was accepted |
-| closed | it was refused (a reset): it reached the address, but nothing there accepted it |
+| closed | it was turned away at once rather than timing out: nothing is listening, or a firewall on the device or router rejected it |
 | no answer | nothing within 5 seconds: a router or firewall dropped it, which is what most home routers do with a port they don't forward |
-| not tested | port 25 (Cloudflare blocks it), Cloudflare's own addresses (WARP, the 1.1.1.1 app, iCloud Private Relay), non-public addresses |
+| not tested | port 25 (Cloudflare blocks it), Cloudflare's own addresses (WARP, the 1.1.1.1 app, iCloud Private Relay), non-public addresses (for IPv6, anything outside global unicast 2000::/3, plus 6to4 and Teredo) |
 
 Results that aren't open list what has to be true for a port to be open (a program listening, the
 device firewall, the router's forward), the port's own advice, and how to spot carrier-grade NAT: the
@@ -434,19 +436,30 @@ the result says so. No sponsored line follows any port result.
   `CF-Connecting-IP` header sent by the client (checked on Cloudflare's network). The terminal says so
   when an address is typed (`port 8.8.8.8 22`), takes one port per check (no ranges or lists), and has
   no `nmap` alias.
-- `/api/port?n=` and `/port/<n>` check only for same-origin requests (`Sec-Fetch-Site: same-origin`, or
-  a matching `Origin`) and command-line user agents (`CLI_UA`). Everything else gets HTTP 403, so other
-  sites can't make their visitors' browsers start checks.
+- `/api/port?n=` and `/port/<n>` check only for same-origin requests and command-line user agents
+  (`CLI_UA`). Same-origin means `Sec-Fetch-Site: same-origin` when the browser sends it (it always wins),
+  and otherwise a matching `Origin` or the terminal's own `X-Ipterm: port` header: browsers without
+  `Sec-Fetch-*` (Safari before 16.4, Firefox before 90) send no `Origin` on a same-origin GET. A cross-site
+  page can't add that header without a CORS preflight, which ipterm never allows (OPTIONS is 405, and with
+  `PUBLIC_API` on no `Access-Control-Allow-Headers` is sent; keep it that way). Everything else gets
+  HTTP 403, so other sites can't make their visitors' browsers start checks.
+- Only public addresses are connected to. Beyond the non-public ranges every lookup refuses, an IPv6
+  address must be global unicast (`2000::/3`) and not 6to4 (`2002::/16`) or in the IETF block
+  `2001::/23` (Teredo), so no form that embeds an IPv4 address (`::/96`, `64:ff9b::/96`) is ever tried.
+  None of these can reach ipterm from the internet anyway; it is defence in depth.
 - The `/port/<n>` pages explain the port and offer a button in the terminal. Nothing is tested on page
-  load, on Back/Forward, for prefetches, crawlers or link previews.
+  load, on Back/Forward, for prefetches, crawlers or link previews. Search crawlers and link previews get
+  the page (`CRAWLER_UA`, `PREVIEW_UA`), never a check or a 403.
 - `PORT_LIMITER` (`[[ratelimits]]`, namespace `1002`): 10 checks a minute per address (IPv6 per /64),
   apart from the 30-lookup limit. Checks that are refused up front (port 25, Cloudflare, non-public
   addresses) make no connection and don't count.
 
 **Pages:** `/port` lists the common ports. `/port/<n>` explains each of the 42 ports in `public/ports.js`
 (SSH, RDP, Plex, Minecraft, game, NAS and remote-access ports): what it's for, why it may be closed and
-any risk in opening it. Other port numbers get a short page marked `noindex`. `public/ports.js` is
-shared by the page and the Worker, like `cidr.js`; add a port by adding a line to its `LIST`.
+any risk in opening it. Other port numbers get a short page marked `noindex`. Port 25's page (title,
+description and terminal) says ipterm can't check it, since Cloudflare blocks it, and offers no check
+button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the page and the Worker, like
+`cidr.js`; add a port by adding a line to its `LIST`.
 
 **IPv4, IPv6 and dual stack.** What testing on Cloudflare (`wrangler dev --remote`) showed:
 
@@ -454,11 +467,16 @@ shared by the page and the Worker, like `cidr.js`; add a port by adding a line t
   literal is refused with the same error as a blocked address. `probePort()` adds the brackets.
 - Port 25 throws at `connect()` ("Connections to port 25 are prohibited"), and Cloudflare's own addresses
   are refused at once ("proxy request failed, cannot connect to the specified address"). Both are
-  recognized beforehand (port number; network AS13335 / AS209242 or Cloudflare's published ranges), so
+  recognized beforehand (port number; network AS13335 / AS209242, or Cloudflare's published ranges plus
+  the 1.1.1.1 resolver's and WARP's exits, `CLOUDFLARE_RANGES`), so
   visitors get an explanation rather than a false "closed".
 - A port that a router drops never opens, so it shows as "no answer" after 5 seconds. A refusal (reset)
   ends the connection attempt at once (seen under `wrangler dev`); the test connection's router drops
   everything, so a reset couldn't be observed on Cloudflare's network itself.
+- workerd rejects a refusal, an unreachable network and a blocked destination with the same error
+  ("proxy request failed, cannot connect to the specified address"), so the error can't tell them apart.
+  Anything turned away at once counts as "closed", including a router or firewall that answers with an
+  ICMP "unreachable" reply, and the result says only that it was turned away, not that it got through.
 - **Dual-stack visitors:** a visitor who reaches ipterm over IPv6 has their IPv6 address tested. Home
   routers forward ports on IPv4 only, and their IPv6 firewall usually drops incoming connections, so a
   working IPv4 port forward would show as "no answer" over IPv6. (On the test connection, even a port
@@ -481,8 +499,11 @@ shared by the page and the Worker, like `cidr.js`; add a port by adding a line t
   and links stay, so crawlers that run JavaScript still see them.
 - Link previews: chat apps and social sites (Facebook, WhatsApp, Slack, Discord, Telegram, X,
   LinkedIn, iMessage, Reddit, Mastodon, Bluesky, Embedly, Iframely) get the HTML page even when they
-  don't ask for `text/html`, so shared links preview with a title and image. They're matched by
-  name (`PREVIEW_UA` in `src/worker.js`); curl, scripts and other clients still get JSON.
+  don't ask for `text/html`, so shared links preview with a title and image. So do search engine
+  crawlers (Googlebot, Bingbot, DuckDuckBot, Yandex, Baidu, Amazonbot, Petal, Seznam, Qwant), which
+  often send `Accept: */*` or none, so they index the pages rather than JSON (or, for `/port/<n>`, a
+  403). Both are matched by name (`PREVIEW_UA` and `CRAWLER_UA` in `src/worker.js`); `?format=json`
+  and `?format=text` still win, and curl, scripts and other clients still get JSON.
 - Private addresses like `/192.168.1.1` get a page explaining the range and how to reach a router,
   a popular search topic, without any upstream lookup.
 - `/whois`, `/dns`, `/mail` and `/cidr` on their own are landing pages for each tool (what it does, usage and
@@ -627,7 +648,7 @@ one Worker request instead of two, which lowers request counts without any chang
 | Worker requests a day | Workers metrics | Busiest day under 70,000 (70% of the Free plan's 100,000) | Look for a scraper, or move to Workers Paid ($5/month, 10 million a month). Past 100,000, requests fail until 00:00 UTC |
 | Worker errors | Workers metrics | Close to zero | `npx wrangler tail` shows which service failed |
 | CPU time | Workers metrics | Median well under the Free plan's 10 ms a request | Near 10 ms, "Exceeded Resources" errors follow |
-| 429 rate (rate-limited answers) | GraphQL query below | Under 1% of requests | A scraper, or the 30-a-minute limit is too tight for real use |
+| 429 rate (rate-limited answers) | GraphQL query below | Under 1% of requests | A scraper; the 30-a-minute lookup limit too tight for real use (one uncached mail check spends 2 or 3 of it); or port checks hitting `PORT_LIMITER`'s 10 a minute (`/api/port`, and `/port/<n>` from curl; the `/port/<n>` page itself is never limited) |
 | Core fallback | `/status`, `pastDays` | No hours run out on most days, and the day never runs out | Raise `IPINFO_HOURLY_BUDGET` if the monthly quota allows, or look for a scraper. The same goes for proxycheck.io |
 | Durable Object use | Dashboard, Durable Objects (under Storage & databases) | Far below the Free plan's 100,000 requests and 100,000 rows written a day | Past either, the budget counter fails and every lookup falls back to Lite |
 
@@ -645,10 +666,10 @@ spreadsheet, not anything on the site.
 - [ ] **Google Search Console:** add a *Domain* property for `ipterm.net` (verified with a DNS TXT record; for a
       Cloudflare domain, Search Console offers to add it for you), then submit `https://ipterm.net/sitemap.xml`
       under Sitemaps.
-- [ ] **URL Inspection** in Search Console for `/`, `/8.8.8.8`, `/AS13335`, `/whois`, `/leaktest` and `/api`:
-      *Test live URL* → *View tested page*. In the HTML tab, check that the title, the h1, the plain summary
-      and the BreadcrumbList are in the rendered HTML. In the screenshot, check that the page looks right.
-      Repeat after deploys that touch page markup.
+- [ ] **URL Inspection** in Search Console for `/`, `/8.8.8.8`, `/AS13335`, `/whois`, `/mail/gmail.com`, `/port/22`,
+      `/leaktest` and `/api`: *Test live URL* → *View tested page*. In the HTML tab, check that the title, the h1,
+      the plain summary and the BreadcrumbList are in the rendered HTML. In the screenshot, check that the page
+      looks right. Repeat after deploys that touch page markup.
 - [ ] **Bing Webmaster Tools:** add `https://ipterm.net` and verify with the XML file option:
       `public/BingSiteAuth.xml` is already served at `/BingSiteAuth.xml`. (Bing can also import the site
       from Search Console.) Submit the sitemap there too.
@@ -664,7 +685,7 @@ spreadsheet, not anything on the site.
 | Workers metrics | Workers & Pages → ipterm → Metrics, last 7 days | Requests a day (busiest and average), errors, CPU time (median and the highest percentile shown) |
 | Zone analytics | ipterm.net → Analytics & Logs → HTTP Traffic, last 7 days | Requests and unique visitors. Free plans show no status codes or paths here; Pro and up can filter by them |
 | 429s | The GraphQL query below, one day per query | Count of `429` against all requests for each day, as a percentage |
-| Google Search Console | Performance → Search results, last 7 days (Compare with the previous period) | Clicks, impressions, CTR and position for the whole site, then for each of `/`, `/whois`, `/dns`, `/cidr`, `/leaktest`, `/api` (Page filter, *Exact URL*). For page groups, use *Custom (regex)*: `^https://ipterm\.net/AS\d+$` (networks), `/dns/`, `/whois/`, `/cidr/`, `/guides/`. Also Indexing → Pages: indexed count, and any new reason for pages not being indexed |
+| Google Search Console | Performance → Search results, last 7 days (Compare with the previous period) | Clicks, impressions, CTR and position for the whole site, then for each of `/`, `/whois`, `/dns`, `/mail`, `/port`, `/cidr`, `/leaktest`, `/api` (Page filter, *Exact URL*). For page groups, use *Custom (regex)*: `^https://ipterm\.net/AS\d+$` (networks), `/dns/`, `/whois/`, `/mail/`, `/port/`, `/cidr/`, `/guides/`. Also Indexing → Pages: indexed count, and any new reason for pages not being indexed |
 | Bing Webmaster Tools | Search Performance, last 7 days | Clicks and impressions; indexed pages |
 | Proton affiliate dashboard | Stats grouped by sub-ID, last 7 days | Clicks, sign-ups and earnings for `leaktest` (and for no sub-ID) |
 | `/status` | `curl -H "x-status-key: <your key>" "https://ipterm.net/status?format=text"` | From `past days`, each day's Core and proxycheck.io lookups, hours run out, and whether the day ran out |
@@ -682,6 +703,9 @@ curl -s https://api.cloudflare.com/client/v4/graphql \
 ```
 
 It lists requests by status code for that day; add them up for the total, and divide the `429` count by it.
+Lookups and port checks are counted together there. To see which limiter answered, run it again with
+`edgeResponseStatus: 429` added to the filter and `clientRequestPath` added to `dimensions`: 429s on `/port/`
+and `/api/port` are `PORT_LIMITER`, the rest `LOOKUP_LIMITER`.
 This query wasn't run when this section was written. If the API rejects a field or the date range, ask the
 zone's `settings { httpRequestsAdaptiveGroups { enabled maxDuration notOlderThan } }` node what your plan
 allows (`notOlderThan` is how many seconds back you can query).
@@ -708,7 +732,9 @@ Notes:
 
 - The rate limiter is counted per Cloudflare location, so it is a strong brake on abuse rather than an exact count.
   For a second layer, add a rate-limiting rule for `/api/*` in the Cloudflare dashboard under **Security → WAF**.
-- `namespace_id` in `wrangler.toml` must be unique within your Cloudflare account. Change it if you already use `1001`.
+- Each `namespace_id` in `wrangler.toml` (`1001` for `LOOKUP_LIMITER`, `1002` for `PORT_LIMITER`) must be unique
+  within your Cloudflare account and different from each other. Rate limiters that share a `namespace_id` share
+  counters, so change either one if your account already uses it.
 - The CSP blocks every third-party host. Ad networks and analytics need their domains added to
   `script-src`, `connect-src`, `img-src` and possibly `frame-src`.
 - The Worker stores and logs nothing about visitors. If you turn on Workers Logs or add analytics or ads,

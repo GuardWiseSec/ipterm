@@ -85,6 +85,7 @@ namespace_id = "1001"
 
 # Per-visitor limit on port checks (`port <n>`, /port/<n> from the command line, /api/port): 10 per
 # 60 seconds. Each check makes the Worker open one TCP connection to the visitor's own address.
+# namespace_id: unique within your account and different from LOOKUP_LIMITER's (limiters that share one share counters).
 [[ratelimits]]
 name = "PORT_LIMITER"
 namespace_id = "1002"

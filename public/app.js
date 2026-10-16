@@ -433,10 +433,10 @@
   const SRC = { edge: 'cloudflare edge', 'ipinfo-lite': 'ipinfo lite', 'ipinfo-core': 'ipinfo core', ipinfo: 'ipinfo', demo: 'sample data' };
   const fmt = n => Number(n).toLocaleString('en-US');
 
-  async function getJson(path) {
+  async function getJson(path, extra) {
     const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 9000);
     try {
-      const r = await fetch(path, { signal: ctrl.signal, headers: { accept: 'application/json' } });
+      const r = await fetch(path, { signal: ctrl.signal, headers: { accept: 'application/json', ...extra } });
       if (!(r.headers.get('content-type') || '').includes('json')) return { error: 'no-api' };
       const d = await r.json();
       if (r.ok || (d && d.found === false)) return d;
@@ -457,8 +457,15 @@
   let navPush = true;
   function setUrl(path, title) {
     document.title = title;
-    if (!live || !navPush || location.pathname + location.search === path) return;
-    try { history.pushState({ path }, '', path); } catch {}
+    if (!live || !navPush) return;
+    // The same page is the same path and, on a mail page, the same ?dkim= (the only query the app writes),
+    // so a tag on the address the visitor came in on (?fbclid=, ?utm_source=) doesn't add a second entry.
+    try {
+      const u = new URL(path, location.origin), mail = u.pathname.startsWith('/mail/');
+      const sel = search => (mail && new URLSearchParams(search).get('dkim')) || '';
+      if (u.pathname === location.pathname && sel(u.search) === sel(location.search)) return;
+      history.pushState({ path }, '', path);
+    } catch {}
   }
   function cmdFor(pathname, search = '') {
     let p; try { p = decodeURIComponent(pathname).replace(/^\/+|\/+$/g, ''); } catch { return null; }
@@ -1039,11 +1046,12 @@
 
   /* ---------- port check ----------
      "Is this port open on my IP?" The Worker connects to the address you are visiting from (never any
-     other) on the one port you name, and says whether it was accepted, refused or got no answer. It
+     other) on the one port you name, and says whether it was accepted, turned away or got no answer. It
      only runs when you ask: the /port/<n> pages explain the port and offer a button. What each port is
      for comes from ports.js, shared with the Worker; how a result reads comes from the Worker. */
   const PORTSLIB = window.IPTERM_PORTS || null;
-  const portTitle = (n, s) => (s ? `Port ${n} (${s.name}): check if it's open on your IP` : `Port ${n}: check if it's open on your IP`) + ' | ipterm';
+  const portTitle = (n, s) => (s ? `Port ${n} (${s.name})` : `Port ${n}`) +
+    (PORTSLIB && PORTSLIB.untestable(n) ? ": what it's for and why ipterm can't check it" : ": check if it's open on your IP") + ' | ipterm';
   const PORT_STATE = { open: ['st-ok', 'open'], closed: ['st-warn', 'closed'], 'no-answer': ['st-warn', 'no answer'], untestable: ['st-info', 'not tested'] };
 
   async function portIntro() {
@@ -1071,11 +1079,13 @@
     const rows = s ? [['service', s.name], ['used for', s.use], ['protocol', PORTSLIB.protoText(s.proto)], ['if closed', s.tips]]
       : [['protocol', 'TCP'], ['', `Port ${n} isn't one of the common ports ipterm describes, but it can still be checked.`, 'plain']];
     if (s && s.risk) rows.push(['caution', s.risk]);
+    const blocked = PORTSLIB && PORTSLIB.untestable(n);   // port 25: say so, and offer no check
     const f = document.createDocumentFragment();
     f.append(cmdButton(`check port ${n} now`, `port ${n}`), '  on the address you are visiting from (one connection; nothing is stored)');
-    rows.push(['check', f]);
+    rows.push(['check', blocked ? `ipterm can't check this port: ${blocked}` : f]);
     await kv(rows);
-    announce(s ? `Port ${n}, ${s.name}: ${s.use} Use the check button to test it on your address.` : `Port ${n}. Use the check button to test it on your address.`);
+    const then = blocked ? `ipterm can't check this port: ${blocked}` : 'Use the check button to test it on your address.';
+    announce(s ? `Port ${n}, ${s.name}: ${s.use} ${then}` : `Port ${n}. ${then}`);
     next(['port', 'port', 'common ports and how the check works'], ['man port', 'man port', 'the manual']);
   }
 
@@ -1083,7 +1093,9 @@
     setUrl('/port/' + n, portTitle(n, PORTSLIB && PORTSLIB.get(n)));
     if (!live) return line('The port check tests your real connection, so it only runs on the deployed site.', 'warn');
     const q = line(`connecting to your address on TCP port ${n}… (up to 5 seconds; nothing is stored)`, 'sys'); const t0 = performance.now();
-    const d = await getJson('/api/port?n=' + n);
+    // X-Ipterm: browsers without Sec-Fetch-Site send no Origin here either, and the Worker needs to know
+    // the request comes from this page (a cross-site page can't add the header).
+    const d = await getJson('/api/port?n=' + n, { 'x-ipterm': 'port' });
     if (d.error) { q.textContent = d.error; q.className = 'ln err'; announce(d.error); return; }
     q.textContent = `done · ${Math.round(performance.now() - t0)} ms`;
     const [cls, label] = PORT_STATE[d.state] || PORT_STATE.untestable, svc = d.service;
@@ -1390,7 +1402,12 @@
       rows.push(['SPF includes', frag(joined(shown), spf.includes.length > 12 ? `  and ${spf.includes.length - 12} more` : '')]);
     }
     if (d.dmarc) rows.push(['DMARC record', frag(d.dmarc.record, d.dmarc.inherited ? el('span', 'ttl', `  at _dmarc.${d.dmarc.from}`) : '')]);
-    if (d.dkim) rows.push(['DKIM selectors', frag(d.dkim.selectors.join(', '), el('span', 'ttl', d.dkim.keys.length ? `  found: ${d.dkim.keys.map(k => k.selector).join(', ')}` : '  none found'))]);
+    if (d.dkim) {                                 // which had a key, and which the resolver couldn't read (as dkimNote in worker.js)
+      const un = d.dkim.unanswered || [];
+      const note = [d.dkim.keys.length ? `found: ${d.dkim.keys.map(k => k.selector).join(', ')}` : un.length < d.dkim.selectors.length ? 'none found' : null,
+        un.length ? `couldn't read: ${un.join(', ')}` : null].filter(Boolean).join('; ');
+      rows.push(['DKIM selectors', frag(d.dkim.selectors.join(', '), el('span', 'ttl', '  ' + note))]);
+    }
     const m = d.mtaSts, p = m && m.policy;
     if (m) rows.push(['MTA-STS record', m.record]);
     if (p) rows.push(['MTA-STS policy', p.error ? `${p.url} ${p.error}` : `mode ${p.mode || '?'} · mx ${p.mx.join(' ') || 'none'} · max_age ${p.maxAge != null ? p.maxAge : '?'}`]);
@@ -1622,7 +1639,7 @@
         ['', 'F: three or more FAIL, no working SPF and no DMARC, or SPF that lets any server pass (+all)'], ['', 'INFO lines never count.'],
         ['FAIL', 'no SPF or DMARC record; two of either; SPF over 10 lookups, with +all, or with errors; an MTA-STS record whose policy is missing, invalid or leaves out an MX host'],
         ['WARN', 'DMARC p=none, pct below 100, sp=none or no report address; SPF ?all, no all, or ptr; DKIM keys under 2048 bits; no TLS-RPT beside MTA-STS; a BIMI logo without DMARC enforcement'],
-        ['DKIM', "selectors can't be listed, so only google, selector1, selector2, default, k1 and s1 are tried, and no key there is INFO. Name yours with --dkim: it is the s= value in a message's DKIM-Signature header."],
+        ['DKIM', "selectors can't be listed, so only google, selector1, selector2, default, k1 and s1 are tried, and no key there is INFO (so is a selector the resolver couldn't read). Name yours with --dkim: it is the s= value in a message's DKIM-Signature header."],
         ['NULL MX', 'a domain that accepts no mail (MX 0 .) should have v=spf1 -all and DMARC p=reject; the other checks don\'t apply']]],
     whois: ['whois <ip | ASN | domain>', 'the registry record. For addresses and networks: owner, address block and abuse contact. For domains: registrar, registration and expiry dates, status and name servers. Straight from the registries over RDAP.',
       ['whois example.com', 'whois 8.8.8.8', 'whois AS13335'], ['lookup', 'asn', 'dig'], ['/whois/example.com', '/whois/8.8.8.8', '/whois/example.com?format=text']],
@@ -1630,7 +1647,7 @@
       ['asn AS13335', 'asn 15169'], ['whois', 'cidr'], ['/AS13335', '/AS13335?format=text']],
     cidr: ['cidr <range>   or   cidr <ip> <netmask>', 'subnet calculator: network and broadcast addresses, netmask, wildcard, usable host range and count, and how the block splits and combines. IPv6 too. Calculated in your browser.',
       ['cidr 192.168.1.0/24', 'cidr 10.0.0.0/22', 'cidr 192.168.1.10 255.255.255.0', 'cidr 2001:db8::/48'], ['whois', 'asn'], ['/cidr/10.0.0.0/22', '/cidr/10.0.0.0/22?format=text']],
-    port: ['port <number>   or   port <number> --info', "checks whether a TCP port is open on your own public IP address: ipterm's server connects to the address you are visiting from, on the one port you name, and reports open (something accepted), closed (refused) or no answer (dropped, usually by a router that isn't forwarding the port). It never tests any other address, sends nothing over the connection and stores nothing; 10 checks a minute. Over IPv6 it tests your IPv6 address, where port forwards don't apply: curl -4 tests IPv4. --info explains a port without checking it.",
+    port: ['port <number>   or   port <number> --info', "checks whether a TCP port is open on your own public IP address: ipterm's server connects to the address you are visiting from, on the one port you name, and reports open (something accepted), closed (turned away at once: nothing is listening, or a firewall rejected it) or no answer (dropped, usually by a router that isn't forwarding the port). It never tests any other address, sends nothing over the connection and stores nothing; 10 checks a minute. Port 25 can't be checked: Cloudflare, which runs ipterm, blocks it. Over IPv6 it tests your IPv6 address, where port forwards don't apply: curl -4 tests IPv4. --info explains a port without checking it.",
       ['port 25565', 'port 22', 'port 32400 --info'], ['whoami', 'ping'], ['-4 /port/22', '-4 /port/22?format=text']],
     ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
       ['ping', 'ping 10'], ['whoami', 'traceroute']],
@@ -1651,7 +1668,8 @@
     ['what-is-an-asn', 'What is an ASN?', null], ['subnet-cheat-sheet', 'Subnet mask cheat sheet', null]];
   const MAN_GUIDE = { whoami: 'what-your-ip-reveals', leaktest: 'what-your-ip-reveals', asn: 'what-is-an-asn', cidr: 'subnet-cheat-sheet' };
   const guideLink = slug => { const g = GUIDES.find(x => x[0] === slug), a = el('a', 'cmd', g ? g[1] : slug); a.href = '/guides/' + slug; return a; };
-  // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup).
+  // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup),
+  // unless the caller names one to prefer ("mal gmail.com" -> mail, not man).
   const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'lookup', 'nslookup', 'asn', 'port', 'ping', 'traceroute', 'dmarc',
     'share', 'copy', 'privacy', 'clear', 'history', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
@@ -1664,10 +1682,10 @@
     }
     return d[a.length][b.length];
   }
-  function closest(word) {
+  function closest(word, prefer) {
     if (!word || word.length > 20) return null;
     let best = null, bestD = Infinity;
-    for (const k of KNOWN) { const x = osa(word, k); if (x < bestD) { bestD = x; best = k; } }
+    for (const k of KNOWN) { const x = osa(word, k); if (x < bestD || (x === bestD && k === prefer)) { bestD = x; best = k; } }
     return bestD <= (word.length <= 4 ? 1 : 2) ? best : null;     // short words need a closer match
   }
   const runnable = (label, cmd) => { const h = hrefFor(cmd); return h ? cmdLink(label, cmd, h) : cmdButton(label, cmd); };
@@ -1937,7 +1955,7 @@
         if (parseIp(c0) || /^as\d+$/i.test(c0)) return lookup(c0);
         if (looksLikeCidr(cmd)) return cidr(cmd);
         if (looksLikeDomain(c0)) return dns(c0);
-        const guess = closest(lc);
+        const guess = closest(lc, args[0] && looksLikeDomain(args[0]) ? 'mail' : null);   // man gmail.com would find nothing
         if (!guess) return line(`command not found: ${c0}. Type help for the list.`, 'err');
         line(`command not found: ${c0}`).className = 'ln err';     // spoken once, with the suggestion, below
         const fix = [guess, ...args].join(' '), d = el('div', 'ln sys');

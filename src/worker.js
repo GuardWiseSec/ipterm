@@ -64,9 +64,11 @@ const CIDR = globalThis.IPTERM_CIDR;
 const PORTS = globalThis.IPTERM_PORTS;
 
 const CLI_UA = /^(curl|wget|httpie|xh|fetch|libfetch|aria2)\b|powershell/i;
-// Link-preview fetchers for chat apps and social sites. Many send "Accept: */*", so without this a
-// shared link would preview as JSON. Named bots only: anything else without text/html still gets JSON.
+// Link-preview fetchers for chat apps and social sites, and search engine crawlers. Many send "Accept: */*"
+// (or no Accept), so without this a shared link would preview as JSON and a crawler would find JSON (or, on
+// /port/<n>, a 403) instead of the page. Named bots only: anything else without text/html still gets JSON.
 const PREVIEW_UA = /facebookexternalhit|WhatsApp|Slackbot|Discordbot|TelegramBot|Twitterbot|LinkedInBot|Applebot|redditbot|Mastodon\/|Bluesky|Cardyb|Embedly|Iframely/i;
+const CRAWLER_UA = /Googlebot|bingbot|msnbot|BingPreview|DuckDuckBot|YandexBot|Baiduspider|Amazonbot|PetalBot|SeznamBot|Qwantbot/i;
 const ASN_RE = /^as(\d{1,10})$/i;
 
 class RateLimited extends Error {}
@@ -249,7 +251,7 @@ async function withOrigin(res, url) {
 
 function wantsHtml(request, url, ua) {
   if (/^(json|text)$/.test(url.searchParams.get('format') || '') || CLI_UA.test(ua)) return false;
-  return PREVIEW_UA.test(ua) || (request.headers.get('accept') || '').includes('text/html');
+  return PREVIEW_UA.test(ua) || CRAWLER_UA.test(ua) || (request.headers.get('accept') || '').includes('text/html');
 }
 
 /* ---------- routes ---------- */
@@ -348,7 +350,7 @@ async function mailRoute(io, rawName, rawSel, html) {
       const [common, named] = await Promise.all([cached(io, `mail-dkim/${name}/*`, 300, () => dkimProbe(name, DKIM_SELECTORS)),
         extra ? cached(io, `mail-dkim/${name}/${sel}`, 300, () => dkimProbe(name, [sel])) : null]);
       return mailResult(base, named ? { selectors: [...common.selectors, sel], keys: [...common.keys, ...named.keys],
-        subrequests: common.subrequests + named.subrequests } : common, sel);
+        unanswered: [...(common.unanswered || []), ...(named.unanswered || [])], subrequests: common.subrequests + named.subrequests } : common, sel);
     },
     // A nonexistent domain is a valid answer: JSON says so with 200; the HTML page uses 404 so it isn't indexed.
     d => html ? mailPage(io, d, d.status === 'NOERROR' ? 200 : 404) : reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, mailText),
@@ -407,11 +409,13 @@ async function asnRoute(io, q, html) {
 /* ---------- port check ----------
    "Is this port open on my IP?" The Worker opens a TCP connection to the address the request came from
    (cf-connecting-ip, which Cloudflare sets itself) on the one port asked for, and reports whether it was
-   accepted, refused or got no answer. It never tests any other address, sends nothing over the
+   accepted, turned away or got no answer. It never tests any other address, sends nothing over the
    connection, closes it at once and keeps nothing. Guards:
    - only the ipterm page itself (a same-origin request) or a command-line tool can start a check, so
      other sites can't make visitors' browsers start one and crawlers never do;
    - the /port/<n> pages explain the port and offer a button; nothing is tested on page load;
+   - only a public address is connected to: for IPv6, global unicast (2000::/3) without the forms that
+     embed an IPv4 address (6to4, Teredo);
    - PORT_LIMITER allows 10 checks a minute per address (per /64 for IPv6).
    What testing on Cloudflare showed (wrangler dev --remote):
    - IPv6 works, but only as a bracketed literal ("[2001:db8::1]"); a bare IPv6 literal is refused.
@@ -422,19 +426,29 @@ async function asnRoute(io, q, html) {
      forward doesn't apply: the answer says so and points to `curl -4`, which tests IPv4. */
 const PORT_TIMEOUT = 5000;
 // Cloudflare's own networks (WARP, the 1.1.1.1 app, iCloud Private Relay's Cloudflare exits), which
-// Workers can't connect to, and its published ranges in case the network number is missing.
+// Workers can't connect to, and its address blocks in case the network number is missing: the published
+// ranges, plus the 1.1.1.1 resolver's and WARP's exits (1.1.1.0/24, 1.0.0.0/24, 104.28.0.0/16, 2a09:bac0::/29).
 const CLOUDFLARE_ASNS = new Set([13335, 209242]);
 const CLOUDFLARE_RANGES = ['173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
   '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13', '104.24.0.0/14', '172.64.0.0/13',
-  '131.0.72.0/22', '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32'];
+  '131.0.72.0/22', '1.1.1.0/24', '1.0.0.0/24', '104.28.0.0/16',
+  '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32', '2a09:bac0::/29'];
+// Only global unicast IPv6 (2000::/3) can be a visitor's address, so the check refuses everything else,
+// which includes the forms that embed an IPv4 address (::/96, 64:ff9b::/96). Inside 2000::/3 it also
+// refuses these: the IETF blocks (Teredo and others), 6to4 (which embeds IPv4) and documentation.
+const PORT_V6_RESERVED = ['2001::/23', '2002::/16', '3fff::/20'];
 // Providers that usually share IPv4 addresses between customers (carrier-grade NAT), so no port forward
 // can work. Mobile networks in general do; these are the common home-internet cases.
 const CGNAT_ASNS = { 14593: 'Starlink', 21928: 'T-Mobile', 22394: 'Verizon Wireless', 6167: 'Verizon Wireless', 20057: 'AT&T Mobility' };
 
-// Fetches from the page itself say so (Sec-Fetch-Site); older browsers send Origin on cross-site requests.
+// Fetches from the page itself say so (Sec-Fetch-Site), and that always wins when it is sent. Browsers
+// without Sec-Fetch-* send no Origin on a same-origin GET, so the terminal also sends X-Ipterm, which a
+// cross-site page can't add: it needs a CORS preflight, and ipterm never allows one (OPTIONS is 405 unless
+// PUBLIC_API is on, and secure() never sends Access-Control-Allow-Headers).
 function sameOrigin(request, url) {
   const site = request.headers.get('sec-fetch-site');
-  return site ? site === 'same-origin' : request.headers.get('origin') === url.origin;
+  if (site) return site === 'same-origin';
+  return request.headers.get('origin') === url.origin || request.headers.get('x-ipterm') === 'port';
 }
 
 async function portRoute(io, raw, html) {
@@ -472,7 +486,11 @@ async function portCheck(io, n) {
     return untested('cgnat', `not tested: ${base.ip} is in the carrier-grade NAT range (100.64.0.0/10). Your provider shares public addresses between many customers, so nothing on the internet can reach this one and no port forward can work. Ask your provider for a public IPv4 address, or use IPv6 or a tunnel such as Tailscale or Cloudflare Tunnel.`);
   }
   if (range) return untested('not-public', `not tested: ${base.ip} is not a public address (${range}), so nothing on the internet can reach it.`);
-  if (n === 25) return untested('port-25', "not tested: Cloudflare, which runs ipterm, doesn't allow connections to port 25 (email), to stop spam. Most home internet providers block port 25 too.");
+  if (p.v === 6 && ((p.g[0] & 0xe000) !== 0x2000 || PORT_V6_RESERVED.some(r => inPrefix(p, r) >= 0))) {
+    return untested('not-public', `not tested: ${base.ip} is a reserved or transition IPv6 address (IPv4-embedded, 6to4, Teredo or IETF-reserved), so ipterm doesn't connect to it. To test your IPv4 address, run: curl -4 ${io.url.host}/port/${n}`);
+  }
+  const blocked = PORTS.untestable(n);                   // port 25, the only one (hence the reason code)
+  if (blocked) return untested('port-25', `not tested: ${blocked}`, svc && svc.tips ? [`${svc.name}: ${svc.tips}`] : []);
   if (CLOUDFLARE_ASNS.has(asn) || CLOUDFLARE_RANGES.some(r => inPrefix(p, r) >= 0)) {
     return untested('cloudflare', `not tested: ${base.ip} belongs to Cloudflare, so you are probably using Cloudflare WARP, the 1.1.1.1 app or iCloud Private Relay. ipterm runs on Cloudflare, which can't connect to its own addresses: turn the VPN or relay off and check again.`);
   }
@@ -489,8 +507,10 @@ async function portLimit(io) {
   if (!ok) throw new RateLimited();
 }
 
-// Open: the handshake completed. Closed: the address refused it (a reset). No answer: nothing came back
-// in time, which is what a router does with a port it doesn't forward. Nothing is ever sent.
+// Open: the handshake completed. Closed: the attempt failed at once. That is usually a refusal (a reset),
+// but workerd gives the same error for an ICMP "unreachable" reply or a blocked destination, so the answer
+// only says it was turned away. No answer: nothing came back in time, which is what a router does with a
+// port it doesn't forward. Nothing is ever sent.
 async function probePort(hostname, port) {
   const t0 = Date.now();
   let sock, timer;
@@ -511,7 +531,7 @@ async function probePort(hostname, port) {
 function portSummary(state, n, svc) {
   const what = `TCP port ${n}` + (svc ? ` (${svc.name})` : '');
   if (state === 'open') return `open: your address accepted a connection on ${what}.`;
-  if (state === 'closed') return `closed: your address refused the connection on ${what}. It got through, but nothing there accepted it: no program is listening on that port, or a firewall turned it away.`;
+  if (state === 'closed') return `closed: the connection to your address on ${what} was turned away at once, rather than timing out. Nothing is listening on that port, or a firewall on the device or router rejected it.`;
   return `no answer: nothing replied on ${what} within ${PORT_TIMEOUT / 1000} seconds. A router or firewall is dropping it, or the port isn't forwarded to any device.`;
 }
 
@@ -562,14 +582,17 @@ function portPage(io, d, status) {
       initial: { kind: 'port', query: String(d.input || ''), error: d.error }, body: staticBlock('Port checker', ['port'], [], d.error) });
   }
   const n = d.port, s = PORTS.get(n), path = '/port/' + n, host = io.url.host;
-  const title = s ? `Port ${n} (${s.name}): check if it's open on your IP | ipterm` : `Port ${n}: check if it's open on your IP | ipterm`;
-  const desc = s ? `${s.use} Check whether TCP port ${n} is open on your own IP address, and see why it may be closed.`
+  const blocked = PORTS.untestable(n);                   // port 25: say so, and offer no check
+  const named = s ? `Port ${n} (${s.name})` : `Port ${n}`;
+  const title = blocked ? `${named}: what it's for and why ipterm can't check it | ipterm` : `${named}: check if it's open on your IP | ipterm`;
+  const desc = blocked ? (s ? s.use + ' ' : '') + `ipterm can't check this port: ${blocked}`
+    : s ? `${s.use} Check whether TCP port ${n} is open on your own IP address, and see why it may be closed.`
     : `Check whether TCP port ${n} is open on your own IP address: ipterm connects to the address you visit from and reports open, closed or no answer.`;
-  const summary = (s ? s.use + ' ' : '') + `ipterm can check whether TCP port ${n} is open on your own IP address: it connects to the address you visit from, on this one port, and reports open, closed or no answer. Nothing is stored.` +
+  const summary = blocked ? desc : (s ? s.use + ' ' : '') + `ipterm can check whether TCP port ${n} is open on your own IP address: it connects to the address you visit from, on this one port, and reports open, closed or no answer. Nothing is stored.` +
     (s && s.proto === 'udp' ? ` ${s.name} uses UDP, which the check can't test.` : '');
   const rows = s ? [['protocol', PORTS.protoText(s.proto)], ['why it may be closed', s.tips], ['caution', s.risk]] : [['protocol', 'TCP']];
   const p = t => `<p class="ln">${t}</p>`;
-  const extra = `<p class="ln sys">Check it: type <code>port ${n}</code> in the terminal, or from a command line run <code>curl -4 ${esc(host)}/port/${n}</code>. It only tests the address you connect from, one port at a time.</p>` +
+  const extra = (blocked ? '' : `<p class="ln sys">Check it: type <code>port ${n}</code> in the terminal, or from a command line run <code>curl -4 ${esc(host)}/port/${n}</code>. It only tests the address you connect from, one port at a time.</p>`) +
     `<p class="ln sys">For a port to be open, all of these must be true:</p>` +
     p(`1. A program is running and listening on port ${n} (on all addresses, not only 127.0.0.1).`) +
     p("2. The device's firewall allows the port.") +
@@ -695,6 +718,12 @@ function dnsText(d) {
 // problem, then the records it read. Shared by ?format=text and the page's static summary.
 const MAIL_STATUS = { ok: 'OK', warn: 'WARN', fail: 'FAIL', info: 'INFO' };
 const mailTally = c => (c.fail || c.warn ? [c.fail && `${c.fail} FAIL`, c.warn && `${c.warn} WARN`].filter(Boolean).join(', ') : 'no problems found');
+// Which selectors had a key, and which the resolver couldn't read. Matches app.js.
+function dkimNote(k) {
+  const un = k.unanswered || [];
+  return [k.keys.length ? `found: ${k.keys.map(x => x.selector).join(', ')}` : un.length < k.selectors.length ? 'none found' : null,
+    un.length ? `couldn't read: ${un.join(', ')}` : null].filter(Boolean).join('; ');
+}
 function mailRows(d, asText) {
   const rows = [['grade', `${d.grade}  (${mailTally(d.counts)})`]];
   let prev = null;
@@ -708,7 +737,7 @@ function mailRows(d, asText) {
   if (spf.record) rows.push([spf.records > 1 ? 'SPF records' : 'SPF record', [spf.record, ...(spf.others || [])]]);
   if (spf.includes && spf.includes.length) rows.push(['SPF includes', spf.includes.slice(0, 12).join(' ') + (spf.includes.length > 12 ? ` and ${spf.includes.length - 12} more` : '')]);
   if (dm) rows.push(['DMARC record', dm.record + (dm.inherited ? `  (at _dmarc.${dm.from})` : '')]);
-  if (d.dkim) rows.push(['DKIM selectors', d.dkim.selectors.join(', ') + (d.dkim.keys.length ? `  (found: ${d.dkim.keys.map(k => k.selector).join(', ')})` : '  (none found)')]);
+  if (d.dkim) rows.push(['DKIM selectors', `${d.dkim.selectors.join(', ')}  (${dkimNote(d.dkim)})`]);
   if (m) rows.push(['MTA-STS record', m.record]);
   if (p) rows.push(['MTA-STS policy', p.error ? `${p.url} ${p.error}` : `mode ${p.mode || '?'}, mx ${p.mx.join(' ') || 'none'}, max_age ${p.maxAge ?? '?'}`]);
   if (d.tlsRpt) rows.push(['TLS-RPT record', d.tlsRpt.record]);
@@ -1423,12 +1452,13 @@ const PROVIDER_SPF = { Gmail: '_spf.google.com', 'Google Workspace': '_spf.googl
 
 // One DNS query within a check's budget: a time limit, and one retry while the budget allows, also
 // after SERVFAIL (the resolver couldn't reach the domain's name servers in time, which is often brief).
+// A retry takes its share of the budget before the pause, so queries failing together can't overspend it.
 async function mailDoh(b, name, type) {
-  if (name.length > 253) return { Status: 1 };          // too long to be a name (a long domain plus _dmarc.)
+  if (name.length > 253) return { Status: 3 };          // too long to be a name (a long domain plus _dmarc.), so nothing is there
   let last = null, answer = null;
   for (let attempt = 0; attempt < 2 && b.left > 0; attempt++) {
-    if (attempt) await sleep(300);
     b.left--; b.used++;
+    if (attempt) await sleep(300);
     try {
       const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`,
         { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(4000) });
@@ -1493,13 +1523,16 @@ const spfTerm = t => (t.length > 60 ? t.slice(0, 60) + '…' : t);
 // One record's terms: the lookups it costs by itself, what it includes or redirects to, its "all",
 // and anything RFC 7208 calls an error. Terms after "all" are never evaluated, so they cost nothing.
 function spfParse(rec) {
-  const p = { lookups: 0, all: null, includes: [], redirect: null, errors: [], ptr: false, macros: false, mechs: 0 };
+  const p = { lookups: 0, all: null, includes: [], redirect: null, redirectMacro: false, errors: [], ptr: false, macros: false, mechs: 0 };
   for (const t of String(rec).trim().split(/\s+/).slice(1, 80)) {
     const mod = /^([a-z][a-z0-9_.-]*)=(.*)$/i.exec(t);
     if (mod) {                                           // modifiers: redirect= and exp= (unknown ones are allowed)
       if (mod[1].toLowerCase() !== 'redirect') continue;
       if (p.redirect !== null) p.errors.push({ text: 'has more than one redirect=', fix: 'keep a single redirect=' });
-      else p.redirect = String(mod[2]).toLowerCase().replace(/\.$/, '');
+      else {                                             // a macro in it is counted but not followed, like include:'s
+        p.redirect = String(mod[2]).toLowerCase().replace(/\.$/, '');
+        if (p.redirect.includes('%')) p.macros = p.redirectMacro = true;
+      }
       continue;
     }
     const m = /^([+\-~?]?)([a-z][a-z0-9]*)(.*)$/i.exec(t);
@@ -1579,12 +1612,13 @@ async function spfAnalyze(b, rec) {
       const all = await follow(domain, 'include:' + domain, depth);
       if (all === '+all' && q === '+' && st.passAll.length < 3 && !st.passAll.includes(domain)) st.passAll.push(domain);
     }));
-    const redirected = p.redirect && !p.all ? await follow(p.redirect, 'redirect=' + p.redirect, depth) : null;
+    const redirected = p.redirect && !p.all && !p.redirectMacro ? await follow(p.redirect, 'redirect=' + p.redirect, depth) : null;
     return p.all || redirected;
   }
   const top = spfParse(rec), all = await walk(rec, 0, null);
   return {
     records: 1, record: short(rec, 1000), all: all || null, redirect: top.redirect && !top.all ? top.redirect : null,
+    redirectMacro: top.redirectMacro && !top.all,        // its "all" is behind a macro, so it can't be known
     lookups: st.lookups, overLimit: st.lookups > 10 || st.capped, counted: !st.capped,
     includes: st.includes, errors: st.errors, unresolved: st.unresolved, passAll: st.passAll, ptr: st.ptr, macros: st.macros,
     onlyFail: top.mechs === 1 && top.all === '-all',     // "v=spf1 -all": no server may send
@@ -1650,16 +1684,19 @@ function parseSts(body) {
 const stsMatch = (h, pat) => (pat.startsWith('*.') ? h.endsWith(pat.slice(1)) && /^[^.]+$/.test(h.slice(0, -(pat.length - 1))) : h === pat);
 const ageText = s => (s >= 86400 ? `${Math.round(s / 86400)} day${Math.round(s / 86400) === 1 ? '' : 's'}` : s >= 3600 ? `${Math.round(s / 3600)} hours` : `${s} seconds`);
 
-// DKIM keys can't be listed: only selectors someone names can be checked.
+// DKIM keys can't be listed: only selectors someone names can be checked. A selector the resolver
+// couldn't read (SERVFAIL after the retry, or no answer) is unanswered, not "no key", and the probe is
+// then kept for a minute instead of five.
 async function dkimProbe(name, selectors) {
   const b = { left: selectors.length + 1, used: 0 };
   const res = await Promise.all(selectors.map(async s => {
     let r;
     try { r = await mailDoh(b, `${s}._domainkey.${name}`, 'TXT'); } catch { return { selector: s, unanswered: true }; }
     const rec = txtOf(r, isDkim, 3000)[0];
-    return rec ? { selector: s, ...dkimKey(rec) } : { selector: s };
+    return dnsFailed(r) ? { selector: s, unanswered: true } : rec ? { selector: s, ...dkimKey(rec) } : { selector: s };
   }));
-  return { selectors, keys: res.filter(x => x.keyType), unanswered: res.filter(x => x.unanswered).map(x => x.selector), subrequests: b.used };
+  const unanswered = res.filter(x => x.unanswered).map(x => x.selector);
+  return { ...(unanswered.length ? { _ttl: 60 } : {}), selectors, keys: res.filter(x => x.keyType), unanswered, subrequests: b.used };
 }
 
 function dkimKey(rec) {
@@ -1710,7 +1747,8 @@ async function mailRecords(name) {
     q('_dmarc.' + name, 'TXT'), q('_mta-sts.' + name, 'TXT'), q('_smtp._tls.' + name, 'TXT'), q('default._bimi.' + name, 'TXT')]);
   const st = mxR.Status ?? 0;
   if (st !== 0) return { ...(st !== 3 ? { _ttl: 60 } : {}), domain: name, status: RCODES[st] || 'ERROR', source: 'cloudflare-dns', subrequests: b.used };
-  const mx = (mxR.Answer || []).filter(a => a && a.type === 15).slice(0, 20).map(a => parseRecord('MX', a.data))
+  // Lowercased: some zones publish ASPMX.L.GOOGLE.COM, and MAIL_PROVIDERS and the MTA-STS mx lines are lowercase.
+  const mx = (mxR.Answer || []).filter(a => a && a.type === 15).slice(0, 20).map(a => parseRecord('MX', String(a.data).toLowerCase()))
     .sort((x, y) => (x.priority ?? 0) - (y.priority ?? 0));
   const real = mx.filter(r => !nullMx(r));
   const spfRecs = txtOf(txtR, isSpf), dmarcRecs = txtOf(dmarcR, isDmarc, 1000);
@@ -1726,18 +1764,23 @@ async function mailRecords(name) {
   const [spf, policy, up] = await Promise.all([
     spfRecs.length === 1 ? spfAnalyze(b, spfRecs[0]) : null,
     stsRecs.length && !nullOnly ? stsPolicy(b, name) : null,
-    Promise.all(parents.map(p => q('_dmarc.' + p, 'TXT').then(r => ({ from: p, recs: txtOf(r, isDmarc, 1000) }), () => ({ from: p, recs: [] })))),
+    Promise.all(parents.map(p => q('_dmarc.' + p, 'TXT').then(r => ({ from: p, recs: txtOf(r, isDmarc, 1000), failed: dnsFailed(r) ? RCODES[r.Status] || 'an error' : null }),
+      () => ({ from: p, recs: [], failed: 'no answer' })))),
   ]);
   const own = dmarcRecs.length ? { from: name, recs: dmarcRecs } : up.filter(x => x.recs.length && !/(^|;)\s*psd\s*=\s*y/i.test(x.recs[0])).pop();
   const sts = stsRecs.length ? tagList(stsRecs[0]) : null, rpt = rptRecs.length ? tagList(rptRecs[0]) : null, bimi = bimiRecs.length ? tagList(bimiRecs[0]) : null;
   const stsId = sts && String(sts.id || '').trim();
   // Records the resolver couldn't read (SERVFAIL even after a retry) are reported as unread, not as
-  // missing, and the answer is kept for a minute instead of five.
+  // missing, and the answer is kept for a minute instead of five. A subdomain without a record of its
+  // own whose parent couldn't be read is unread too, at that parent (parents are only asked once the
+  // subdomain's own answer was read).
   const unread = Object.fromEntries([['SPF', txtR], ['DMARC', own ? null : dmarcR], ['MTA-STS', stsR], ['TLS-RPT', rptR], ['BIMI', bimiR]]
     .filter(([, r]) => dnsFailed(r)).map(([k, r]) => [k, RCODES[r.Status] || 'an error']));
+  const upFail = own ? null : up.find(x => x.failed);
+  if (upFail) unread.DMARC = upFail.failed;
   return {
     ...(Object.keys(unread).length ? { _ttl: 60 } : {}),
-    domain: name, status: 'NOERROR', nullMx: nullOnly, unread,
+    domain: name, status: 'NOERROR', nullMx: nullOnly, unread, ...(upFail ? { dmarcUnreadAt: upFail.from } : {}),
     mx: { records: mx.map(r => ({ priority: r.priority ?? null, host: r.value })), providers: [...new Set(real.map(r => mxProvider(r.value)).filter(Boolean))],
       mixedNull: real.length > 0 && real.length < mx.length },
     spf: spf || { records: spfRecs.length, record: spfRecs.length ? short(spfRecs[0], 1000) : null, others: spfRecs.slice(1, 4).map(v => short(v, 1000)) },
@@ -1758,8 +1801,8 @@ function mailChecks(d, k, sel) {
   const hosts = d.mx.records.filter(r => !nullMx({ value: r.host })).map(r => r.host), providers = d.mx.providers;
   const two = a => a.slice(0, 2).join(', ') + (a.length > 2 ? ` and ${a.length - 2} more` : '');
   const unread = d.unread || {};
-  const notRead = (check, status, where) => add(check, status, `couldn't be read: Cloudflare's resolver answered ${unread[check]} for ${where} (its name servers didn't answer in time), so it wasn't checked`,
-    `check that every name server for ${name} answers; receivers that get no answer treat ${check} as a temporary error`);
+  const notRead = (check, status, where, zone = name) => add(check, status, `couldn't be read: Cloudflare's resolver ${unread[check] === 'no answer' ? 'got no answer' : 'answered ' + unread[check]} for ${where} (its name servers didn't answer in time), so it wasn't checked`,
+    `check that every name server for ${zone} answers; receivers that get no answer treat ${check} as a temporary error`);
 
   if (d.mx.mixedNull) add('MX', 'fail', 'a null MX (0 .) sits beside other MX records, which RFC 7505 forbids', "remove the null MX if the domain takes mail, or the other MX records if it doesn't");
   else if (noMail) add('MX', 'ok', `null MX: ${name} accepts no mail (RFC 7505)`);
@@ -1787,16 +1830,17 @@ function mailChecks(d, k, sel) {
       else if (out.length === before) add('SPF', 'warn', "lists senders, but a domain with a null MX can't send mail (receivers reject mail they couldn't bounce)", 'replace it with "v=spf1 -all"');
     } else {
       if (spf.all === '?all') add('SPF', 'warn', `ends in ?all${via} (neutral), so mail from unlisted servers isn't marked as failing${lk}`, 'end it with ~all, or -all once every sender is listed');
-      else if (!spf.all) add('SPF', 'warn', `doesn't end in ~all or -all, so mail from unlisted servers gets a neutral result${lk}`, 'add ~all at the end, or -all once every sender is listed');
+      else if (!spf.all && !spf.redirectMacro) add('SPF', 'warn', `doesn't end in ~all or -all, so mail from unlisted servers gets a neutral result${lk}`, 'add ~all at the end, or -all once every sender is listed');
       if (spf.ptr) add('SPF', 'warn', 'uses the ptr mechanism, which RFC 7208 says not to use: it is slow, and some receivers skip it', 'replace ptr with the ip4: and ip6: ranges (or a and mx) it stands for');
       for (const x of spf.unresolved) add('SPF', 'warn', `${x} didn't answer, so it couldn't be checked (receivers may delay your mail when that happens)`, `check that ${x.replace(/^[a-z]+[:=]/, '')} resolves and has one SPF record`);
-      if (!out.slice(before).length) add('SPF', 'ok', `ends in ${spf.all}${via}${lk}${spf.lookups >= 9 ? ' (close to the limit)' : ''}`);
+      if (!out.slice(before).length) add('SPF', 'ok', (spf.all ? `ends in ${spf.all}${via}` : `hands off to redirect=${spf.redirect}, which uses a macro, so the record it reaches depends on the sender and wasn't checked`) +
+        `${lk}${spf.lookups >= 9 ? ' (close to the limit)' : ''}`);
       if (spf.macros) add('SPF', 'info', 'uses macros (%{...}), which depend on the sender: those lookups are counted but not followed');
     }
   }
 
   const dm = d.dmarc;
-  if (unread.DMARC) notRead('DMARC', 'warn', '_dmarc.' + name);
+  if (unread.DMARC) notRead('DMARC', 'warn', '_dmarc.' + (d.dmarcUnreadAt || name), d.dmarcUnreadAt || name);
   else if (!dm) {
     add('DMARC', 'fail', 'no DMARC record, so receivers have no policy for mail that fails SPF and DKIM', noMail
       ? `add a TXT record at _dmarc.${name}: "v=DMARC1; p=reject"`
@@ -1829,12 +1873,20 @@ function mailChecks(d, k, sel) {
       add('DKIM', 'warn', `the key at ${x.selector} is ${x.bits}-bit RSA, too short to count on`, 'publish a 2048-bit key under a new selector, sign with it, then remove the old one');
     }
   } else if (keys.length) add('DKIM', 'info', `only a revoked key (empty p=) at ${keys.map(x => x.selector).join(', ')}`);
-  if (sel && !keys.some(x => x.selector === sel)) {
-    add('DKIM', 'info', `no key at ${sel}._domainkey.${name}` + (keys.length ? '' : `, nor at the common selectors (${DKIM_SELECTORS.filter(s => s !== sel).join(', ')})`) +
+  // Selectors the resolver couldn't read are left out of "no key at": they say nothing either way.
+  const unans = (k && k.unanswered) || [], common = DKIM_SELECTORS.filter(s => s !== sel && !unans.includes(s));
+  if (sel && unans.includes(sel)) {
+    if (!keys.length && common.length) add('DKIM', 'info', `no key at the common selectors (${common.join(', ')})`);
+  } else if (sel && !keys.some(x => x.selector === sel)) {
+    add('DKIM', 'info', `no key at ${sel}._domainkey.${name}` + (keys.length || !common.length ? '' : `, nor at the common selectors (${common.join(', ')})`) +
       ". The selector is the s= value in a message's DKIM-Signature header");
-  } else if (!sel && !keys.length) {
-    add('DKIM', 'info', `no key at the common selectors (${DKIM_SELECTORS.join(', ')}). Selectors can't be listed, so this doesn't mean DKIM is off: ` +
+  } else if (!sel && !keys.length && common.length) {
+    add('DKIM', 'info', `no key at the common selectors (${common.join(', ')}). Selectors can't be listed, so this doesn't mean DKIM is off: ` +
       "name yours with --dkim <selector> (?dkim= in a URL), the s= value in a message's DKIM-Signature header");
+  }
+  if (unans.length) {
+    add('DKIM', 'info', `couldn't read ${unans.length > 1 ? `the selectors ${unans.join(', ')}` : `${unans[0]}._domainkey.${name}`} (Cloudflare's resolver didn't answer), so ` +
+      (unans.length > 1 ? "they weren't checked" : "it wasn't checked"));
   }
 
   const m = d.mtaSts, p = m && m.policy;
@@ -1893,7 +1945,7 @@ function mailResult(base, probe, sel) {
   return {
     domain: base.domain, status: base.status, grade: mailGrade(checks, base), counts: { ok: n('ok'), warn: n('warn'), fail: n('fail'), info: n('info') },
     checks, selector: sel, nullMx: base.nullMx, mx: base.mx, spf: base.spf, dmarc: base.dmarc,
-    dkim: probe ? { selectors: probe.selectors, keys: probe.keys } : null,
+    dkim: probe ? { selectors: probe.selectors, keys: probe.keys, unanswered: probe.unanswered || [] } : null,
     mtaSts: base.mtaSts, tlsRpt: base.tlsRpt, bimi: base.bimi, unread: base.unread || {},
     source: base.source, subrequests: base.subrequests + (probe ? probe.subrequests : 0),
   };
@@ -2509,14 +2561,18 @@ function mailPage(io, d, status) {
       body: staticBlock(`Mail check: ${name}`, ['mail'], [], msg) });
   }
   const rows = mailRows(d, false).map(([k, v]) => [k, Array.isArray(v) ? v.join(' · ') : v]);
-  const dm = d.dmarc, spf = d.spf, sts = d.mtaSts && d.mtaSts.policy;
+  const dm = d.dmarc, spf = d.spf, sts = d.mtaSts && d.mtaSts.policy, unread = d.unread || {};
   const hosts = d.mx.records.filter(r => !nullMx({ value: r.host })).map(r => r.host);
-  // The summary is what search engines show for "<domain> dmarc" and "<domain> spf record".
-  const summary = [`${name} gets a ${d.grade} for email security (${mailTally(d.counts)})`,
+  // The summary is what search engines show for "<domain> dmarc" and "<domain> spf record". A record
+  // that couldn't be read is said so, as on its check line, never called missing.
+  const summary = [`${name} gets ${/^[AF]$/.test(d.grade) ? 'an' : 'a'} ${d.grade} for email security (${mailTally(d.counts)})`,
     d.nullMx ? 'it accepts no mail (null MX)' : d.mx.providers.length ? `mail is handled by ${d.mx.providers.join(' and ')}` : hosts.length ? `mail goes to ${hosts[0]}` : 'it has no MX records',
-    dm && dm.policy ? `its DMARC policy${dm.inherited ? ` (from ${dm.from})` : ''} is p=${dmarcEffective(dm)}` + (dm.rua.length ? ` with reports to ${dm.rua[0]}` : '') : 'it has no working DMARC policy',
-    spf.records === 1 ? (spf.overLimit ? `its SPF record needs ${spf.counted ? spf.lookups : 'more than 10'} DNS lookups, over the limit of 10`
-      : `SPF ends in ${spf.all || 'no all'} with ${spf.lookups} of 10 DNS lookups`) : spf.records ? `it has ${spf.records} SPF records` : 'it has no SPF record',
+    unread.DMARC ? "its DMARC record couldn't be read"
+      : dm && dm.policy ? `its DMARC policy${dm.inherited ? ` (from ${dm.from})` : ''} is p=${dmarcEffective(dm)}` + (dm.rua.length ? ` with reports to ${dm.rua[0]}` : '') : 'it has no working DMARC policy',
+    unread.SPF ? "its SPF record couldn't be read"
+      : spf.records === 1 ? (spf.overLimit ? `its SPF record needs ${spf.counted ? spf.lookups : 'more than 10'} DNS lookups, over the limit of 10`
+        : spf.redirectMacro ? `SPF uses ${spf.lookups} of 10 DNS lookups and hands off to a redirect= with a macro`
+        : `SPF ends in ${spf.all || 'no all'} with ${spf.lookups} of 10 DNS lookups`) : spf.records ? `it has ${spf.records} SPF records` : 'it has no SPF record',
     ...(sts && !sts.error && !sts.errors.length && sts.mode === 'enforce' ? ['MTA-STS is enforced'] : []),
   ].join('; ') + '.';
   const links = `<p class="ln sys">Records: <a href="/dns/${esc(name)}/MX">dig ${esc(name)} MX</a> · <a href="/dns/${esc(name)}/TXT">dig ${esc(name)} TXT</a>` +
@@ -2688,6 +2744,8 @@ function secure(res, env) {
   h.set('cross-origin-resource-policy', publicApi(env) ? 'cross-origin' : 'same-origin');
   h.set('permissions-policy', 'geolocation=(), camera=(), microphone=(), payment=(), usb=(), browsing-topics=()');
   if (publicApi(env)) {
+    // Never add access-control-allow-headers (least of all "*"): the port check's X-Ipterm guard relies
+    // on cross-site pages being unable to send a custom header (sameOrigin()).
     h.set('access-control-allow-origin', '*');
     h.set('access-control-allow-methods', 'GET, OPTIONS');
   } else {

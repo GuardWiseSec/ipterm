@@ -160,7 +160,7 @@
     "/port/{n}": {
       "get": {
         "tags": ["port"], "operationId": "port", "summary": "Is TCP port n open on your own IP? (command-line clients; browsers get a page explaining the port)",
-        "description": "The server opens one TCP connection to the address the request comes from (never any other) on port n, sends nothing and closes it, and reports open (accepted), closed (refused), no-answer (nothing within 5 seconds: filtered, or not forwarded) or untestable (port 25, which Cloudflare blocks; Cloudflare's own addresses, such as WARP; non-public addresses). Runs only for command-line user agents (curl, wget, HTTPie, PowerShell) or same-origin requests from the ipterm page; other callers get HTTP 403. Limited to 10 checks a minute per address. Use `curl -4` to test your IPv4 address, where router port forwards apply: over IPv6 the IPv6 address is tested. Only TCP can be tested.",
+        "description": "The server opens one TCP connection to the address the request comes from (never any other) on port n, sends nothing and closes it, and reports open (accepted), closed (turned away at once: nothing listening, or a firewall rejected it), no-answer (nothing within 5 seconds: filtered, or not forwarded) or untestable (port 25, which Cloudflare blocks; Cloudflare's own addresses, such as WARP; non-public addresses, including reserved and IPv4-embedding IPv6 forms such as 6to4 and Teredo). Runs only for command-line user agents (curl, wget, HTTPie, PowerShell) or same-origin requests from the ipterm page; other callers get HTTP 403. Search crawlers and link previews get the page explaining the port. Limited to 10 checks a minute per address. Use `curl -4` to test your IPv4 address, where router port forwards apply: over IPv6 the IPv6 address is tested. Only TCP can be tested.",
         "parameters": [
           { "name": "n", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1, "maximum": 65535 }, "example": 22 },
           { "$ref": "#/components/parameters/format" }
@@ -232,7 +232,7 @@
           "protocol": { "type": "string", "enum": ["tcp"] },
           "state": { "type": "string", "enum": ["open", "closed", "no-answer", "untestable"] },
           "reason": { "type": "string", "description": "Why it wasn't tested (untestable only)", "enum": ["port-25", "cloudflare", "cgnat", "not-public", "no-address", "refused"] },
-          "ms": { "type": "integer", "description": "How long the connection took to be accepted or refused (5000 for no-answer)" },
+          "ms": { "type": "integer", "description": "How long the connection took to be accepted or turned away (5000 for no-answer)" },
           "summary": { "type": "string", "description": "The result in one sentence" },
           "notes": { "type": "array", "items": { "type": "string" }, "description": "What the result means and what to check: IPv6, UDP, port forwarding, carrier-grade NAT" },
           "service": {
@@ -310,7 +310,7 @@
             "mixedNull": { "type": "boolean" } } },
           "spf": { "type": "object", "properties": {
             "records": { "type": "integer" }, "record": { "type": ["string", "null"] }, "all": { "type": ["string", "null"], "enum": ["+all", "-all", "~all", "?all", null] },
-            "redirect": { "type": ["string", "null"] }, "lookups": { "type": "integer" }, "counted": { "type": "boolean", "description": "false: counting stopped once past the limit" },
+            "redirect": { "type": ["string", "null"] }, "redirectMacro": { "type": "boolean", "description": "true: the record hands off to a redirect= with a macro (%{...}), which isn't followed, so all is null without meaning there is none" }, "lookups": { "type": "integer" }, "counted": { "type": "boolean", "description": "false: counting stopped once past the limit" },
             "overLimit": { "type": "boolean" }, "includes": { "type": "array", "items": { "type": "string" } },
             "errors": { "type": "array", "items": { "type": "object", "properties": { "text": { "type": "string" }, "fix": { "type": "string" } } } } } },
           "dmarc": { "type": ["object", "null"], "properties": {
@@ -319,13 +319,14 @@
             "from": { "type": "string", "description": "The domain whose _dmarc record applies" }, "inherited": { "type": "boolean" } } },
           "dkim": { "type": ["object", "null"], "properties": {
             "selectors": { "type": "array", "items": { "type": "string" } },
-            "keys": { "type": "array", "items": { "type": "object", "properties": { "selector": { "type": "string" }, "keyType": { "type": "string" }, "bits": { "type": ["integer", "null"] }, "revoked": { "type": "boolean" }, "testing": { "type": "boolean" } } } } } },
+            "keys": { "type": "array", "items": { "type": "object", "properties": { "selector": { "type": "string" }, "keyType": { "type": "string" }, "bits": { "type": ["integer", "null"] }, "revoked": { "type": "boolean" }, "testing": { "type": "boolean" } } } },
+            "unanswered": { "type": "array", "items": { "type": "string" }, "description": "Selectors the resolver couldn't read (SERVFAIL after a retry, or no answer): not checked, and not reported as having no key" } } },
           "mtaSts": { "type": ["object", "null"], "properties": {
             "record": { "type": "string" }, "id": { "type": ["string", "null"] },
             "policy": { "type": ["object", "null"], "properties": { "url": { "type": "string" }, "error": { "type": "string" }, "mode": { "type": ["string", "null"] }, "mx": { "type": "array", "items": { "type": "string" } }, "maxAge": { "type": ["integer", "null"] } } } } },
           "tlsRpt": { "type": ["object", "null"], "properties": { "record": { "type": "string" }, "rua": { "type": "array", "items": { "type": "string" } } } },
           "bimi": { "type": ["object", "null"], "properties": { "record": { "type": "string" }, "logo": { "type": ["string", "null"] }, "vmc": { "type": ["string", "null"] } } },
-          "unread": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Records the resolver couldn't read (e.g. SPF: SERVFAIL): reported, not graded as missing" },
+          "unread": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Records the resolver couldn't read, with its answer (e.g. SPF: SERVFAIL, or DMARC: no answer): reported, not graded as missing. A subdomain without a DMARC record of its own has DMARC unread when a parent's _dmarc couldn't be read" },
           "subrequests": { "type": "integer", "description": "DNS queries and fetches the check took" },
           "source": { "type": "string", "const": "cloudflare-dns" }
         }
