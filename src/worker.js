@@ -7,6 +7,10 @@
 //   GET /help               the command-line reference as plain text (browsers are sent to /api)
 //   GET /asn, /org, /cc, /city, /tz, /colo   one value for your own address as plain text, from request.cf
 //                           (no outside call); /hostname is the one that asks DNS (reverse lookup)
+//   GET /me                 a terminal card for your own address with a Braille world map (src/me.js), from
+//                           request.cf only (?w=<columns>, ?color=0, ?redact). Browsers are sent to /
+//   GET /line               your IP, network, country and data center on one line (shell prompts, tmux)
+//   GET /expect/<ASN|cc>    200 and the value if your address is on that network or in that country, else 412
 //   GET /<ip>               page for any IPv4/IPv6 address        (add ?format=json to force JSON)
 //   GET /<ip>/<field>       one value for any public address as plain text: asn, org, cc, country, continent,
 //                           hostname. IPinfo Lite only (never Core or proxycheck.io), so no budget is spent
@@ -60,6 +64,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { connect } from 'cloudflare:sockets';
 import '../public/cidr.js';                       // shared subnet calculator (also served to the page)
 import '../public/ports.js';                      // what common ports are for (also served to the page)
+import { meCard, ME_WIDTH } from './me.js';         // the /me card and its world map
 const CIDR = globalThis.IPTERM_CIDR;
 const PORTS = globalThis.IPTERM_PORTS;
 
@@ -101,8 +106,11 @@ async function route(request, env, ctx) {
   if (path === '/ip') return text(me + '\n');
   if (path === '/help') return html ? redirect('/api') : helpText(io);
   if (Object.hasOwn(SELF_FIELDS, path.slice(1).toLowerCase())) return selfField(io, path.slice(1).toLowerCase());
+  if (path === '/me') return html ? redirect('/') : meRoute(io, ua);
+  if (path === '/line') return selfLine(io);
+  if (path === '/expect' || path.startsWith('/expect/')) return expectRoute(io, path.slice(8));
   if (path === '/robots.txt') return robots(url);
-  if (path === '/sitemap.xml') return sitemap(url);
+  if (path === '/sitemap.xml') return sitemap(url, env);
   if (path === '/status' && await statusKeyOk(request, url, env)) return statusRoute(io);
 
   if (path === '/json' || (path === '/api/lookup' && !url.searchParams.get('ip'))) return self();
@@ -212,7 +220,7 @@ function toolRoute(io, tool, html) {
       MAIL_GRADES.map(([g, t]) => `<p class="ln">${esc(g)}: ${esc(t)}</p>`).join('') : '') +
     (tool === 'port' ? `<p class="ln sys">It only ever tests the address you connect from, so it can't be pointed at anyone else's.</p>${portIndex()}` : '') +
     // The full reference for visitors without JavaScript and for crawlers; the terminal prints its own (`api`).
-    (tool === 'api' ? `<pre class="doc-pre api-ref"><code>${esc(helpBody(io.url.host))}</code></pre>` +
+    (tool === 'api' ? `<pre class="doc-pre api-ref"><code>${esc(helpBody(io.url.host, io.env))}</code></pre>` +
       `<p class="ln sys">Machine-readable: <a href="/openapi.json">OpenAPI description</a> · <a href="/llms.txt">llms.txt</a> · plain text: <code>curl ${esc(io.url.host)}/help</code></p>` +
       `<p class="ln sys">IP address data powered by <a href="https://ipinfo.io" rel="noopener">IPinfo</a>.</p>` : '');
   return shell(io, { status: 200, path: '/' + tool, title: t.title, desc: t.desc, initial: { kind: 'tool', tool },
@@ -639,6 +647,42 @@ function selfField(io, name) {
   }, h => one(h), textError);
 }
 
+// /me: a card for your own address with a Braille world map (src/me.js). request.cf only, like /asn: no
+// outside call, no reverse DNS, no rate limit. Every value goes through plain() first. Colors are on for
+// command-line tools (?color=0 or ?color=1 to choose), ?w= fits it to a terminal, ?redact hides the address.
+const onOff = v => (v == null ? null : !/^(0|false|no|off)$/i.test(v));   // ?redact alone means on
+function meRoute(io, ua) {
+  const q = io.url.searchParams, d = edgeInfo(io);
+  for (const k of Object.keys(d)) if (typeof d[k] === 'string') d[k] = plain(d[k]);
+  const w = /^\d{1,4}$/.test(q.get('w') || '') ? Number(q.get('w')) : ME_WIDTH.def;   // meCard keeps it within bounds
+  const card = meCard(d, { width: w, color: onOff(q.get('color')) ?? CLI_UA.test(ua), redact: !!onOff(q.get('redact')), host: io.url.host });
+  return text(card, 'private, no-store', 200, { vary: 'Accept, User-Agent' });
+}
+
+// /line: "203.0.113.4 AS64500 Example ISP · US · EWR", for shell prompts and tmux status bars.
+function selfLine(io) {
+  const d = edgeInfo(io);
+  return one([[d.ip, d.asn, d.org].filter(Boolean).join(' '), d.countryCode, d.colo].filter(Boolean).join(' · '));
+}
+
+// /expect/AS13335 (or /expect/CH, or several: /expect/AS13335,AS209242): 200 and the value when your
+// address matches one, 412 when none does, so `curl -fs ipterm.net/expect/AS13335 || panic` can stop
+// something when a VPN drops. From request.cf, like /asn and /cc: no outside call, no rate limit.
+function expectRoute(io, raw) {
+  const wants = String(raw || '').split(',').map(s => s.trim()).filter(Boolean);
+  const norm = wants.map(s => {
+    const asn = /^(?:as)?(\d{1,10})$/i.exec(s);
+    if (asn) return Number(asn[1]) >= 1 && Number(asn[1]) <= 4294967295 ? 'AS' + Number(asn[1]) : null;
+    return /^[a-z][a-z0-9]$/i.test(s) ? s.toUpperCase() : null;   // ISO 3166-1 alpha-2, plus Cloudflare's T1 (Tor)
+  });
+  if (!wants.length || wants.length > 10 || norm.includes(null)) {
+    return textError(`usage: ${io.url.host}/expect/<AS number or country code>, like /expect/AS13335 or /expect/CH, or up to 10 of them separated by commas. HTTP 200 if this request comes from one of them, 412 if not.`, 400);
+  }
+  const d = edgeInfo(io), hit = norm.find(v => v === d.asn || v === d.countryCode);
+  if (hit) return text(hit + '\n');
+  return textError(plain(`no match: expected ${norm.join(' or ')}, but this request came from ${d.asn || 'an unknown network'} in ${d.countryCode || 'an unknown country'}`), 412);
+}
+
 function ipField(io, q, name) {
   if (!Object.hasOwn(IP_FIELDS, name)) {
     const why = Object.hasOwn(SELF_FIELDS, name)
@@ -800,18 +844,21 @@ function cidrText(d) {
 
 // The command-line reference: `curl <host>/help`, and /api for command-line clients.
 function helpText(io) {
-  return text(helpBody(io.url.host), 'public, max-age=3600', 200, { vary: 'Accept, User-Agent' });
+  return text(helpBody(io.url.host, io.env), 'public, max-age=3600', 200, { vary: 'Accept, User-Agent' });
 }
 
-function helpBody(h) {
+function helpBody(h, env = {}) {
+  const b = buildOf(env);
   const block = (title, rows) => {
     const w = Math.max(...rows.map(([c, what]) => (what == null ? 0 : c.length))) + 3;
     return [title, ...rows.map(([c, what]) => ('  ' + (what == null ? c : c.padEnd(w) + what)).trimEnd())].join('\n');
   };
   return [
-    `ipterm: IP lookups from the command line. No key, no sign-up, no cookies.`,
+    `ipterm: IP lookups from the command line. No key, no sign-up, no cookies.` +
+      (selfHosted(env) ? `\n${h} runs its own copy of ipterm's open-source code: it is not ipterm.net.` : ''),
     block("YOUR OWN ADDRESS (from Cloudflare's edge: no third-party lookup)", [
       [`curl ${h}`, 'your IP address'],
+      [`curl ${h}/me`, 'a card with a world map: IP, network, place, time'],
       [`curl ${h}/json`, 'your IP, network and location as JSON'],
       [`curl ${h}/asn`, "your network's AS number"],
       [`curl ${h}/org`, "your network's name"],
@@ -820,6 +867,20 @@ function helpBody(h) {
       [`curl ${h}/tz`, 'your time zone'],
       [`curl ${h}/colo`, 'the Cloudflare data center that answered you'],
       [`curl ${h}/hostname`, 'your reverse DNS name'],
+      [`curl ${h}/line`, 'IP, network, country and data center on one line'],
+    ]),
+    block('THE /me CARD (QUOTE THE URL, SO THE SHELL LEAVES ? ALONE)', [
+      [`curl '${h}/me?w=40'`, 'fit a narrow terminal (32 to 120 columns)'],
+      [`curl "${h}/me?w=$COLUMNS"`, 'exactly as wide as this terminal'],
+      [`curl '${h}/me?color=0'`, 'without colors'],
+      [`curl '${h}/me?redact'`, 'with your IP hidden, for screenshots'],
+    ]),
+    block('SCRIPTS: IS THIS MACHINE WHERE IT SHOULD BE? (HTTP 200 YES, 412 NO)', [
+      [`curl -fs ${h}/expect/AS13335`, 'on network AS13335?'],
+      [`curl -fs ${h}/expect/CH`, 'in Switzerland? (a country code)'],
+      [`curl -fs ${h}/expect/AS13335,CH`, 'either one? (up to 10)'],
+      ['A kill switch for when a VPN drops:'],
+      [`curl -fs ${h}/expect/AS13335 || pkill -f my-private-job`],
     ]),
     block('ANY ADDRESS', [
       [`curl ${h}/8.8.8.8`, 'owner, network and location as JSON'],
@@ -851,7 +912,8 @@ function helpBody(h) {
       [`OpenAPI: ${h}/openapi.json   For AI tools: ${h}/llms.txt`],
       [`Browsers: ${h} is a terminal; this reference is at ${h}/api`],
     ]),
-    `${IPINFO_CREDIT}. Networks: RIPEstat.\nRegistry records: RDAP. DNS: Cloudflare's 1.1.1.1.`,
+    `${IPINFO_CREDIT}. Networks: RIPEstat.\nRegistry records: RDAP. DNS: Cloudflare's 1.1.1.1.` +
+      (b.sha || b.url ? `\nThe code we deploy: ${[b.sha, b.url].filter(Boolean).join('  ')}` : ''),
   ].join('\n\n') + '\n';
 }
 
@@ -2265,14 +2327,15 @@ async function shell(io, { status = 200, title, desc, path = '/', body = '', ini
     `<meta property="og:image" content="${esc(io.url.origin)}/og.png">`,
     `<meta name="twitter:card" content="summary_large_image">`,
     path === '/' ? homeJsonLd(io.url.origin) : status < 400 ? breadcrumbJsonLd(io.url.origin, path) : '',
-    (status >= 400 && status !== 429) || noindex ? `<meta name="robots" content="noindex">` : '',
+    (status >= 400 && status !== 429) || noindex || selfHosted(io.env) ? `<meta name="robots" content="noindex">` : '',
   ].filter(Boolean).join('\n');
   if (path !== '/') h = h.replace(/\s*<p class="intro">[\s\S]*?<\/p>/, '');   // the plain-English line is for the homepage
   const h1 = path !== '/' && title ? title.replace(/\s*\|\s*ipterm$/, '') : null;
   if (h1) h = h.replace(/<h1 class="sr-only">[^<]*<\/h1>/, () => `<h1 class="sr-only">${esc(h1)}</h1>`);
   // The homepage terminal shows the reader's own address (a crawler's, when a crawler renders it): never a snippet.
   if (path === '/') h = h.replace('<div id="out"', () => '<div id="out" data-nosnippet');
-  h = h.replace('<!--SEO-->', () => head).replace('<!--STATIC-->', () => body).replaceAll('%ORIGIN%', () => io.url.origin);
+  h = h.replace('<!--SEO-->', () => head).replace('<!--STATIC-->', () => body).replace('<!--BUILD-->', () => footBuild(io.env))
+    .replaceAll('%ORIGIN%', () => io.url.origin);
   if (initial) h = h.replace('<!--INITIAL-->', () => `<script type="application/json" id="ipterm-initial">${safeJson(initial)}</script>`);
   return new Response(h, {
     status,
@@ -2650,8 +2713,8 @@ function robots(url) {
   return text(`User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: ${url.origin}/sitemap.xml\n`, 'public, max-age=86400');
 }
 
-function sitemap(url) {
-  const items = SITEMAP_PATHS.map(p => `  <url><loc>${esc(url.origin + encodePath(p))}</loc></url>`).join('\n');
+function sitemap(url, env) {
+  const items = (selfHosted(env) ? [] : SITEMAP_PATHS).map(p => `  <url><loc>${esc(url.origin + encodePath(p))}</loc></url>`).join('\n');
   return new Response(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${items}\n</urlset>\n`, {
     headers: { 'content-type': 'application/xml; charset=utf-8', 'cache-control': 'public, max-age=86400' },
   });
@@ -2715,6 +2778,31 @@ function statusText(d) {
     ["Counts of ipterm's own upstream lookups (hours are UTC). Nothing about visitors."]);
 }
 
+/* ---------- the deployed build, and copies run by others ----------
+   `npm run deploy` (tools/deploy.mjs) deploys with the git short SHA as the version's tag, and the
+   CF_VERSION_METADATA binding (wrangler.toml) reads it back, so the footer, `about` and /help can name
+   the code that is running. SOURCE_URL (wrangler.toml) turns the SHA into a link to that commit.
+   SELF_HOSTED = "true" marks a copy run by someone else: every page is noindex, the sitemap is empty,
+   no sponsored line is shown (app.js reads data-copy from the footer) and the footer says it's a copy. */
+const selfHosted = env => String((env && env.SELF_HOSTED) || '').toLowerCase() === 'true';
+function buildOf(env) {
+  const tag = env && env.CF_VERSION_METADATA && env.CF_VERSION_METADATA.tag;
+  const sha = typeof tag === 'string' && /^[0-9a-f]{7,40}(-dirty)?$/.test(tag) ? tag : null;
+  const src = env && /^https:\/\/[^\s"'<>]+$/.test(String(env.SOURCE_URL || '')) ? String(env.SOURCE_URL).replace(/\/+$/, '') : null;
+  return { sha, url: src && sha ? `${src}/commit/${sha.replace(/-dirty$/, '')}` : src };
+}
+// Footer spans for the shell's <!--BUILD-->. app.js reads data-build, data-source and data-copy for `about`.
+function footBuild(env) {
+  const b = buildOf(env), out = [];
+  if (b.sha || b.url) {
+    const label = esc(b.sha || 'source code');
+    out.push(`<span class="foot-build" data-build="${esc(b.sha || '')}" data-source="${esc(b.url || '')}">${b.sha ? 'the code we deploy: ' : ''}` +
+      (b.url ? `<a href="${esc(b.url)}" rel="noopener">${label}</a>` : label) + '</span>');
+  }
+  if (selfHosted(env)) out.push('<span class="foot-copy" data-copy>a copy of ipterm run by someone else, not ipterm.net</span>');
+  return out.join('');
+}
+
 /* ---------- hardening ---------- */
 
 const publicApi = env => String(env.PUBLIC_API || '').toLowerCase() === 'true';
@@ -2743,6 +2831,7 @@ function secure(res, env) {
   h.set('cross-origin-opener-policy', 'same-origin');
   h.set('cross-origin-resource-policy', publicApi(env) ? 'cross-origin' : 'same-origin');
   h.set('permissions-policy', 'geolocation=(), camera=(), microphone=(), payment=(), usb=(), browsing-topics=()');
+  if (selfHosted(env) && !h.has('x-robots-tag')) h.set('x-robots-tag', 'noindex');   // a copy shouldn't compete with ipterm.net in search
   if (publicApi(env)) {
     // Never add access-control-allow-headers (least of all "*"): the port check's X-Ipterm guard relies
     // on cross-site pages being unable to send a custom header (sameOrigin()).
