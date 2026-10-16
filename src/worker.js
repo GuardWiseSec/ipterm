@@ -16,7 +16,8 @@
 //                           common typos of those (/192.168.l.l, /192,168,1,1) get a 301 to the address in the list
 //   GET /<ip>/<field>       one value for any public address as plain text: asn, org, cc, country, continent,
 //                           hostname. IPinfo Lite only (never Core or proxycheck.io), so no budget is spent
-//   GET /AS<number>         page for any autonomous system (ASN), with its main upstreams (add ?format=json for JSON)
+//   GET /AS<number>         page for any autonomous system (ASN), with its main upstreams (add ?format=json for JSON).
+//                           Pages for networks whose holder may be a private person are noindex (src/holder-heuristic.js)
 //   GET /api/lookup?ip=     IP details as JSON (no ip = yourself), used by the terminal
 //   GET /api/asn?asn=       ASN details as JSON, used by the terminal
 //   GET /whois/<ip|ASN|domain> registry record via RDAP: owner, address block and abuse contact for
@@ -80,6 +81,7 @@ import '../public/cidr.js';                       // shared subnet calculator (a
 import '../public/ports.js';                      // what common ports are for (also served to the page)
 import { meCard, ME_WIDTH } from './me.js';         // the /me card and its world map
 import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
+import { holderOf, personReason } from './holder-heuristic.js';     // whether a network's holder may be a private person
 const CIDR = globalThis.IPTERM_CIDR;
 const PORTS = globalThis.IPTERM_PORTS;
 
@@ -2687,7 +2689,8 @@ async function loadShell(io) {
 // without JavaScript (and for search engines), and the data the terminal boots from. Pages other
 // than the homepage get their own h1 (the title without " | ipterm") in place of the generic one.
 // noindex: a working page that search engines should skip but whose links they may follow (ports without an
-// explainer of their own, non-public addresses that aren't in SITEMAP_PATHS).
+// explainer of their own, non-public addresses that aren't in SITEMAP_PATHS, networks whose holder may be a
+// private person).
 async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null, cache = null, noindex = false }) {
   let h = await loadShell(io);
   const canonical = io.url.origin + (path === '/' ? '/' : encodePath(path));
@@ -3072,7 +3075,10 @@ function asnPage(io, d, status) {
     (list ? `<p class="ln sys">Largest announced prefixes:</p><ul class="static-list">${list}</ul>` : '') +
     `<p class="ln sys">Registry record: <a href="/whois/${esc(d.asn)}">whois ${esc(d.asn)}</a></p>` +
     `<p class="ln sys">Guide: <a href="/guides/what-is-an-asn">What is an ASN?</a></p>`;
-  return shell(io, { status, path, title: `${d.asn} · ${name} | ipterm`, desc: summary,
+  // A holder name that may be a private person's (GDPR caution): the page works and its links are followed, but
+  // search engines are asked not to index it. The same rules keep these networks out of the ASN sitemap.
+  const personal = Boolean(d.holder) && personReason(holderOf(d.holder)) !== null;
+  return shell(io, { status, path, title: `${d.asn} · ${name} | ipterm`, desc: summary, noindex: personal,
     initial: { kind: 'asn', query: d.asn, data: d }, body: staticBlock(`${d.asn} · ${name}`, ['asn'], rows, summary, links) });
 }
 

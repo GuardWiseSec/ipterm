@@ -12,6 +12,8 @@ ipterm is a terminal-style IP lookup site that runs on a single Cloudflare Worke
 - The API, routing and security headers: `src/worker.js`
 - The `curl ipterm.net/me` card: `src/me.js`, with its world map in `src/landmask.js` (generated, see "The map")
 - The ASN sitemap's list of networks: `src/asn-sitemap.js` (generated, see "Shareable pages and search")
+- Whether a network's holder may be a private person (the sitemap leaves it out, its page is noindex):
+  `src/holder-heuristic.js`
 - Settings: `wrangler.toml`
 - Scripts: `tools/` (deploy, land mask, guides, ASN sitemap, link-preview and SEO checks)
 - The DNS leak test's own DNS server: `dnsleak-server/` (runs on a small VPS outside Cloudflare; see
@@ -710,19 +712,29 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   without non-public space or private and reserved AS numbers. Holder names come from RIPE NCC's AS names list
   (`asn.txt`). Rerun it every few months and commit the result. In October 2026 the 10,000th network announced
   8,448 addresses.
-- **Private individuals are left out of that list** (GDPR caution): many networks are registered to a person, and
-  the holder name is then the person's name. The rules are at the top of `tools/build_asn_sitemap.mjs`; in short, a
-  network is left out when it has no holder name or isn't in the names list; when the name shows a natural person
-  (sole proprietor, sole trader, individual or private entrepreneur, Einzelunternehmen, e.K., a patronymic such as
-  -ovich, or a PE / FOP / IP prefix before a person's name); when it is a partnership of named people (spolka jawna,
-  s.c., GbR, v.o.f.) with no other legal form; when "trading as" follows a person's name; when a common given name
-  is followed by another word and the name has no registered legal form (Inc, LLC, Ltd, GmbH, SA, BV, Oy ...) or
-  public body or institution (university, school, foundation, ministry, district ...); or, with no sign of an
-  organization at all, when the name is two to six plain words, the shape of a person's name. It errs on the side of
-  leaving a network out: some businesses that look like a person's name go too. In October 2026, 135 of the 10,135
-  largest networks were left out: 116 for those signs, 19 with no name or not in the names list. Their pages still
-  work; they just aren't in the sitemap. The list of what was left out is only printed (`--show-excluded`), never
-  saved to a file, so the repository doesn't collect those names.
+- **Private individuals are left out of that list, and their pages are noindex** (GDPR caution): many networks are
+  registered to a person, and the holder name is then the person's name. The rules are in `src/holder-heuristic.js`,
+  which the tool and the Worker share; in short, a network is left out when it has no holder name or isn't in the
+  names list; when the name shows a natural person (sole proprietor, sole trader, individual or private entrepreneur,
+  Einzelunternehmen, e.K., a patronymic such as -ovich, or a PE / FOP / IP prefix before a person's name); when it is
+  a partnership of named people (spolka jawna, s.c., GbR, v.o.f.) with no other legal form; when "trading as" follows
+  a person's name; when a common given name is followed by another word and the name has no registered legal form
+  (Inc, LLC, Ltd, GmbH, SA, BV, Oy ...) or public body or institution (university, school, foundation, ministry,
+  district ...); or, with no sign of an organization at all, when the name is two to six plain words, the shape of a
+  person's name. It errs on the side of leaving a network out: some businesses that look like a person's name go too.
+  In October 2026, 135 of the 10,135 largest networks were left out: 116 for those signs, 19 with no name or not in
+  the names list. The list of what was left out is only printed (`--show-excluded`), never saved to a file, so the
+  repository doesn't collect those names.
+- Those networks' pages still work, but they aren't in the sitemap, and search engines that find them through links
+  (another network's upstreams, a shared link) are asked not to index them: `asnPage()` runs the same rules on
+  RIPEstat's holder name, split from its handle the way the tool splits `asn.txt` lines (`<HANDLE> - <Name>` from
+  ARIN, LACNIC and AFRINIC, `<HANDLE> <Name>` from RIPE and APNIC, or the name alone), and a name that may be a
+  person's gets `<meta name="robots" content="noindex, follow">`. This covers every network, not only the 10,000
+  largest, and the JSON and text answers are unchanged. RIPEstat and `asn.txt` give the same names, so the sitemap
+  and the noindex agree: in October 2026 all 116 networks left out for those signs, and a sample of 80 kept ones, got
+  the same answer from both (a holder that renames itself can differ until the list is regenerated).
+  `tools/check_seo.sh` checks AS35100 and AS50053 (noindex, not in the sitemap) against AS13335, AS15169 and AS3356.
+  The check costs a few microseconds per page, plus about 3 ms the first time in an isolate.
 
 Network data comes from [RIPEstat](https://stat.ripe.net/) (free, no key). Results are cached for six hours.
 
@@ -833,7 +845,7 @@ with RIPEstat's answers replayed, on a laptop, so treat it as an estimate):
 | --- | --- | --- |
 | `/cidr/<public prefix>` page | 6 (4 RIPEstat, 2 cache) / 1 | about 1 ms (IPv6 about 2.4 ms) / 0.3 ms |
 | `/cidr/<private range>` page | 0 | under 0.5 ms |
-| `/AS<n>` page | 10 (3 RIPEstat, up to 5 names, 2 cache); 5 when the neighbour list is too large / 1 | 2 to 6 ms; 12 ms for AS13335, the largest prefix list (5,776 prefixes) / 0.3 ms |
+| `/AS<n>` page | 10 (3 RIPEstat, up to 5 names, 2 cache); 5 when the neighbour list is too large / 1 | 2 to 6 ms; 12 ms for AS13335, the largest prefix list (5,776 prefixes) / 0.3 ms; the private-holder check adds about 3 ms the first time in an isolate, then microseconds |
 | `/sitemap-asn-2.xml` (9,000 URLs, 486 KB) | 0 | about 7 ms the first time in an isolate, then kept |
 
 Every one counts as one Worker request. An ASN page used to sort its prefixes with `localeCompare(..., { numeric:
@@ -902,9 +914,10 @@ in it exercises the whole check locally.
 
 Two scripts check a running copy (`wrangler dev` by default, or pass the site's address): `tools/check_previews.sh`
 (link previews and crawlers get HTML, curl gets JSON) and `tools/check_seo.sh` (typo redirects with valid, typo and
-hostile paths, noindex on non-public addresses, the sitemap index and its URL counts; `ROUTES=1` adds the routing
-section, which asks RIPEstat). Neither makes an IPinfo lookup. In Git Bash on Windows, run them with
-`MSYS_NO_PATHCONV=1` so paths like `/192.168.l.l` aren't rewritten.
+hostile paths, noindex on non-public addresses and on networks whose holder may be a private person, the sitemap
+index and its URL counts; `ROUTES=1` adds the routing section). Neither makes an IPinfo lookup; the ASN pages and
+the routing section ask RIPEstat. In Git Bash on Windows, run them with `MSYS_NO_PATHCONV=1` so paths like
+`/192.168.l.l` aren't rewritten.
 
 ## License
 
@@ -919,6 +932,7 @@ IPinfo's data comes with its own attribution condition (see "Recommended: add a 
 - Bulk lookups.
 - IPv6 for the DNS leak test server (`DNSLEAK_NS_IPV6` and an AAAA record for `ns1.dl`), so resolvers that
   prefer IPv6 show their IPv6 addresses too.
-- `noindex` on the ASN pages of networks the sitemap leaves out as possible private individuals (the same
-  heuristic, run in the Worker on RIPEstat's holder name), so search engines that find them through links don't
-  index a person's name either.
+- The same caution for the other indexable pages that can show a person's holder name: `/whois/AS<n>` (the registry
+  record, which a noindex ASN page links to), `/cidr/<prefix>` (the routing section names the origin network, and
+  ASN pages link their prefixes there), and the upstream names on other networks' ASN pages. `personReason()` in
+  `src/holder-heuristic.js` would decide those too.

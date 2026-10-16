@@ -1,12 +1,14 @@
 #!/bin/sh
 # Checks the search-engine groundwork: router-address typos redirect (301) to the exact address in
 # SITEMAP_PATHS and nowhere else, hostile paths never redirect off the list, pages for non-public addresses
-# are noindex unless curated, and the sitemap index and its files are there with the expected URL counts.
+# are noindex unless curated, pages for networks whose holder may be a private person are noindex and left out
+# of the ASN sitemap, and the sitemap index and its files are there with the expected URL counts.
 # Run against `npx wrangler dev` (default) or the live site:
 #   sh tools/check_seo.sh
 #   sh tools/check_seo.sh https://ipterm.net
 #   ROUTES=1 sh tools/check_seo.sh      # also the /cidr routing section (asks RIPEstat; no IPinfo)
-# Nothing here makes an IPinfo lookup: every address is non-public, and the sitemap is generated in the Worker.
+# Nothing here makes an IPinfo lookup: every address is non-public, the ASN pages ask RIPEstat only, and the
+# sitemap is generated in the Worker.
 # (Git Bash on Windows: run with MSYS_NO_PATHCONV=1 so paths like /192.168.l.l aren't rewritten.)
 B=${1:-http://127.0.0.1:8787}
 UA='Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
@@ -66,16 +68,27 @@ robots /192.168.1.1 0
 robots /10.0.0.1 0
 robots /127.0.0.1 0
 robots /169.254.1.1 0
+echo '-- noindex for networks whose holder may be a private person (src/holder-heuristic.js; RIPEstat only)'
+robots /AS35100 1
+robots /AS50053 1
+robots /AS13335 0
+robots /AS15169 0
+robots /AS3356 0
 
 echo '-- sitemap index and files'
 idx=$(curl -s "$B/sitemap.xml")
 case "$idx" in *'<sitemapindex'*) ok "/sitemap.xml is a sitemap index" ;; *) no "/sitemap.xml is not a sitemap index" ;; esac
+asns=''
 for f in $(printf '%s\n' "$idx" | grep -o '<loc>[^<]*' | sed 's/<loc>//; s#^[a-z]*://[^/]*##'); do
   body=$(curl -s "$B$f"); n=$(printf '%s\n' "$body" | grep -c '<url>'); u=$(printf '%s\n' "$body" | grep -o '<loc>[^<]*' | sort -u | wc -l | tr -d ' ')
   if [ "$n" -gt 0 ] && [ "$n" -le 50000 ] && [ "$n" = "$u" ]; then ok "$f: $n URLs, all different"; else no "$f: $n URLs ($u different)"; fi
-  case "$f" in /sitemap-asn-*) printf '%s\n' "$body" | grep -q '<loc>[^<]*/AS[0-9]*</loc>' && ok "$f lists ASN pages" || no "$f lists no ASN pages" ;; esac
+  case "$f" in /sitemap-asn-*) printf '%s\n' "$body" | grep -q '<loc>[^<]*/AS[0-9]*</loc>' && ok "$f lists ASN pages" || no "$f lists no ASN pages"
+    asns="$asns $(printf '%s\n' "$body" | grep -o '/AS[0-9]*</loc>' | tr '\n' ' ')" ;; esac
 done
 printf '%s\n' "$idx" | grep -q 'sitemap-asn-1.xml' && ok 'the index lists sitemap-asn-1.xml' || no 'the index lists no ASN sitemap'
+# The same rules decide both: these two are large enough for the ASN sitemap, but left out, and their pages are noindex.
+for a in AS35100 AS50053; do case "$asns" in *"/$a</loc>"*) no "$a is in an ASN sitemap, but its page is noindex" ;; *) ok "$a (noindex) is in no ASN sitemap" ;; esac; done
+for a in AS13335 AS15169 AS3356; do case "$asns" in *"/$a</loc>"*) ok "$a is in an ASN sitemap" ;; *) no "$a is in no ASN sitemap" ;; esac; done
 curl -s "$B/sitemap-pages.xml" | grep -q '<loc>[a-z]*://[^/]*/AS[0-9]*</loc>' && no 'sitemap-pages.xml still lists ASN pages' || ok 'sitemap-pages.xml leaves ASN pages to the ASN files'
 
 if [ -n "$ROUTES" ]; then
