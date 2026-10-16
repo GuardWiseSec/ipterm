@@ -12,8 +12,8 @@ ipterm is a terminal-style IP lookup site that runs on a single Cloudflare Worke
 - The API, routing and security headers: `src/worker.js`
 - The `curl ipterm.net/me` card: `src/me.js`, with its world map in `src/landmask.js` (generated, see "The map")
 - The ASN sitemap's list of networks: `src/asn-sitemap.js` (generated, see "Shareable pages and search")
-- Whether a network's holder may be a private person (the sitemap leaves it out, its page is noindex):
-  `src/holder-heuristic.js`
+- Whether a network's holder may be a private person (the sitemap leaves it out, and its ASN, whois and `/cidr`
+  pages are noindex): `src/holder-heuristic.js`
 - Settings: `wrangler.toml`
 - Scripts: `tools/` (deploy, land mask, guides, ASN sitemap, link-preview and SEO checks)
 - The DNS leak test's own DNS server: `dnsleak-server/` (runs on a small VPS outside Cloudflare; see
@@ -735,6 +735,28 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   the same answer from both (a holder that renames itself can differ until the list is regenerated).
   `tools/check_seo.sh` checks AS35100 and AS50053 (noindex, not in the sitemap) against AS13335, AS15169 and AS3356.
   The check costs a few microseconds per page, plus about 3 ms the first time in an isolate.
+- **Other pages that name such a holder are noindex too, or leave the name out.** A noindex ASN page links to its
+  whois record and its prefixes, and those pages name the holder as well:
+  - `/whois/AS<n>` and `/whois/<ip>` (`whoisPage()`): RDAP gives the holder in `org` (the registrant, or else the
+    administrative contact) and the AS or network name in `name`. The page is noindex when either may be a person's,
+    or when `<name> <org>` does, which is the holder as RIPEstat gives it (`JDOE-AS Jane Doe`), so the record
+    and the network's ASN page come to the same answer. An address record goes by its own holder: an address block
+    of a person's network that is registered to a company stays indexed.
+  - `/cidr/<public prefix>` (`cidrPage()`): noindex when the routing section names an origin that may be a person
+    (`origins[].holder`, from RIPEstat's `prefix-overview`, the same string `as-overview` gives). Without a routing
+    section (RIPEstat didn't answer) the page names no network and stays indexable. A `/cidr` page links on to the
+    whois record of its network address, which decides for itself.
+  - Upstreams on an indexed ASN page: one that may be a person is listed by its AS number only, linked to its own
+    (noindex) page, in the summary, the static list and the data embedded for the terminal (search engines run the
+    page's script). On a page that is noindex anyway, upstreams keep their names. The name check runs both on the
+    name as shown and on it split from its handle, so it hides at least what the upstream's own page would noindex.
+
+  The JSON and text answers (`/AS<n>?format=json`, `/api/asn`, `/whois/...`, `/route/...`) keep every name: they are
+  the API, and crawlers get the HTML pages. These pages ask RIPEstat and RDAP only, never IPinfo. `tools/check_seo.sh`
+  checks the whois pages and the largest prefix's `/cidr` page of AS35100 and AS50053 (noindex) and of AS13335,
+  AS15169 and AS3356 (indexable), an address block of AS50053 registered to its holder, and AS203761, an organization
+  whose upstream AS28748 is held by a person: its page must link AS28748 without naming it. That name is read from the
+  JSON while the check runs, so it isn't written in the repository.
 
 Network data comes from [RIPEstat](https://stat.ripe.net/) (free, no key). Results are cached for six hours.
 
@@ -914,9 +936,10 @@ in it exercises the whole check locally.
 
 Two scripts check a running copy (`wrangler dev` by default, or pass the site's address): `tools/check_previews.sh`
 (link previews and crawlers get HTML, curl gets JSON) and `tools/check_seo.sh` (typo redirects with valid, typo and
-hostile paths, noindex on non-public addresses and on networks whose holder may be a private person, the sitemap
-index and its URL counts; `ROUTES=1` adds the routing section). Neither makes an IPinfo lookup; the ASN pages and
-the routing section ask RIPEstat. In Git Bash on Windows, run them with `MSYS_NO_PATHCONV=1` so paths like
+hostile paths, noindex on non-public addresses and on the ASN, whois and `/cidr` pages that name a network holder who
+may be a private person, such an upstream listed by number only, the sitemap index and its URL counts; `ROUTES=1`
+adds the routing section). Neither makes an IPinfo lookup; the ASN pages and the routing section ask RIPEstat, and
+the whois pages RDAP. In Git Bash on Windows, run them with `MSYS_NO_PATHCONV=1` so paths like
 `/192.168.l.l` aren't rewritten.
 
 ## License
@@ -932,7 +955,12 @@ IPinfo's data comes with its own attribution condition (see "Recommended: add a 
 - Bulk lookups.
 - IPv6 for the DNS leak test server (`DNSLEAK_NS_IPV6` and an AAAA record for `ns1.dl`), so resolvers that
   prefer IPv6 show their IPv6 addresses too.
-- The same caution for the other indexable pages that can show a person's holder name: `/whois/AS<n>` (the registry
-  record, which a noindex ASN page links to), `/cidr/<prefix>` (the routing section names the origin network, and
-  ASN pages link their prefixes there), and the upstream names on other networks' ASN pages. `personReason()` in
-  `src/holder-heuristic.js` would decide those too.
+- `/<ip>` pages name the address's network too ("operated by ..."), from IPinfo, next to its location, and crawlers
+  reach them through links on `/whois/<ip>` and `/dns` pages. `personName(d.org)` in `ipPage()` would decide them the
+  same way; it isn't done because checking it costs IPinfo lookups, which `tools/check_seo.sh` never makes.
+- Some large businesses look like people to the rules. In October 2026, for example, AS5617 (Orange Polska: "Spolka
+  Akcyjna", the Polish joint-stock company, isn't among the legal forms) and AS8167 (V.tal, written "V tal"): their
+  pages are noindex, they are out of the ASN sitemap, and indexed pages list them as upstreams by number only.
+  Reviewing `--show-excluded` and adding such legal forms to `src/holder-heuristic.js` fixes all three at once.
+- Domain whois pages show a registrant's name when the registrar publishes one, often a person's. The same caution
+  could apply in `domainWhoisPage()`, though the rules were written for network holders' names.

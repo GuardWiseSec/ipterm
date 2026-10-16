@@ -17,7 +17,8 @@
 //   GET /<ip>/<field>       one value for any public address as plain text: asn, org, cc, country, continent,
 //                           hostname. IPinfo Lite only (never Core or proxycheck.io), so no budget is spent
 //   GET /AS<number>         page for any autonomous system (ASN), with its main upstreams (add ?format=json for JSON).
-//                           Pages for networks whose holder may be a private person are noindex (src/holder-heuristic.js)
+//                           Pages for networks whose holder may be a private person are noindex (src/holder-heuristic.js),
+//                           as are whois and /cidr pages that name one; indexed pages list such an upstream by number only
 //   GET /api/lookup?ip=     IP details as JSON (no ip = yourself), used by the terminal
 //   GET /api/asn?asn=       ASN details as JSON, used by the terminal
 //   GET /whois/<ip|ASN|domain> registry record via RDAP: owner, address block and abuse contact for
@@ -82,6 +83,11 @@ import '../public/ports.js';                      // what common ports are for (
 import { meCard, ME_WIDTH } from './me.js';         // the /me card and its world map
 import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
 import { holderOf, personReason } from './holder-heuristic.js';     // whether a network's holder may be a private person
+// Pages that name a network holder who may be a private person are "noindex, follow" (GDPR caution; the rules are
+// in src/holder-heuristic.js). personHeld takes an AS name as RIPEstat gives it, with its handle ("JDOE-AS Jane Doe",
+// "CLOUDFLARENET - Cloudflare, Inc."); personName takes a name on its own ("Jane Doe").
+const personHeld = asName => Boolean(asName) && personReason(holderOf(asName)) !== null;
+const personName = name => Boolean(name) && personReason(name) !== null;
 const CIDR = globalThis.IPTERM_CIDR;
 const PORTS = globalThis.IPTERM_PORTS;
 
@@ -2689,8 +2695,8 @@ async function loadShell(io) {
 // without JavaScript (and for search engines), and the data the terminal boots from. Pages other
 // than the homepage get their own h1 (the title without " | ipterm") in place of the generic one.
 // noindex: a working page that search engines should skip but whose links they may follow (ports without an
-// explainer of their own, non-public addresses that aren't in SITEMAP_PATHS, networks whose holder may be a
-// private person).
+// explainer of their own, non-public addresses that aren't in SITEMAP_PATHS, and ASN, whois and /cidr pages that
+// name a network holder who may be a private person).
 async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null, cache = null, noindex = false }) {
   let h = await loadShell(io);
   const canonical = io.url.origin + (path === '/' ? '/' : encodePath(path));
@@ -2915,7 +2921,10 @@ function cidrPage(io, d, status, route = null) {
       (r.prefix && r.prefix !== d.cidr ? `<p class="ln sys">Route: <a href="/cidr/${esc(r.prefix)}">${esc(r.prefix)}</a></p>` : '') +
       `<p class="ln sys">Routing data from <a href="https://stat.ripe.net/" rel="noopener">RIPEstat</a> (RIS collectors ${esc(r.collectors.map(c => c.split(' ')[0]).join(', '))}). From a command line: <code>curl ${esc(io.url.host)}/route/${esc(d.cidr)}</code></p>` + links;
   } else if (route && route.error) links = `<p class="ln sys">${esc(route.error)}</p>` + links;
-  return shell(io, { status, path, title, desc: summary, initial: { kind: 'cidr', query: d.cidr, data: d, ...(route ? { route } : {}) },
+  // The routing section names the origin networks' holders: noindex, follow when one may be a private person, as
+  // on the origin's own ASN page (prefix-overview gives the holder as as-overview does).
+  const personal = Boolean(r) && r.origins.some(o => personHeld(o.holder));
+  return shell(io, { status, path, title, desc: summary, noindex: personal, initial: { kind: 'cidr', query: d.cidr, data: d, ...(route ? { route } : {}) },
     body: staticBlock(`Subnet ${d.cidr}`, ['cidr', 'IPv' + d.v, d.range, ...(r ? [r.status] : [])], rows, summary, links) });
 }
 
@@ -2984,7 +2993,11 @@ function whoisPage(io, d, status) {
     ['abuse email', d.abuse && d.abuse.email], ['abuse phone', d.abuse && d.abuse.phone], ['description', d.description],
   ];
   const back = d.kind === 'asn' ? `<a href="/${esc(q)}">${esc(q)} network details</a>` : `<a href="/${esc(q)}">${esc(q)} location and network</a>`;
-  return shell(io, { status, path, title: `whois ${q}` + (d.org ? ` · ${d.org}` : '') + ' | ipterm', desc: summary,
+  // noindex, follow when the holder may be a private person, as on ASN pages. RDAP gives the holder in org (the
+  // registrant, or else the administrative contact) and the AS or network name in name; "<name> <org>" is the
+  // holder as RIPEstat gives it, so this page and the network's ASN page come to the same answer.
+  const personal = personName(d.org) || personName(d.name) || (Boolean(d.org) && personHeld(`${d.name || d.handle || ''} ${d.org}`));
+  return shell(io, { status, path, title: `whois ${q}` + (d.org ? ` · ${d.org}` : '') + ' | ipterm', desc: summary, noindex: personal,
     initial: { kind: 'whois', query: q, data: d },
     body: staticBlock(`whois ${q}`, ['whois', d.registry || 'rdap'], rows, summary,
       `<p class="ln sys">See also: ${back} · <a href="/guides/what-is-an-asn">What is an ASN?</a></p>`) });
@@ -3053,6 +3066,16 @@ function asnPage(io, d, status) {
     return shell(io, { status, path, title: `${d.asn} | ipterm`, initial: { kind: 'asn', query: d.asn, error: msg },
       body: staticBlock(d.asn, ['asn'], [], msg) });
   }
+  // A holder name that may be a private person's (GDPR caution): the page works and its links are followed, but
+  // search engines are asked not to index it. The same rules keep these networks out of the ASN sitemap.
+  const personal = personHeld(d.holder);
+  // An indexed page doesn't name an upstream that may be a private person either: it lists it by AS number only,
+  // in the HTML and in the data the terminal draws from (search engines run the page's script). The upstream's
+  // own page names it, and is noindex; the JSON and text answers keep every name.
+  const hide = u => !personal && (personName(u.name) || personHeld(u.name));
+  if (d.upstreams && d.upstreams.list && d.upstreams.list.some(hide)) {
+    d = { ...d, upstreams: { ...d.upstreams, list: d.upstreams.list.map(u => (hide(u) ? { ...u, name: null } : u)) } };
+  }
   const name = d.name || d.holder || d.asn;
   const ups = d.upstreams && d.upstreams.list ? d.upstreams.list : [];
   const upName = u => u.asn + (u.name ? ` (${u.name})` : '');
@@ -3075,9 +3098,6 @@ function asnPage(io, d, status) {
     (list ? `<p class="ln sys">Largest announced prefixes:</p><ul class="static-list">${list}</ul>` : '') +
     `<p class="ln sys">Registry record: <a href="/whois/${esc(d.asn)}">whois ${esc(d.asn)}</a></p>` +
     `<p class="ln sys">Guide: <a href="/guides/what-is-an-asn">What is an ASN?</a></p>`;
-  // A holder name that may be a private person's (GDPR caution): the page works and its links are followed, but
-  // search engines are asked not to index it. The same rules keep these networks out of the ASN sitemap.
-  const personal = Boolean(d.holder) && personReason(holderOf(d.holder)) !== null;
   return shell(io, { status, path, title: `${d.asn} · ${name} | ipterm`, desc: summary, noindex: personal,
     initial: { kind: 'asn', query: d.asn, data: d }, body: staticBlock(`${d.asn} · ${name}`, ['asn'], rows, summary, links) });
 }

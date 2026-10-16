@@ -2,13 +2,14 @@
 # Checks the search-engine groundwork: router-address typos redirect (301) to the exact address in
 # SITEMAP_PATHS and nowhere else, hostile paths never redirect off the list, pages for non-public addresses
 # are noindex unless curated, pages for networks whose holder may be a private person are noindex and left out
-# of the ASN sitemap, and the sitemap index and its files are there with the expected URL counts.
+# of the ASN sitemap (and so are the whois and /cidr pages that name such a holder, while other ASN pages list
+# it as an upstream by number only), and the sitemap index and its files are there with the expected URL counts.
 # Run against `npx wrangler dev` (default) or the live site:
 #   sh tools/check_seo.sh
 #   sh tools/check_seo.sh https://ipterm.net
 #   ROUTES=1 sh tools/check_seo.sh      # also the /cidr routing section (asks RIPEstat; no IPinfo)
-# Nothing here makes an IPinfo lookup: every address is non-public, the ASN pages ask RIPEstat only, and the
-# sitemap is generated in the Worker.
+# Nothing here makes an IPinfo lookup: every address page is non-public, the ASN and /cidr pages ask RIPEstat
+# only, whois pages ask RDAP only, and the sitemap is generated in the Worker.
 # (Git Bash on Windows: run with MSYS_NO_PATHCONV=1 so paths like /192.168.l.l aren't rewritten.)
 B=${1:-http://127.0.0.1:8787}
 UA='Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
@@ -74,6 +75,35 @@ robots /AS50053 1
 robots /AS13335 0
 robots /AS15169 0
 robots /AS3356 0
+echo '-- ... and whois and /cidr pages that name one (RDAP and RIPEstat only)'
+robots /whois/AS35100 1
+robots /whois/AS50053 1
+robots /whois/2.26.133.0 1      # an address block of AS50053, registered to its holder
+robots /whois/AS13335 0
+robots /whois/AS15169 0
+robots /whois/AS3356 0
+robots /whois/1.1.1.1 0
+robots /whois/8.8.8.8 0
+# Each network's largest prefix (the first in its JSON), whose routing section names the network's holder.
+for a in AS35100:1 AS50053:1 AS13335:0 AS15169:0 AS3356:0; do
+  px=$(curl -s -A curl/8 "$B/${a%:*}?format=json" | grep -o '"[0-9.]*/[0-9]*"' | head -1 | tr -d '"')
+  if [ -n "$px" ]; then robots "/cidr/$px" "${a#*:}"; else no "${a%:*}: no prefix in its JSON"; fi
+done
+robots /cidr/1.1.1.0/24 0
+robots /cidr/8.8.8.0/24 0
+echo '-- an indexed ASN page lists an upstream that may be a private person by AS number only'
+# AS203761 (an organization) has AS28748 (held by a person) as its upstream. The name comes from the JSON, which
+# keeps it, so it isn't written here; the page must link the upstream but not name it, in its HTML or its data.
+up=$(curl -s -A curl/8 "$B/AS203761?format=json" | grep -A1 '"asn": "AS28748"' | sed -n 's/.*"name": "\(.*\)".*/\1/p')
+if [ -z "$up" ]; then
+  printf 'SKIP  AS28748 is no longer a named upstream of AS203761 in the JSON: pick another pair\n'
+else
+  ok '/AS203761 JSON names its upstream AS28748'
+  robots /AS203761 0
+  page=$(curl -s -A "$UA" "$B/AS203761")
+  case "$page" in *'href="/AS28748"'*) ok '/AS203761 links AS28748' ;; *) no '/AS203761 does not link AS28748' ;; esac
+  case "$page" in *"$up"*) no '/AS203761 names AS28748, whose holder may be a person' ;; *) ok '/AS203761 lists AS28748 without its name' ;; esac
+fi
 
 echo '-- sitemap index and files'
 idx=$(curl -s "$B/sitemap.xml")
