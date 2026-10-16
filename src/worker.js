@@ -42,6 +42,8 @@
 //   GET /api/check          your own IP plus how IPinfo classifies it (VPN, hosting...), for the privacy check
 //   GET /api/dnsleak?t=     the DNS resolvers that looked up the page's random names, with their networks
 //                           (same-origin or command-line clients only; off unless DNSLEAK_* is set up)
+//   GET /go?q=              address-bar search: a 302 to the page for an IP, ASN, domain, range, email address,
+//                           port or terminal command (OpenSearch: /opensearch.xml; the form on /api)
 //   GET /robots.txt
 //   GET /sitemap.xml        a sitemap index: /sitemap-pages.xml (SITEMAP_PATHS) and /sitemap-asn-<n>.xml, the
 //                           largest networks in tiers (src/asn-sitemap.js, built by tools/build_asn_sitemap.mjs)
@@ -49,7 +51,8 @@
 //                           Needs the STATUS_KEY secret (x-status-key header or ?key=); without it, a 404
 //   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /mail/..., /whois/..., /cidr/..., /route/... and their
 //                           /api/ forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
-//   /openapi.json, /llms.txt  static files describing the API (served without running the Worker)
+//   /openapi.json, /llms.txt, /opensearch.xml  static files describing the API and the search (served without
+//                           running the Worker)
 //   anything else: a static file if one exists, a domain-shaped path (/example.com) redirects to its
 //   DNS page, and the rest gets a 404 page in the terminal's style
 //   Plain-text answers never carry a sponsored line, and those with IPinfo data credit IPinfo.
@@ -144,6 +147,7 @@ async function route(request, env, ctx) {
   if (path === '/api/check') return guard(() => checkData(io), d => json(d));
   if (path === '/api/dnsleak') return dnsleakRoute(io);
   if (path === '/dnsleak') return redirect('/leaktest');
+  if (path === '/go') return goRoute(io, html);
   if (path === '/api/asn') return asnRoute(io, String(url.searchParams.get('asn') || '').trim(), false);
   if (Object.hasOwn(TOOLS, path.slice(1).toLowerCase())) return toolRoute(io, path.slice(1).toLowerCase(), html);
   if (path === '/api/port') return portRoute(io, url.searchParams.get('n'), false);
@@ -263,6 +267,9 @@ function toolRoute(io, tool, html) {
     // The full reference for visitors without JavaScript and for crawlers; the terminal prints its own (`api`).
     (tool === 'api' ? `<pre class="doc-pre api-ref"><code>${esc(helpBody(io.url.host, io.env))}</code></pre>` +
       `<p class="ln sys">Machine-readable: <a href="/openapi.json">OpenAPI description</a> · <a href="/llms.txt">llms.txt</a> · plain text: <code>curl ${esc(io.url.host)}/help</code></p>` +
+      `<div class="api-ref"><p class="ln sys">Search from here, or from the address bar: <code>${esc(io.url.host)}/go?q=8.8.8.8</code> opens the page for an IP address, domain, AS number, range, email address or port.</p>` +
+      goForm('/go', 'go-form') +
+      `<p class="ln sys">A search box for a wiki or intranet page (plain HTML, no script):</p><pre class="doc-pre"><code>${esc(goForm(io.url.origin + '/go'))}</code></pre></div>` +
       `<p class="ln sys">IP address data powered by <a href="https://ipinfo.io" rel="noopener">IPinfo</a>.</p>` : '');
   return shell(io, { status: 200, path: '/' + tool, title: t.title, desc: t.desc, initial: { kind: 'tool', tool },
     body: staticBlock(t.heading, [tool], [['usage', t.usage]], t.desc, extra) });
@@ -292,6 +299,144 @@ function routerTypo(bare) {
   if (!ip || ip === bare) return null;
   for (const c of curatedIps()) if (c === ip) return c;
   return null;
+}
+
+/* ---------- address-bar search (/go) ----------
+   GET /go?q=<anything> answers with a 302 to the page for what was typed: an IP address, an AS number, a
+   domain or URL, a range (or an address and netmask), an email address (its mail check), port <n>, a
+   tool's name, or a terminal command such as `dig gmail.com MX` or `whois AS13335`. Browsers reach it from
+   the address bar through public/opensearch.xml, and wikis through the plain form on /api.
+   The Location is put together only from values that were parsed and written out again (canonIp, "AS" and
+   a number, normalizeDomain, CIDR.calc, PORTS.parse, the DNS type list, dkimSelector), never from the
+   input itself, and goLocation() refuses anything but a plain path on this site, so /go can't send anyone
+   elsewhere: //evil.com is a 400 like any other input it can't read. Hostile inputs: tools/check_go.sh. */
+const GO_TOOLS = {
+  '': '/', whoami: '/', myip: '/', me: '/', ip: '/', ifconfig: '/', ipconfig: '/', lookup: '/',
+  leaktest: '/leaktest', dnsleak: '/leaktest', vpntest: '/leaktest', whois: '/whois', rdap: '/whois', dig: '/dns', dns: '/dns',
+  nslookup: '/dns', mail: '/mail', email: '/mail', spf: '/mail', dmarc: '/mail', dkim: '/mail', cidr: '/cidr', subnet: '/cidr',
+  ipcalc: '/cidr', port: '/port', ports: '/port', api: '/api', help: '/api', curl: '/api', privacy: '/privacy', guides: '/guides',
+};
+
+async function goRoute(io, html) {
+  const q = String(io.url.searchParams.get('q') || '');
+  const loc = goLocation(goTarget(q));
+  if (loc) return redirect(loc);
+  const shown = clip(q.replace(/\s+/g, ' ').trim()), n = /^\d{1,10}$/.test(shown) ? Number(shown) : 0;
+  // A number on its own could be a network or a port: offer both.
+  const suggest = [n >= 1 && n <= 4294967295 && { cmd: 'asn AS' + n, href: '/AS' + n }, PORTS.parse(shown) && { cmd: 'port ' + n, href: '/port/' + n }].filter(Boolean);
+  const error = `ipterm can't tell what "${shown}" is. Try an IP address, a domain, an AS number (AS13335), a range (10.0.0.0/22), an email address or port <number>.`;
+  if (!html) return reply(io, { error, suggest: suggest.map(x => x.href), examples: ['/go?q=8.8.8.8', '/go?q=example.com', '/go?q=AS13335', '/go?q=10.0.0.0/22', '/go?q=port%2022'] }, 400);
+  const links = (suggest.length ? `<p class="ln sys">Did you mean ${suggest.map(x => `<a href="${esc(x.href)}">${esc(x.cmd)}</a>`).join(' or ')}?</p>` : '') +
+    `<p class="ln sys">Examples: <a href="/8.8.8.8">8.8.8.8</a> · <a href="/dns/example.com">example.com</a> · <a href="/AS13335">AS13335</a> · <a href="/cidr/10.0.0.0/22">10.0.0.0/22</a> · <a href="/port/22">port 22</a></p>` +
+    goForm('/go', 'go-form');
+  return shell(io, { status: 400, path: '/go', title: 'Nothing to look up | ipterm', initial: { kind: 'notfound', path: '/go', message: error, suggest },
+    body: staticBlock('Nothing to look up', ['400'], [], error, links) });
+}
+
+// The search form: on /api (and the error page above), and as the snippet people paste into a wiki.
+function goForm(action, cls = '') {
+  return `<form${cls ? ` class="${cls}"` : ''} action="${esc(action)}" method="get" role="search">\n` +
+    `  <input type="search" name="q" aria-label="IP address, domain, ASN, range or port" placeholder="8.8.8.8, example.com, AS13335 or 10.0.0.0/22" required>\n` +
+    `  <button type="submit">Look up on ipterm</button>\n</form>`;
+}
+
+// The last check before a Location goes out: a path on this site, made only of characters the builders
+// below produce, with no "//" or "/\" at the start (which browsers read as another host) and no dot segments.
+function goLocation(path) {
+  return typeof path === 'string' && path.length <= 300 && /^\/(?![/\\])[A-Za-z0-9._~:/?=%-]*$/.test(path) &&
+    !/(^|\/)\.\.?(\/|\?|$)/.test(path) ? path : null;
+}
+
+// What a search is for, as the path of its page, or null.
+function goTarget(raw) {
+  const s = String(raw || '').replace(/\s+/g, ' ').trim();
+  // Control, zero-width and bidi characters never belong in a lookup.
+  if (s.length > 300 || /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁩﻿]/.test(s)) return null;
+  if (Object.hasOwn(GO_TOOLS, s.toLowerCase())) return GO_TOOLS[s.toLowerCase()];
+  const [w0, ...args] = s.split(' '), cmd = w0.toLowerCase();
+  switch (cmd) {                                    // a terminal command
+    case 'lookup': case 'ip': case 'geo': case 'iplookup': return args.length === 1 ? goValue(args[0]) : null;
+    case 'whois': case 'rdap': return args.length === 1 ? goWhois(args[0]) : null;
+    case 'dig': case 'dns': case 'nslookup': case 'host': return args.length === 1 || args.length === 2 ? goDns(args[0], args[1]) : null;
+    case 'mail': case 'email': case 'spf': case 'dmarc': case 'dkim': case 'mailcheck': return goMail(args, cmd);
+    case 'cidr': case 'subnet': case 'ipcalc': return args.length === 1 || args.length === 2 ? goCidr(args.join(' ')) : null;
+    case 'asn': case 'as': return args.length === 1 ? goAsn(args[0]) : null;
+    case 'port': case 'portcheck': return goPort(args);
+  }
+  if (args.length === 1 && parseIp(w0) && parseIp(args[0])) return goCidr(s);   // an address and a netmask
+  return args.length ? null : goValue(w0);
+}
+
+// One word on its own: an AS number, a port, an address, a range, an email address, a domain or a URL.
+function goValue(v) {
+  if (/^as\d{1,10}$/i.test(v)) return goAsn(v);
+  const port = /^(?:port[:=]|:|tcp\/)(\d{1,5})$|^(\d{1,5})\/tcp$/i.exec(v);
+  if (port) return goPort([port[1] || port[2]]);
+  const host = urlHost(v.replace(/^mailto:/i, '')), p = parseIp(host.replace(/\/+$/, ''));
+  if (p) return '/' + canonIp(p);
+  if (/\/|-\d{1,3}$/.test(host)) { const c = goCidr(host); if (c) return c; }   // 10.0.0.0/22, or 10.0.0.0-22
+  const at = host.lastIndexOf('@');
+  if (at > 0) { const d = normalizeDomain(host.slice(at + 1)); return d ? '/mail/' + d : null; }
+  const d = normalizeDomain(host);
+  return d ? '/dns/' + d : null;
+}
+
+// A pasted http(s) URL's host (https://example.com/page -> example.com), or the input without IPv6 brackets.
+// Other schemes (javascript:, data:, ftp://) give nothing.
+function urlHost(v) {
+  v = String(v || '').trim().replace(/^\[([0-9a-f:.]+)\]$/i, '$1');
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(v) || parseIp(v)) return v;
+  if (!/^https?:\/\//i.test(v)) return '';
+  try { return new URL(v).hostname.replace(/^\[|\]$/g, ''); } catch { return ''; }
+}
+
+const goAsnNumber = v => { const m = /^(?:as)?(\d{1,10})$/i.exec(String(v)); const n = m ? Number(m[1]) : 0; return n >= 1 && n <= 4294967295 ? n : null; };
+function goAsn(v) { const n = goAsnNumber(v); return n ? '/AS' + n : null; }
+
+function goWhois(v) {
+  if (/^as\d/i.test(v)) { const n = goAsnNumber(v); return n ? '/whois/AS' + n : null; }
+  const host = urlHost(v), p = parseIp(host);
+  if (p) return '/whois/' + canonIp(p);
+  const d = normalizeDomain(host);
+  return d ? '/whois/' + d : null;
+}
+
+function goDns(name, type) {
+  const t = type == null ? null : String(type).toUpperCase();
+  if (t && !Object.hasOwn(DNS_TYPES, t)) return null;
+  const host = urlHost(name), p = parseIp(host);
+  if (p) return t && t !== 'PTR' ? null : '/dns/' + canonIp(p);
+  const d = normalizeDomain(host);
+  return d ? '/dns/' + d + (t ? '/' + t : '') : null;
+}
+
+// mail <domain or address> [--dkim <selector>]; dkim <domain> <selector> names the selector without --dkim.
+function goMail(args, cmd) {
+  let dom = null, sel = null;
+  for (let i = 0; i < args.length; i++) {
+    const m = /^--?dkim(?:=(.*))?$/i.exec(args[i]);
+    if (m) { sel = m[1] != null ? m[1] : args[++i]; if (!sel) return null; }
+    else if (!dom) dom = args[i];
+    else if (cmd === 'dkim' && sel == null) sel = args[i];
+    else return null;
+  }
+  if (!dom) return null;
+  const host = urlHost(dom.replace(/^mailto:/i, '')), at = host.lastIndexOf('@'), name = normalizeDomain(at >= 0 ? host.slice(at + 1) : host);
+  if (!name) return null;
+  if (sel == null) return '/mail/' + name;
+  const s = dkimSelector(sel);
+  return s ? '/mail/' + name + '?dkim=' + encodeURIComponent(s) : null;
+}
+
+function goCidr(v) {
+  const d = CIDR.calc(String(v).replace(/-(\d{1,3})$/, '/$1'));   // also 10.0.0.0-22, as /cidr/ takes it
+  return d.error ? null : '/cidr/' + d.cidr;
+}
+
+function goPort(args) {
+  if (args.length < 1 || args.length > 2 || (args[1] && !/^(--?info|info|about)$/i.test(args[1]))) return null;
+  const n = PORTS.parse(args[0]);
+  return n ? '/port/' + n : null;
 }
 
 // What the visitor probably meant, from the first part of the path.
@@ -1093,6 +1238,7 @@ function helpBody(h, env = {}) {
       [`No cookies or tracking, and nothing about you is stored: ${h}/privacy`],
       [`OpenAPI: ${h}/openapi.json   For AI tools: ${h}/llms.txt`],
       [`Browsers: ${h} is a terminal; this reference is at ${h}/api`],
+      [`Address bar: ${h}/go?q=<IP, domain, ASN, range, email or port n>`],
     ]),
     `${IPINFO_CREDIT}. Networks: RIPEstat.\nRegistry records: RDAP. DNS: Cloudflare's 1.1.1.1.` +
       (b.sha || b.url ? `\nThe code we deploy: ${[b.sha, b.url].filter(Boolean).join('  ')}` : ''),
@@ -3141,7 +3287,7 @@ const SITEMAP_PATHS = [
 ];
 
 function robots(url) {
-  return text(`User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: ${url.origin}/sitemap.xml\n`, 'public, max-age=86400');
+  return text(`User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /go\n\nSitemap: ${url.origin}/sitemap.xml\n`, 'public, max-age=86400');
 }
 
 // The ASN sitemap in tiers by size, so Search Console shows how each tier is indexed: the 1,000 largest
@@ -3278,7 +3424,7 @@ const CSP = [
   "connect-src 'self' https://api.ipify.org https://api6.ipify.org",   // whoami: your address on the other IP version
   "manifest-src 'self'",
   "base-uri 'none'",
-  "form-action 'none'",
+  "form-action 'self'",                                                  // the search form on /api goes to /go
   "frame-ancestors 'none'",
 ].join('; ');
 

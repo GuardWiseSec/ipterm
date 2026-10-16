@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Lets browsers add ipterm as a search engine: whatever is typed goes to /go, which sends it to the page for
+     that IP address, domain, AS number, range, email address or port. Written for https://ipterm.net; a copy
+     on another domain changes the four URLs below (see "Self-hosting" in docs/handbook.md). -->
+<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/" xmlns:moz="http://www.mozilla.org/2006/browser/search/">
+  <ShortName>ipterm</ShortName>
+  <Description>Look up an IP address, domain, AS number, subnet, mail domain or port on ipterm</Description>
+  <InputEncoding>UTF-8</InputEncoding>
+  <Image width="16" height="16" type="image/x-icon">https://ipterm.net/favicon.ico</Image>
+  <Url type="text/html" method="get" template="https://ipterm.net/go?q={searchTerms}"/>
+  <Url type="application/opensearchdescription+xml" rel="self" template="https://ipterm.net/opensearch.xml"/>
+  <moz:SearchForm>https://ipterm.net/</moz:SearchForm>
+</OpenSearchDescription>

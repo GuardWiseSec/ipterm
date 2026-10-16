@@ -7,8 +7,34 @@
   // hold: during that swap, keep the screen where the server's copy had it instead of following the output.
   let fast = false, hold = false;
   const sleep = ms => (fast ? Promise.resolve() : new Promise(r => setTimeout(r, reduced ? 0 : ms)));
-  let live = false, last = null, busy = false;
-  const hist = []; let hIdx = 0;
+  let live = false, busy = false;
+
+  /* ---------- command history ----------
+     The commands you run (typed or clicked, never their results) are kept in this browser's local storage
+     under ipterm-history, the newest 200, so Up, Down, history, Tab and Ctrl+R still know them after a
+     reload. A page's own first command (the homepage's whoami, a shared link's lookup) isn't saved, since
+     nobody typed it. `history clear` forgets them; `history off` stops saving (remembered as
+     ipterm-history-off) until `history on`. Up and Down keep working for this tab either way. */
+  const HIST_KEY = 'ipterm-history', HIST_OFF = 'ipterm-history-off', HIST_MAX = 200;
+  const stored = k => { try { return localStorage.getItem(k); } catch { return null; } };
+  const store = (k, v) => { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch {} };
+  const histOff = () => stored(HIST_OFF) === '1';
+  function savedHistory() {
+    if (histOff()) return [];
+    try {
+      const a = JSON.parse(stored(HIST_KEY) || '[]');
+      return Array.isArray(a) ? a.filter(x => typeof x === 'string' && x.trim() && x.length <= 500).slice(-HIST_MAX) : [];
+    } catch { return []; }
+  }
+  // Read again before each write, so two open tabs add to one list instead of overwriting each other's.
+  function remember(cmd) {
+    if (histOff() || cmd.length > 500) return;
+    const a = savedHistory();
+    if (a[a.length - 1] !== cmd) a.push(cmd);
+    store(HIST_KEY, JSON.stringify(a.slice(-HIST_MAX)));
+  }
+  const hist = savedHistory(); let hIdx = hist.length;
+  const addHist = cmd => { if (hist[hist.length - 1] !== cmd) hist.push(cmd); hIdx = hist.length; };
 
   /* ---------- output helpers ---------- */
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -654,6 +680,9 @@
     const head = el('div', 'head');
     head.append(el('span', 'hip', isSelf ? 'whoami' : ipText), el('span', 'tag', 'IPv' + p.v), el('span', 'tag ' + (cls === 'public' ? 'pub' : 'priv'), cls));
     if (d && d.source) head.append(el('span', 'tag', SRC[d.source] || d.source));
+    const res = isSelf ? { cmd: 'whoami', value: ipText, what: 'your IP address', path: '/', self: true, hide: [ipText], drop: SELF_DROP }
+      : { cmd: 'lookup ' + ipText, value: ipText, what: 'the address ' + ipText, path: '/' + ipText };
+    head.append(shareBar(res));
     out.appendChild(head);
     const fig = geoBlock(d);
     if (fig) { out.appendChild(fig); kick(); scroll(); }
@@ -665,6 +694,7 @@
       rows.push(['IPv' + want, slot]);
       otherFamily(p.v).then(other => {
         slot.textContent = '';
+        if (other) res.hide.push(other);           // copy md leaves it out too
         if (other) { slot.className = ''; slot.append(cmdLink(other, 'lookup ' + other, '/' + other)); announce(`Your IPv${want} address is ${other}.`); }
         else slot.append(`none detected (your connection looks IPv${p.v} only)`);
       });
@@ -964,19 +994,21 @@
         "set your device's time zone to match the VPN location, or use a browser that reports UTC (Tor Browser, or Firefox with privacy.resistFingerprinting turned on)");
     }
 
+    const leaks = results.filter(r => r[0] === 'warn').length;
+    const verdict = leaks ? `${leaks} possible leak${leaks > 1 ? 's' : ''} found. The lines marked LEAK show what gives you away` + (unsure ? ' if you use a VPN.' : '.')
+      : vpn ? 'No leaks found: sites see your VPN, not you.'
+      : homeNet ? "Nothing leaks beyond your IP address, but that address shows your provider and rough location. A VPN would hide them."
+      : "Nothing leaks beyond your IP address. Without a VPN, that address still shows your provider and rough location; a VPN would hide it.";
     const head = el('div', 'head');
     head.append(el('span', 'hip', 'leaktest'), el('span', 'tag pub', 'privacy check'), el('span', 'tag', vpn ? 'vpn on' : homeNet ? 'no vpn' : flagged ? 'vpn unclear' : vpnKnown ? 'no vpn detected' : 'vpn unknown'));
+    // The link is the check itself, never your result; the Markdown keeps the findings but not your addresses.
+    head.append(shareBar({ cmd: 'leaktest', value: verdict, what: 'the verdict', path: '/leaktest', self: true, hide: [d.ip, other, ...rtc.ips, ...rtc.local] }));
     out.appendChild(head);
     const STATUS = { ok: 'ok', warn: 'leak', info: 'info' };
     await kv(results.flatMap(([st, label, v, fix]) => {
       const x = document.createDocumentFragment(); x.append(el('span', 'tag st-' + st, STATUS[st]), ' ', v);
       return st === 'warn' && fix ? [[label, x], ['', 'fix: ' + fix, 'plain']] : [[label, x]];
     }));
-    const leaks = results.filter(r => r[0] === 'warn').length;
-    const verdict = leaks ? `${leaks} possible leak${leaks > 1 ? 's' : ''} found. The lines marked LEAK show what gives you away` + (unsure ? ' if you use a VPN.' : '.')
-      : vpn ? 'No leaks found: sites see your VPN, not you.'
-      : homeNet ? "Nothing leaks beyond your IP address, but that address shows your provider and rough location. A VPN would hide them."
-      : "Nothing leaks beyond your IP address. Without a VPN, that address still shows your provider and rough location; a VPN would hide it.";
     line(verdict, leaks ? 'warn' : 'sys');
     if (!leaks) announce(verdict);
     // Before the DNS test server is set up, or when it can't say anything this time, the check says so.
@@ -1002,13 +1034,13 @@
       const p = parseIp(d.ip);
       if (!p) { q.textContent = 'The server returned an address this page cannot read.'; q.className = 'ln err'; announce(q.textContent); return; }
       q.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
-      last = d.ip; setUrl('/', TITLE_HOME);
+      setUrl('/', TITLE_HOME);
       await render(p, d.ip, d, true);
       whoamiNext(d);
       return sponsor('whoami');
     }
     q.textContent = 'ok · sample data';
-    last = DEMO.self.ip; await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
+    await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
     whoamiNext(DEMO.self);
     return sponsor('whoami');
   }
@@ -1022,7 +1054,6 @@
     if (!p && looksLikeDomain(raw)) return dns(raw);
     if (!p) return line(`"${raw}" is not a valid IP address, ASN or domain. Examples: lookup 8.8.8.8, asn AS13335, lookup example.com`, 'err');
     const ipText = p.v === 4 ? p.o.join('.') : raw.toLowerCase();
-    last = ipText;
     const [cls] = classify(p);
     if (cls !== 'public') {
       setUrl('/' + ipText, `${ipText} · non-public IPv${p.v} address | ipterm`);
@@ -1235,6 +1266,7 @@
     setUrl('/port/' + n, portTitle(n, s));
     const head = el('div', 'head');
     head.append(el('span', 'hip', `port ${n}`), el('span', 'tag', s ? s.proto : 'tcp'), el('span', 'tag', 'about'));
+    head.append(shareBar({ cmd: `port ${n} --info`, value: String(n), what: 'the port number', path: '/port/' + n }));
     out.appendChild(head);
     const rows = s ? [['service', s.name], ['used for', s.use], ['protocol', PORTSLIB.protoText(s.proto)], ['if closed', s.tips]]
       : [['protocol', 'TCP'], ['', `Port ${n} isn't one of the common ports ipterm describes, but it can still be checked.`, 'plain']];
@@ -1262,6 +1294,7 @@
     const head = el('div', 'head');
     head.append(el('span', 'hip', `port ${n}`), el('span', 'tag', 'tcp'), el('span', 'tag ' + cls, label));
     if (d.version) head.append(el('span', 'tag', 'IPv' + d.version));
+    head.append(shareBar({ cmd: `port ${n}`, value: String(n), what: 'the port number', path: '/port/' + n, self: true, hide: [d.ip], drop: SELF_DROP }));
     out.appendChild(head);
     const rows = [['port', `${n}/tcp` + (svc ? '  ' + svc.name : '')]];
     if (d.ip) rows.push(['your address', `${d.ip}  (IPv${d.version}: the address you connected from, the only one ipterm tests)`]);
@@ -1322,13 +1355,17 @@
     announce(t.text + ' ' + t.usage);
   }
 
+  // A 404, or a search /go couldn't read (init.message, and maybe two suggestions: a number is an ASN or a port).
   function notFound(init) {
-    line(`ipterm: ${init.path}: no such page (404)`, 'err');
-    const s = init.suggest;
-    if (s && s.href) {
+    line(init.message || `ipterm: ${init.path}: no such page (404)`, 'err');
+    const list = [].concat(init.suggest || []).filter(s => s && s.href);
+    if (list.length) {
       const d = el('div', 'ln sys'); d.append('did you mean: ');
-      if (s.cmd) d.append(cmdLink(s.cmd, s.cmd, s.href));
-      else { const a = el('a', 'cmd', s.label || s.href); a.href = s.href; d.append(a); }
+      list.forEach((s, i) => {
+        if (i) d.append(' or ');
+        if (s.cmd) d.append(cmdLink(s.cmd, s.cmd, s.href));
+        else { const a = el('a', 'cmd', s.label || s.href); a.href = s.href; d.append(a); }
+      });
       d.append(' ?'); out.appendChild(d);
     }
     const d = el('div', 'ln sys'); d.append('type help for commands, or run ');
@@ -1353,6 +1390,7 @@
   async function renderCidr(d) {
     const head = el('div', 'head');
     head.append(el('span', 'hip', 'cidr ' + d.cidr), el('span', 'tag', 'IPv' + d.v), el('span', 'tag ' + (d.range === 'public' ? 'pub' : 'priv'), d.range), el('span', 'tag', 'calculated'));
+    head.append(shareBar({ cmd: 'cidr ' + d.cidr, value: d.cidr, what: 'the range', path: '/cidr/' + d.cidr }));
     out.appendChild(head);
     const link = c => cmdLink(c, 'cidr ' + c, '/cidr/' + c);
     const both = list => { const f = document.createDocumentFragment(); list.forEach((c, i) => { if (i) f.append('  ·  '); f.append(link(c)); }); return f; };
@@ -1435,6 +1473,8 @@
     head.append(el('span', 'hip', (single ? `dig ${d.name} ${single}` : d.name)), el('span', 'tag pub', 'dns'));
     head.append(el('span', 'tag', d.dnssec ? 'dnssec ✓' : 'unsigned'));
     head.append(el('span', 'tag', d.sample ? 'sample data' : '1.1.1.1'));
+    const one = single && !parseIp(d.name) ? single : '';   // a reverse lookup's page is /dns/<ip>
+    head.append(shareBar({ cmd: `dig ${d.name}${one ? ' ' + one : ''}`, value: d.name, what: 'the name', path: `/dns/${d.name}${one ? '/' + one : ''}` }));
     out.appendChild(head);
     if (d.status === 'NXDOMAIN') {
       line(`${d.name} does not exist (NXDOMAIN).`, 'warn');
@@ -1539,6 +1579,8 @@
   async function renderMail(d) {
     const head = el('div', 'head');
     head.append(el('span', 'hip', 'mail ' + d.domain), el('span', 'tag pub', 'email'), el('span', 'tag', 'grade ' + d.grade), el('span', 'tag', '1.1.1.1'));
+    head.append(shareBar({ cmd: 'mail ' + d.domain + (d.selector ? ' --dkim ' + d.selector : ''), value: d.domain, what: 'the domain',
+      path: '/mail/' + d.domain + (d.selector ? '?dkim=' + encodeURIComponent(d.selector) : '') }));
     out.appendChild(head);
     const frag = (...parts) => { const f = document.createDocumentFragment(); parts.forEach(p => f.append(p)); return f; };
     const c = d.counts || {};
@@ -1636,6 +1678,7 @@
     head.append(el('span', 'hip', 'whois ' + d.domain), el('span', 'tag pub', 'domain'));
     if (d.registry) head.append(el('span', 'tag', d.registry));
     head.append(el('span', 'tag', d.sample ? 'sample data' : 'rdap'));
+    head.append(shareBar({ cmd: 'whois ' + d.domain, value: d.domain, what: 'the domain', path: '/whois/' + d.domain }));
     out.appendChild(head);
     if (d.query && d.query !== d.domain && d.query !== 'www.' + d.domain) line(`${d.query} is part of ${d.domain}, so this is that domain's registration.`, 'sys');
     const date = v => (v ? String(v).slice(0, 10) : null);
@@ -1678,6 +1721,7 @@
     head.append(el('span', 'hip', 'whois ' + d.query), el('span', 'tag pub', 'registry'));
     if (d.registry) head.append(el('span', 'tag', d.registry));
     head.append(el('span', 'tag', d.sample ? 'sample data' : 'rdap'));
+    head.append(shareBar({ cmd: 'whois ' + d.query, value: d.query, what: d.kind === 'asn' ? 'the AS number' : 'the address', path: '/whois/' + d.query }));
     out.appendChild(head);
     const date = v => (v ? String(v).slice(0, 10) : null);
     const rows = [];
@@ -1713,6 +1757,7 @@
     head.append(el('span', 'hip', d.asn), el('span', 'tag pub', 'asn'));
     if (d.registry) head.append(el('span', 'tag', d.registry));
     head.append(el('span', 'tag', d.sample ? 'sample data' : 'ripestat'));
+    head.append(shareBar({ cmd: 'asn ' + d.asn, value: d.asn, what: 'the AS number', path: '/' + d.asn }));
     out.appendChild(head);
 
     const v4 = d.v4 || { prefixes: [] }, v6 = d.v6 || { prefixes: [] };
@@ -1773,15 +1818,16 @@
     ['<ip> or <ASN>', 'same as lookup', null],
     ['ping [count]', 'round trip from your browser to the nearest Cloudflare data center', 'ping'],
     ['man <command>', 'details and examples for one command, e.g. man dig', 'man dig'],
-    ['share', 'copy a link to the current result', 'share'],
-    ['copy', 'copy the last address to the clipboard', 'copy'],
+    ['share', 'share a link to the current result (phones: the share sheet)', 'share'],
+    ['copy [md|link]', "copy the current result's address, domain, range or ASN; md: as Markdown", 'copy'],
     ['privacy', 'what ipterm does and does not collect', 'privacy'],
     ['theme <name>', 'phosphor, amber, ice, contrast or paper', 'theme'],
     ['crt on|off', 'turn glow and scanlines on or off', 'crt'],
     ['access', 'accessibility and display options', 'access'],
     ['reset', 'forget display settings and return to the defaults', null],
     ['api', 'use ipterm from curl or scripts', 'api'],
-    ['history', 'list commands from this session', 'history'],
+    ['history', 'your recent commands, saved in this browser (history clear, history off)', 'history'],
+    ['keys', 'keyboard shortcuts: Tab completes, Ctrl+R searches history, !! repeats', 'keys'],
     ['about', 'where the data comes from', 'about'],
     ['clear', 'clear the screen (Ctrl+L)', null],
   ];
@@ -1790,7 +1836,7 @@
     vpncheck: 'leaktest', dnsleak: 'leaktest', dnsleaktest: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
     spf: 'mail', dmarc: 'mail', dkim: 'mail', email: 'mail', mailcheck: 'mail',
     as: 'asn', bgp: 'route', rpki: 'route', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
-    portcheck: 'port', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
+    portcheck: 'port', shortcuts: 'keys', bindkey: 'keys', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
   // man <command>: [synopsis, description, examples, see also, curl paths]
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
@@ -1823,12 +1869,17 @@
     ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
       ['ping', 'ping 10'], ['whoami', 'traceroute']],
     traceroute: ['traceroute', "not possible from a browser: tracing a route needs raw ICMP or UDP packets. ping times the connection to ipterm's edge instead.", ['ping'], ['ping', 'asn']],
-    share: ['share', 'copies a link to the current result. Every lookup has its own page, so the link opens the same result.', ['share'], ['copy']],
-    copy: ['copy', 'copies the last IP address shown to the clipboard.', ['copy'], ['share']],
-    history: ['history', 'lists the commands you ran in this tab. Up and Down recall them at the prompt. Nothing is saved after you close the tab.', ['history'], ['clear']],
+    share: ['share', "shares a link to the current result: the share sheet on phones, the clipboard elsewhere. Every lookup has its own page, so the link opens the same result. After whoami, leaktest or a port check it shares the page itself, which shows each visitor their own result (check yours), never your address. Every result's header line has the same [share] button, and [copy] and [md] beside it.",
+      ['share'], ['copy']],
+    copy: ['copy [md | link]', "copies the current result's main value: the IP address, the domain, the range or the AS number. copy md copies the whole result as a Markdown code block that starts with the command and ends with its link, for GitHub issues, Discord or Stack Overflow (your own address is left out of whoami, leaktest and port results). copy link copies the link. The sponsored line is never copied.",
+      ['copy', 'copy md', 'copy link'], ['share']],
+    history: ['history [clear | off | on]', "lists the commands you ran, numbered (click one to run it again). They are saved in this browser's local storage, the newest 200 and never their results, so they are still there after a reload; nothing is sent anywhere. history clear deletes them, history off stops saving them (and deletes them) until history on. Up and Down recall them at the prompt either way, Ctrl+R searches them, Tab completes from them, !! runs the last one again and !<n> runs number n.",
+      ['history', 'history clear', 'history off', 'history on'], ['keys', 'privacy']],
+    keys: ['keys', "the keyboard shortcuts. Tab completes a command, a record type after dig <name>, a theme, or an address, domain, range or AS number from your history; when several match, Tab fills in what they share and then steps through them. On an empty prompt Tab moves focus on, as on any page. Ctrl+R searches your history as you type (Ctrl+R again for an older match, Enter runs it, Esc gives your line back). !! is the previous command and !<n> number n in history, also inside a line. Up and Down step through history; Ctrl+L clears the screen.",
+      ['keys', 'history'], ['history']],
     theme: ['theme [phosphor | amber | ice | contrast | paper]', 'changes the colors; with no name, moves to the next theme. Remembered on this device only.', ['theme amber', 'theme paper', 'theme contrast'], ['crt', 'access']],
     crt: ['crt [on | off]', 'turns the CRT glow, scanlines and vignette on or off; with neither, switches. Remembered on this device only.', ['crt off', 'crt on'], ['theme', 'access']],
-    api: ['api', "how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP). /me draws a card of your own address with a world map (?w=<columns> to fit, ?color=0 for no colors, ?redact to hide the IP). One value at a time as plain text: /asn, /org, /cc, /city, /tz, /colo and /hostname for your own address, /<ip>/asn, org, cc, country, continent or hostname for any other. /line puts your IP, network, country and data center on one line for a shell prompt. /expect/<ASN or country code> answers HTTP 200 when your address matches and 412 when it doesn't, so curl -fs …/expect/AS13335 || <stop something> works as a VPN kill switch. Add ?format=text to any lookup for aligned lines instead of JSON. curl …/help prints the whole reference.",
+    api: ['api', "how to use ipterm from curl and scripts. Pages answer browsers with HTML and command-line tools with JSON (plain text for your IP). /me draws a card of your own address with a world map (?w=<columns> to fit, ?color=0 for no colors, ?redact to hide the IP). One value at a time as plain text: /asn, /org, /cc, /city, /tz, /colo and /hostname for your own address, /<ip>/asn, org, cc, country, continent or hostname for any other. /line puts your IP, network, country and data center on one line for a shell prompt. /expect/<ASN or country code> answers HTTP 200 when your address matches and 412 when it doesn't, so curl -fs …/expect/AS13335 || <stop something> works as a VPN kill switch. Add ?format=text to any lookup for aligned lines instead of JSON. curl …/help prints the whole reference. In a browser, /go?q=<anything> opens the page for an IP address, domain, AS number, range, email address (its mail check) or port <n>, or for a command such as dig gmail.com MX; browsers offer ipterm as a search engine through it, and api shows a search form for wikis that uses it.",
       ['api'], ['whoami', 'lookup'], ['/help', '/me', '/asn', '/line', '-fs /expect/AS13335', '/8.8.8.8/country', '/8.8.8.8?format=text']],
     man: ['man <command>', 'shows the manual for a command: what it does, examples to click and related commands. help <command> and <command> --help do the same.', ['man dig', 'man whois'], ['help']],
     help: ['help [command]', 'lists every command; click one to run it. With a command name, shows its manual.', ['help', 'help dig'], ['man']],
@@ -1842,7 +1893,7 @@
   // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup),
   // unless the caller names one to prefer ("mal gmail.com" -> mail, not man).
   const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'lookup', 'nslookup', 'asn', 'route', 'port', 'ping', 'traceroute', 'dmarc',
-    'share', 'copy', 'privacy', 'clear', 'history', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
+    'share', 'copy', 'privacy', 'clear', 'history', 'keys', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
   function osa(a, b) {
     const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
@@ -1965,9 +2016,9 @@
     setTheme(name); announce('Theme set to ' + name); line('theme: ' + name, 'sys');
   }
 
+  const toClipboard = t => { try { return navigator.clipboard.writeText(t).then(() => true, () => false); } catch { return Promise.resolve(false); } };
   function clip(textValue, okMsg, failMsg) {
-    const ok = () => line(okMsg, 'sys'), fail = () => line(failMsg, 'warn');
-    try { navigator.clipboard.writeText(textValue).then(ok, fail); } catch { fail(); }
+    return toClipboard(textValue).then(ok => { line(ok ? okMsg : failMsg, ok ? 'sys' : 'warn'); });
   }
   function crt(arg) {
     const d = document.documentElement, off = arg ? /^(off|0|no|false)$/i.test(arg) : d.dataset.fx !== 'off';
@@ -1999,30 +2050,155 @@
       ['crt off', 'keep your theme, drop the glow, scanlines and vignette'],
       ['motion', 'animations are skipped when your system is set to reduce motion'],
       ['screen readers', 'each result is announced as a one-line summary'],
+      ['keys', 'keyboard shortcuts. Tab completes at the prompt; on an empty prompt it moves focus out of the terminal'],
       ['reset', 'forget these settings and go back to the defaults'],
     ]);
     line('Settings are remembered on this device only.', 'sys');
     announce('Accessibility options listed: theme contrast, theme paper, crt off.');
   }
 
-  function copy() {
-    if (!last) return line('Nothing to copy yet. Run whoami or lookup first.', 'warn');
-    clip(last, 'copied ' + last, 'The clipboard is blocked here. Select the address above and copy it by hand.');
+  /* ---------- share, copy and copy md ----------
+     Each result's header line ends in [share] [copy] [md], tied to that result, so an older result's
+     buttons still act on it; share, copy and copy md at the prompt act on the newest result (`current`).
+     share opens the phone's share sheet where there is one and copies the link everywhere else. copy takes
+     the result's main value (the address, domain, range or AS number). copy md takes a fenced Markdown
+     block for GitHub issues, Discord or Stack Overflow: the command, the result's lines, then its
+     permalink. Nothing copied carries the sponsored line or the next: line. A result about your own
+     connection (whoami, leaktest, a port check) never shares your address: its link is the page itself,
+     which shows each visitor their own ("check yours"), and its Markdown leaves your addresses out. */
+  let current = null;              // { cmd, value, what, path, self, hide: [your addresses], drop: [row labels], bar }
+  // Rows of your own result that are your address in another form (or would point at it).
+  const SELF_DROP = ['hostname', 'IPv4', 'IPv6', 'postal', 'coords', 'decimal', 'hex', 'binary', 'rdns zone', 'expanded', '/64 prefix'];
+  function shareBar(r) {
+    current = r;
+    const bar = r.bar = el('span', 'share');
+    const btn = (label, name, act) => {
+      const b = el('button', 'share-btn', label); b.type = 'button';
+      b.setAttribute('aria-label', name); b.title = name;
+      b.addEventListener('click', () => act(b));
+      return b;
+    };
+    bar.append(btn('share', r.self ? 'Share a link to this page (it shows each visitor their own result, never yours)' : 'Share a link to this result', b => shareResult(r, b)),
+      btn('copy', 'Copy ' + r.what, b => copyValue(r, b)),
+      btn('md', 'Copy this result as Markdown' + (r.self ? ' (your address left out)' : ''), b => copyMd(r, b)));
+    return bar;
+  }
+  // A button answers in place: its label says "copied" for a moment, and screen readers hear what was copied.
+  function flash(b, spoken) {
+    if (!b.dataset.label) b.dataset.label = b.textContent;
+    b.textContent = 'copied'; announce(spoken);
+    clearTimeout(b.flashTimer); b.flashTimer = setTimeout(() => { b.textContent = b.dataset.label; }, 1600);
+  }
+  async function shareResult(r, b) {
+    if (!live) return line('Sharing works once the site is deployed. Every lookup gets its own link, like https://your-domain/8.8.8.8', 'sys');
+    if (!hasMouse() && navigator.share) {          // phones and tablets: the system share sheet
+      try { return await navigator.share({ title: 'ipterm', text: r.self ? 'check yours' : r.cmd, url: location.origin + r.path }); }
+      catch (e) { if (e && e.name === 'AbortError') return; }   // turned down: nothing to do. Failed: copy instead
+    }
+    return copyLink(r, b);
+  }
+  async function copyLink(r, b) {
+    const url = (live ? location.origin : 'https://your-domain') + r.path;
+    const note = r.self ? '   (check yours: it shows each visitor their own result, never yours)' : '';
+    const ok = await toClipboard(url);
+    if (ok && b) return flash(b, 'copied link: ' + url);
+    line(ok ? 'copied link: ' + url + note : 'link: ' + url + '   (the clipboard is blocked here, so copy it by hand)', ok ? 'sys' : 'warn');
+  }
+  async function copyValue(r, b) {
+    const shown = r.value.length > 60 || /\s/.test(r.value) ? r.what : r.value;
+    const ok = await toClipboard(r.value);
+    if (ok && b) return flash(b, 'copied ' + shown);
+    line(ok ? 'copied ' + shown : `The clipboard is blocked here. Select ${r.what} above and copy it by hand.`, ok ? 'sys' : 'warn');
+  }
+  async function copyMd(r, b) {
+    const head = r.bar.isConnected ? r.bar.closest('.head') : null;
+    if (!head) return line('That result is no longer on the screen. Run it again to copy it.', 'warn');
+    const ok = await toClipboard(markdown(r, head)), what = 'copied the result as Markdown' + (r.self ? ' (your address left out)' : '');
+    if (ok && b) return flash(b, what);
+    line(ok ? what : 'The clipboard is blocked here, so select the result and copy it by hand.', ok ? 'sys' : 'warn');
+  }
+  // The result as text, from its header line up to the next command: the header's tags, the table and
+  // the notes under it, without the map, buttons, the sponsored line or the next: line.
+  const NOT_RESULT = /^(ok|done) · (\d+ ms|sample data)$|^queued: |^Click a prefix/;
+  const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  function markdown(r, head) {
+    const hide = (r.hide || []).filter(x => x && parseIp(x)).map(ip => new RegExp(`(?<![\\w.:])${reEsc(ip)}(?![\\w.:])`, 'gi'));
+    const clean = t => hide.reduce((s, re) => s.replace(re, '[hidden]'), t.replace(/\s*↗/g, '').replace(/\s*\n\s*/g, ' ').trimEnd());
+    const textOf = node => {                     // status tags read [OK], [LEAK]...; buttons and outside links go
+      const c = node.cloneNode(true);
+      c.querySelectorAll('button, a[target="_blank"]').forEach(x => x.remove());
+      c.querySelectorAll('.tag').forEach(t => t.replaceWith(`[${t.textContent.toUpperCase()}]`));
+      return c.textContent.trim();
+    };
+    const body = [];
+    for (let n = head; n && (n === head || !n.classList.contains('echo')); n = n.nextElementSibling) {
+      if (n === head) {
+        const hip = n.querySelector('.hip').textContent, tags = [...n.querySelectorAll('.tag')].map(t => t.textContent);
+        body.push((r.cmd.includes(hip) ? tags : [hip, ...tags]).join(' · '));
+      } else if (n.tagName === 'DL') {
+        const rows = []; let drop = false;
+        for (const k of n.children) {
+          if (k.classList.contains('sep')) { rows.push(null); continue; }
+          if (k.tagName === 'DT') {
+            const label = k.textContent.trim();
+            if (label) drop = !!(r.drop && r.drop.includes(label));
+            if (!drop) rows.push([label, '']);
+          } else if (k.tagName === 'DD' && !drop && rows.length && rows[rows.length - 1]) rows[rows.length - 1][1] = textOf(k);
+        }
+        const w = Math.max(0, ...rows.filter(Boolean).map(x => x[0].length));
+        body.push('', ...rows.map(x => (x ? x[0].padEnd(w) + '  ' + x[1] : '')), '');
+      } else if (n.classList.contains('ln') && !n.classList.contains('sponsor') && !n.classList.contains('next')) {
+        const t = textOf(n);
+        if (t && !NOT_RESULT.test(t)) body.push(t);
+      }
+    }
+    const text = body.map(clean).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    // A fence longer than any run of backticks in the result, so a TXT record can't end the block early.
+    const fence = '`'.repeat(Math.max(3, ...(text.match(/`+/g) || []).map(x => x.length + 1)));
+    return `${fence}\n$ ${clean(r.cmd)}\n${text}\n${fence}\n${live ? location.origin : 'https://your-domain'}${r.path}\n`;
+  }
+
+  function historyCmd(arg) {
+    const a = String(arg || '').toLowerCase(), say = m => { announce(m); return line(m, 'sys'); };
+    if (a === 'clear' || a === '-c') { store(HIST_KEY, null); hist.length = 0; hIdx = 0; return say('History cleared: no commands are saved in this browser now.'); }
+    if (a === 'off') {
+      store(HIST_OFF, '1'); store(HIST_KEY, null);
+      return say("History off: commands are no longer saved in this browser, and the saved ones are deleted. Up and Down still recall this tab's commands. history on saves them again.");
+    }
+    if (a === 'on') { store(HIST_OFF, null); return say(`History on: your commands are saved in this browser again (the newest ${HIST_MAX}, never their results).`); }
+    if (a) return line('usage: history   history clear   history off   history on', 'warn');
+    const list = hist.slice(0, -1);                // everything before this `history`
+    if (!list.length) return line('No history yet.', 'sys');
+    list.forEach((h, i) => { const d = el('div', 'ln'); d.append(String(i + 1).padStart(4) + '  ', runnable(h, h)); out.appendChild(d); });
+    scroll();
+    line(histOff() ? "Saving is off, so these are only this tab's commands. history on saves them again."
+      : `Saved in this browser only: the newest ${HIST_MAX} commands, never their results. history clear deletes them; history off stops saving.`, 'sys');
+    announce(`${list.length} command${list.length > 1 ? 's' : ''} in your history.`);
+  }
+  function copy(arg) {
+    const a = String(arg || '').toLowerCase();
+    if (a && !/^(--?)?(md|markdown|link|url)$/.test(a)) return line('usage: copy   copy md   copy link', 'warn');
+    if (!current) return line('Nothing to copy: run whoami or a lookup first.', 'warn');
+    return /md|markdown/.test(a) ? copyMd(current) : a ? copyLink(current) : copyValue(current);
   }
   function share() {
-    if (!live) return line('Sharing works once the site is deployed. Every lookup gets its own link, like https://your-domain/8.8.8.8', 'sys');
-    const url = location.origin + location.pathname;
-    clip(url, 'copied link: ' + url, 'link: ' + url + '   (the clipboard is blocked here, so copy it by hand)');
+    // With no result on screen (a tool's page, the API reference) the page's own link is shared.
+    return shareResult(current || { cmd: document.title.replace(/\s*\|\s*ipterm$/, ''), path: location.pathname });
   }
 
   async function privacy() {
     await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
-      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, and a mail check also fetches the domain\'s own MTA-STS policy file. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.'], 'sys');
+      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, and a mail check also fetches the domain\'s own MTA-STS policy file. Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.',
+      'The commands you type are saved in your own browser (the newest 200, never their results) and never leave it: history clear deletes them, history off stops saving.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
     const d = el('div', 'ln sys'); const a = el('a', 'cmd', 'read the full privacy policy ↗'); a.href = '/privacy';
     d.append(a); out.appendChild(d); scroll();
   }
 
+  // The search form people paste into a wiki: a plain GET to /go. The same as goForm() in worker.js.
+  const goForm = action => `<form action="${action}" method="get" role="search">\n` +
+    '  <input type="search" name="q" aria-label="IP address, domain, ASN, range or port" placeholder="8.8.8.8, example.com, AS13335 or 10.0.0.0/22" required>\n' +
+    '  <button type="submit">Look up on ipterm</button>\n</form>';
   // A curl line to show; URLs with ? are quoted, since zsh would treat the ? as a wildcard.
   const curlLine = (p, flag = '') => { const u = (live ? location.origin : 'https://your-domain') + p, f = flag ? flag + ' ' : ''; return p.includes('?') ? `curl ${f}'${u}'` : `curl ${f}${u}`; };
   async function apiHelp() {
@@ -2050,10 +2226,18 @@
     line('Open the same links in a browser to get a shareable page. One-value answers are a single line; a missing value is an empty line with HTTP 404.', 'sys');
     const d = el('div', 'ln sys'), doc = (href, text) => { const a = el('a', 'cmd', text); a.href = href; return a; };
     d.append('machine-readable: ', doc('/openapi.json', 'OpenAPI'), '  ·  ', doc('/llms.txt', 'llms.txt'));
+    // Address-bar search (/go, which public/opensearch.xml offers to browsers) and a form for wikis that uses it.
+    const go = el('div', 'ln sys');
+    go.append('search from the address bar: ', doc('/go?q=8.8.8.8', '/go?q=<IP, domain, ASN, range, email or port n>'),
+      ' opens the matching page, and browsers offer ipterm as a search engine.');
+    const form = el('div', 'ln sys'), html = goForm((live ? location.origin : 'https://your-domain') + '/go');
+    const btn = el('button', 'share-btn', 'copy'); btn.type = 'button'; btn.setAttribute('aria-label', 'Copy the search form as HTML');
+    btn.addEventListener('click', () => toClipboard(html).then(ok => (ok ? flash(btn, 'copied the search form') : line('The clipboard is blocked here, so select the form below and copy it by hand.', 'warn'))));
+    form.append('a search box for a wiki or intranet page (plain HTML, no script)  ', btn);
     const credit = el('div', 'ln sys'), ipinfo = el('a', '', 'IPinfo ↗');
     ipinfo.href = 'https://ipinfo.io'; ipinfo.target = '_blank'; ipinfo.rel = 'noopener';
     credit.append('IP address data powered by ', ipinfo);
-    out.append(d, credit); scroll();
+    out.append(d, go, form, el('div', 'ln snippet', html), credit); scroll();
     if (!live) line('These routes work once the Worker is deployed.', 'sys');
     announce('API reference: curl commands for your IP, one value at a time, any IP, network, DNS name, registry record or subnet.');
     next(['whoami', 'whoami', 'your own IP, as /json returns it'], ['lookup 8.8.8.8', 'lookup 8.8.8.8', 'what /8.8.8.8 returns, drawn in the terminal']);
@@ -2071,14 +2255,24 @@
     out.appendChild(d); scroll();
   }
 
-  async function run(raw) {
-    const cmd = raw.trim(); echo(raw);
+  const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'dig', 'mail', 'lookup', 'asn', 'port']);
+  // save: false for what the page runs by itself (a tool page's command, Back and Forward), which isn't saved.
+  async function run(raw, save = true) {
+    let cmd = raw.trim(); echo(raw);
     if (!cmd) return;
-    hist.push(cmd); hIdx = hist.length;
+    if (/!(!|-?\d)/.test(cmd)) {                    // !! and !<n>, as in bash: show what runs, then run it
+      const x = expandHistory(cmd);
+      if (x.missing) return line(`${x.missing}: event not found`, 'err');
+      cmd = x.cmd; line(cmd, 'sys');
+    }
+    addHist(cmd);
+    if (save) remember(cmd);
     const [c0, ...args] = cmd.split(/\s+/);
     const lc = c0.toLowerCase(), c = ALIASES[lc] || lc;
     if (args.length === 1 && /^(--help|-h)$/.test(args[0]) && (MAN[c] || HELP.some(r => r[0].split(' ')[0] === c))) return man(c);
     const localNote = () => line("Browsers can't read your device's own network addresses. This is the public address websites see:", 'sys');
+    // A new lookup replaces the current result, even if it fails, so copy never copies an older one.
+    if (RESULTS.has(c)) current = null;
     switch (c) {
       case 'help': case 'man': return args[0] ? man(args[0]) : help();
       case 'whoami': return whoami();
@@ -2104,14 +2298,14 @@
       case 'traceroute': return traceroute(args[0]);
       case 'share': return share();
       case 'privacy': return privacy();
-      case 'clear': out.textContent = ''; return;
-      case 'history':
-        return hist.length > 1 ? lines(hist.slice(0, -1).map((h, i) => String(i + 1).padStart(4) + '  ' + h)) : line('No history yet.', 'sys');
+      case 'clear': out.textContent = ''; current = null; return;
+      case 'keys': return keys();
+      case 'history': return historyCmd(args[0]);
       case 'theme': return theme(args[0]);
       case 'crt': return crt(args[0]);
       case 'reset': return reset();
       case 'access': return access();
-      case 'copy': return copy();
+      case 'copy': return copy(args[0]);
       case 'api': return apiHelp();
       // what people type out of habit in other terminals (and the prompts shown on the site's own pages)
       case 'ls':
@@ -2140,6 +2334,7 @@
           'No cookies and no tracking. Sponsored lines are labeled and are plain links. Type privacy for details.',
         ], 'sys').then(about);
       default: {
+        current = null;                            // an address, range or domain on its own is a lookup too
         if (parseIp(c0) || /^as\d+$/i.test(c0)) return lookup(c0);
         if (looksLikeCidr(cmd)) return cidr(cmd);
         if (looksLikeDomain(c0)) return dns(c0);
@@ -2158,11 +2353,11 @@
   // most). If the one running is a slow one, a note says so; quick ones just finish first.
   let running = 'whoami', startedAt = 0;
   const queued = [];
-  const runQueued = () => { if (queued.length) setTimeout(() => exec(queued.shift()), 0); };
-  async function exec(v) {
+  const runQueued = () => { if (queued.length) { const [v, save] = queued.shift(); setTimeout(() => exec(v, save), 0); } };
+  async function exec(v, save = true) {
     if (busy) {
       if (!String(v).trim() || queued.length >= 5) return;
-      queued.push(v);
+      queued.push([v, save]);
       if (performance.now() - startedAt > 400) {
         const msg = `queued: ${String(v).trim()} (runs after ${running})`;
         line(msg, 'sys'); announce(msg);
@@ -2171,7 +2366,7 @@
     }
     busy = true; running = String(v).trim(); startedAt = performance.now(); nextItems = null;
     const mark = out.lastChild;
-    try { await run(v); } finally {
+    try { await run(v, save); } finally {
       busy = false;
       if (!nextItems && failedUpstream(mark)) next(['retry', running, 'run the same command again']);
       flushNext(); scroll();
@@ -2180,6 +2375,116 @@
       if (!hasMouse() && first && first.isConnected) reveal(first);
       runQueued();
     }
+  }
+
+  /* ---------- Tab completion, Ctrl+R and !! ----------
+     Tab completes the word being typed: a command, a record type after dig <name>, a theme, or an address,
+     domain, range or AS number from your history. When several match, the first Tab fills in what they
+     share and each further Tab steps to the next one (the hint beside the prompt lists them). Tab on an
+     empty prompt, and Shift+Tab always, move focus as usual, so keyboard users can still leave the
+     terminal. Ctrl+R searches the history as you type, newest first: Ctrl+R again finds an older match,
+     Enter runs it, an arrow key or Tab keeps it for editing, Esc gives your line back. !! is the previous
+     command and !<n> the nth in `history`, as in bash. */
+  const COMMANDS = [...new Set([...HELP.map(r => r[0].split(' ')[0]).filter(w => /^[a-z]/.test(w)), 'traceroute'])];
+  const VALUE_ARGS = new Set(['lookup', 'whois', 'dig', 'mail', 'asn', 'cidr', 'ip', 'traceroute']);
+  const WORD_ARGS = { theme: () => THEMES, crt: () => ['on', 'off'], history: () => ['clear', 'off', 'on'], copy: () => ['md', 'link'],
+    man: () => COMMANDS, help: () => COMMANDS, port: () => (PORTSLIB ? PORTSLIB.list().map(String) : []) };
+  const hint = el('span', 'hint'); hint.hidden = true; hint.setAttribute('aria-hidden', 'true'); form.appendChild(hint);
+  const showHint = t => { hint.textContent = t; hint.hidden = false; };
+  // Addresses, domains, ranges and AS numbers from your history, newest first.
+  function histValues() {
+    const seen = new Set();
+    for (let i = hist.length - 1; i >= 0; i--) {
+      for (const w of hist[i].split(/\s+/)) if (parseIp(w) || /^as\d{1,10}$/i.test(w) || looksLikeCidr(w) || (looksLikeDomain(w) && !/[/:]/.test(w))) seen.add(w);
+    }
+    return [...seen];
+  }
+  let tabCycle = null;                             // { lead, list, i } while Tab steps through several matches
+  function complete() {
+    const v = input.value;
+    if (tabCycle && v === tabCycle.lead + tabCycle.list[tabCycle.i]) {
+      tabCycle.i = (tabCycle.i + 1) % tabCycle.list.length;
+      input.value = tabCycle.lead + tabCycle.list[tabCycle.i];
+      return showHint(`${tabCycle.i + 1}/${tabCycle.list.length}  ` + tabCycle.list.join('  '));
+    }
+    tabCycle = null;
+    const lead = v.replace(/\S*$/, ''), word = v.slice(lead.length), before = lead.trim() ? lead.trim().split(/\s+/) : [];
+    const c = before.length ? ALIASES[before[0].toLowerCase()] || before[0].toLowerCase() : '';
+    const pool = !before.length ? [...COMMANDS, ...histValues()]
+      : before.length === 2 && c === 'dig' && !parseIp(before[1]) ? DNS_TYPES
+      : before.length === 1 && WORD_ARGS[c] ? WORD_ARGS[c]()
+      : before.length === 1 && VALUE_ARGS.has(c) ? histValues() : [];
+    const w = word.toLowerCase(), list = [...new Set(pool)].filter(x => x.toLowerCase().startsWith(w));
+    if (!list.length) return announce('No completions.');
+    if (list.length === 1) { input.value = lead + list[0] + ' '; return; }
+    const shared = list.reduce((a, b) => { let n = 0; while (n < a.length && n < b.length && a[n].toLowerCase() === b[n].toLowerCase()) n++; return a.slice(0, n); });
+    showHint(list.join('  '));
+    announce(`${list.length} matches: ${list.slice(0, 12).join(', ')}${list.length > 12 ? ' and more' : ''}.`);
+    if (shared.length > word.length) { input.value = lead + shared; return; }
+    tabCycle = { lead, list, i: 0 };
+    input.value = lead + list[0];
+  }
+
+  let search = null;                               // { orig: the line before Ctrl+R, at: index of the match in hist }
+  const ps1 = form.querySelector('.ps1'), PS1 = ps1.textContent, PLACEHOLDER = input.placeholder;
+  function searchStart() {                         // what's already typed is the first search
+    search = { orig: input.value, at: -1 };
+    ps1.textContent = '(reverse-i-search)';
+    input.placeholder = 'search your history'; input.setAttribute('aria-label', 'Search your command history');
+    announce('History search. Type to search, Control R for an older match, Enter to run it, Escape to cancel.');
+    searchFind(false);
+  }
+  function searchFind(older) {
+    const q = input.value.toLowerCase(), cur = search.at >= 0 ? hist[search.at] : null;
+    let i = older && search.at >= 0 ? search.at : hist.length;
+    while (--i >= 0) if (hist[i].toLowerCase().includes(q) && !(older && hist[i] === cur)) break;
+    if (i >= 0 || !older) search.at = i;           // Ctrl+R past the oldest match keeps the one shown
+    const hit = search.at >= 0 ? hist[search.at] : null;
+    showHint(hit ? '→ ' + hit : q ? 'no match' : 'type to search');
+    if (hit && q) announce(hit);
+  }
+  function searchEnd(value) {                      // the prompt keeps value: the match, or the line from before
+    search = null;
+    ps1.textContent = PS1; input.placeholder = PLACEHOLDER; input.setAttribute('aria-label', 'Command');
+    hint.hidden = true; input.value = value;
+  }
+  function searchKey(e, k, ctrl) {                 // true when the key was the search's
+    const hit = search.at >= 0 ? hist[search.at] : null;
+    if (ctrl && k.toLowerCase() === 'r') { e.preventDefault(); searchFind(true); return true; }
+    if (k === 'Escape' || (ctrl && k.toLowerCase() === 'g')) { e.preventDefault(); searchEnd(search.orig); return true; }
+    if (k === 'Enter') {
+      e.preventDefault(); searchEnd(hit != null ? hit : input.value);
+      if (hit != null) form.requestSubmit();
+      return true;
+    }
+    if (k === 'Tab' && (e.shiftKey || hit == null)) { searchEnd(input.value); return false; }   // Tab as usual
+    if (['Tab', 'ArrowUp', 'ArrowDown'].includes(k)) { e.preventDefault(); searchEnd(hit != null ? hit : input.value); return true; }
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(k)) { searchEnd(hit != null ? hit : input.value); return true; }
+    return true;                                   // typing changes the search; the input event looks again
+  }
+
+  // !! is the previous command, !<n> number n in `history` and !-<n> the nth from the end.
+  function expandHistory(cmd) {
+    let missing = null;
+    const x = cmd.replace(/!(!|-?\d+)/g, (m, ref) => {
+      const i = ref === '!' ? hist.length - 1 : ref[0] === '-' ? hist.length + Number(ref) : Number(ref) - 1;
+      if (i >= 0 && i < hist.length) return hist[i];
+      if (!missing) missing = m;
+      return m;
+    });
+    return { cmd: x, missing };
+  }
+
+  async function keys() {
+    await kv([
+      ['Enter', 'run the command'],
+      ['Up / Down', 'step through your history'],
+      ['Tab', 'complete a command, a record type after dig <name>, or an address or domain from your history. Several matches: Tab again steps through them. On an empty prompt, Tab moves on'],
+      ['Ctrl+R', 'search your history as you type: Ctrl+R again for an older match, Enter to run it, an arrow key to edit it, Esc to cancel'],
+      ['!!', 'the previous command again, also inside a line; !3 runs number 3 in history'],
+      ['Ctrl+L', 'clear the screen'],
+    ]);
+    announce('Keyboard shortcuts: Tab completes, Control R searches history, two exclamation marks repeat the last command.');
   }
 
   /* ---------- wiring ---------- */
@@ -2193,10 +2498,20 @@
     exec(v);
   });
   input.addEventListener('keydown', e => {
-    if (e.key === 'ArrowUp' && hist.length) { e.preventDefault(); hIdx = Math.max(0, hIdx - 1); input.value = hist[hIdx]; }
-    else if (e.key === 'ArrowDown' && hist.length) { e.preventDefault(); hIdx = Math.min(hist.length, hIdx + 1); input.value = hist[hIdx] || ''; }
-    else if (e.key.toLowerCase() === 'l' && e.ctrlKey) { e.preventDefault(); out.textContent = ''; }
+    const k = e.key || '', ctrl = e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;   // (autofill sends no key)
+    if (search && searchKey(e, k, ctrl)) return;
+    if (k !== 'Tab') { tabCycle = null; hint.hidden = true; }
+    if (k === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (!input.value.trim()) return;             // an empty prompt: Tab moves focus on, as on any page
+      e.preventDefault(); return complete();
+    }
+    if (ctrl && k.toLowerCase() === 'r') { e.preventDefault(); return searchStart(); }
+    if (k === 'ArrowUp' && hist.length) { e.preventDefault(); hIdx = Math.max(0, hIdx - 1); input.value = hist[hIdx]; }
+    else if (k === 'ArrowDown' && hist.length) { e.preventDefault(); hIdx = Math.min(hist.length, hIdx + 1); input.value = hist[hIdx] || ''; }
+    else if (ctrl && k.toLowerCase() === 'l') { e.preventDefault(); out.textContent = ''; current = null; }
   });
+  input.addEventListener('input', () => { if (search) searchFind(false); else { tabCycle = null; hint.hidden = true; } });
+  input.addEventListener('blur', () => { if (search) searchEnd(search.orig); });
   document.querySelectorAll('button[data-cmd]').forEach(b => b.addEventListener('click', () => { exec(b.dataset.cmd); focusInput(); }));
   // Links in the section below the terminal are real links for crawlers and new tabs; a plain click
   // runs the lookup right in the terminal instead of reloading the page.
@@ -2212,7 +2527,7 @@
     const c = cmdFor(location.pathname, location.search);
     if (!c || !live) return;
     navPush = false;
-    exec(c).finally(() => { navPush = true; });
+    exec(c, false).finally(() => { navPush = true; });
   });
 
   const clock = $('#clock');
@@ -2255,7 +2570,7 @@
       const cmd = running = { whois: 'whois', dns: 'dig', mail: 'mail', cidr: 'cidr', leaktest: 'leaktest', port: 'port', api: 'api' }[init.tool];
       const mark = out.lastChild;
       navPush = false;
-      try { await run(cmd); } finally { navPush = true; }
+      try { await run(cmd, false); } finally { navPush = true; }
       if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
       flushNext();
       return focusInput();
@@ -2265,7 +2580,7 @@
       setLive(true);
       const n = PORTSLIB ? PORTSLIB.parse(init.query) : null;
       const cmd = running = n && !init.error ? `port ${n} --info` : `port ${init.query}`;
-      echo(cmd); hist.push(cmd); hIdx = hist.length;
+      echo(cmd); addHist(cmd);
       navPush = false;
       try { if (n && !init.error) await portAbout(n); else line(init.error || 'Not a port number. Ports run from 1 to 65535: port 22', 'err'); }
       finally { navPush = true; }
@@ -2278,7 +2593,7 @@
       const cmd = init.kind === 'cidr' ? 'cidr ' + init.query : init.kind === 'dns' ? 'dig ' + init.query + (init.qtype && init.qtype !== 'PTR' ? ' ' + init.qtype : '')
         : init.kind === 'mail' ? mailCmd.join(' ') : (init.kind === 'asn' ? 'asn ' : init.kind === 'whois' ? 'whois ' : 'lookup ') + init.query;
       running = cmd;
-      echo(cmd); hist.push(cmd); hIdx = hist.length;
+      echo(cmd); addHist(cmd);
       const mark = out.lastChild;
       navPush = false;
       try {
@@ -2291,11 +2606,11 @@
       return focusInput();
     }
 
-    echo('whoami'); hist.push('whoami'); hIdx = hist.length;
+    echo('whoami'); addHist('whoami');
     if (selfP) {
       setLive(true);
       const d = init.data;
-      last = d.ip; await render(selfP, d.ip, d, true);
+      await render(selfP, d.ip, d, true);
       fast = false;
       whoamiNext(d);
       await sponsor('whoami');
@@ -2312,7 +2627,7 @@
     if (p) {
       setLive(true);
       q.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
-      last = d.ip; await render(p, d.ip, d, true);
+      await render(p, d.ip, d, true);
       whoamiNext(d);
       await sponsor('whoami');
     } else if (d && d.error && d.error !== 'no-api' && !/^network/.test(d.error)) {
@@ -2323,7 +2638,7 @@
       setLive(false);
       q.textContent = 'No lookup API at /api/lookup, so this preview runs on sample data. Deploy the Worker to go live.';
       q.className = 'ln warn'; announce(q.textContent);
-      last = DEMO.self.ip; await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
+      await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
       whoamiNext(DEMO.self);
       await sponsor('whoami');
     }

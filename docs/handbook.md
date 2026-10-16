@@ -225,8 +225,9 @@ ipterm is MIT-licensed, so you can run your own copy. Follow "Deploy" above, the
    `DNSLEAK_ZONE` and `DNSLEAK_API` point at ipterm.net's own leak-test server: the test stays off without the
    `DNSLEAK_KEY` secret, but change them to your own (`dnsleak-server/README.md`) or delete both lines.
 4. Edit what names ipterm.net: the contact address in `public/privacy.html` (and anything in the policy your copy
-   does differently) and the URLs in `public/openapi.json` and `public/llms.txt`. Canonical and share links use your
-   own address automatically.
+   does differently) and the URLs in `public/openapi.json`, `public/llms.txt` and `public/opensearch.xml` (otherwise
+   browsers that add your copy as a search engine search ipterm.net). Canonical and share links, the search form on
+   `/api` and the terminal's copy of it use your own address automatically.
 5. Optional: `npx wrangler secret put IPINFO_TOKEN` (and `PROXYCHECK_KEY`, `STATUS_KEY`), as described above. Your
    copy uses your own IPinfo and proxycheck.io allowances, and keeps IPinfo's attribution in the footer.
 
@@ -271,6 +272,7 @@ curl https://your-domain/route/1.1.1.0/24  # how a prefix (or an address) is rou
 curl https://your-domain/mail/gmail.com  # a domain's email security (SPF, DMARC, DKIM), graded
 curl -4 https://your-domain/port/22   # is TCP port 22 open on your own IP? (see "Port checker")
 curl https://your-domain/help         # the command-line reference as plain text
+curl -L 'https://your-domain/go?q=AS13335'  # address-bar search: a redirect to that page (see "Address-bar search")
 ```
 
 Add `?format=json` to force JSON from a browser.
@@ -327,9 +329,10 @@ Text answers carry no sponsored line (that line only exists in the browser termi
 from upstream (TXT records, registry names) has control characters and bidi overrides replaced with `?`,
 so a hostile record can't send escape sequences to the reader's terminal (`plain()` in `src/worker.js`).
 
-**Machine-readable descriptions:** `public/openapi.json` (OpenAPI 3.1) and `public/llms.txt` are static files,
-listed in `run_worker_first`'s exclusions so they don't count as Worker requests. Their links are written
-for `https://ipterm.net`; change them if you deploy elsewhere. Edit them whenever a route changes.
+**Machine-readable descriptions:** `public/openapi.json` (OpenAPI 3.1), `public/llms.txt` and
+`public/opensearch.xml` (see "Address-bar search") are static files, listed in `run_worker_first`'s exclusions
+so they don't count as Worker requests. Their links are written for `https://ipterm.net`; change them if you
+deploy elsewhere. Edit them whenever a route changes.
 `public/_headers` sends both with `Access-Control-Allow-Origin: *`, so browser-based OpenAPI tools and
 agents on other sites can load them. That covers only these two public documents: the API's own
 cross-site access still follows `PUBLIC_API` (off by default).
@@ -351,6 +354,82 @@ times HTTPS round trips to the nearest Cloudflare data center (browsers can't se
 explains why it can't run in a browser. Every result ends with a `next:` line of up to four follow-ups
 picked from its own data (whoami suggests `leaktest` and your network; a domain suggests `whois`; a failed
 lookup suggests `retry`). Commands typed while another runs wait their turn, as in a real terminal (type-ahead).
+
+**Share, copy and copy md.** Every result's header line ends in `[share] [copy] [md]`, tied to that result, so an
+older result's buttons still act on it; `share`, `copy`, `copy md` and `copy link` at the prompt act on the newest
+one (`shareBar()` and `current` in `public/app.js`).
+
+- `share` opens the system share sheet on phones and tablets (`navigator.share`, when the pointer is coarse) and
+  copies the link everywhere else, or when the sheet fails.
+- `copy` copies the result's main value: the IP address, the domain, the range or the AS number (a port result's
+  number, leaktest's verdict). Every lookup replaces it, a failed one too, so it never copies an earlier result.
+- `copy md` copies a fenced Markdown block for a GitHub issue, Discord or Stack Overflow: `$ <command>`, the header's
+  tags, the table and the notes under it, then the permalink on the line after the fence, where it stays clickable.
+  The fence is longer than any run of backticks in the result, so a TXT record can't end it early.
+- Nothing copied carries the sponsored line, the `next:` line, the map or buttons.
+- Results about the visitor's own connection (whoami, leaktest, a port check) never share their address. The link
+  is the page itself (`/`, `/leaktest`, `/port/<n>`), which shows each visitor their own result, so the share sheet
+  says "check yours". Their Markdown replaces the visitor's addresses with `[hidden]` and leaves out the rows that
+  are the address in another form or point at it (`SELF_DROP`: hostname, the other IP version, postal code,
+  coordinates, decimal, hex, binary, reverse-DNS zone). `copy` still copies your own IP after whoami: it goes to
+  your own clipboard, not to anyone else.
+
+**History and keys.** The commands a visitor runs (typed or clicked, never their results) are kept in their browser's
+local storage under `ipterm-history`, the newest 200, so Up, Down and `history` work after a reload. A page's own
+first command (the homepage's whoami, a shared link's lookup) and Back/Forward replays aren't saved, since nobody
+typed them. `history` lists them numbered, each a link that runs it again; `history clear` deletes them and
+`history off` deletes them and stops saving (`ipterm-history-off`) until `history on`. Up and Down keep working
+for the tab either way. Nothing is sent anywhere, and the privacy policy says so. Two open tabs add to one list
+(each write reads the list again first).
+
+| Key | What it does |
+| --- | --- |
+| Tab | Completes the word being typed: a command, a record type after `dig <name>`, a theme or `history`/`copy`/`crt` argument, a port, or an address, domain, range or AS number from the history. Several matches: the first Tab fills in what they share, then each Tab steps to the next, with the list in a hint beside the prompt. On an empty prompt Tab isn't captured, so keyboard users can tab out of the terminal; Shift+Tab never is |
+| Ctrl+R | Searches the history as you type, newest first (the prompt reads `(reverse-i-search)`). Ctrl+R again: an older match. Enter runs it, an arrow key, Tab, Home or End keeps it for editing, Esc (or Ctrl+G) gives the line back |
+| `!!`, `!<n>`, `!-<n>` | As in bash: the previous command, number n in `history`, the nth from the end; also inside a line (`sudo !!`). The expanded command is shown, run and saved; an unknown one says `event not found` |
+| Up, Down, Ctrl+L | Step through the history; clear the screen |
+
+`keys` (or `man keys`) lists them in the terminal.
+
+### Address-bar search (/go)
+
+`/go?q=<anything>` answers with a 302 to the page for what was typed, so ipterm can be a browser search engine and a
+search box on other sites (`goRoute()` in `src/worker.js`):
+
+| Typed | Goes to |
+| --- | --- |
+| `8.8.8.8`, `[2606:4700:4700::1111]`, `http://192.168.1.1/admin` | `/8.8.8.8` (IPv6 in its short form) |
+| `AS13335`, `as 13335`, `asn 13335` | `/AS13335` |
+| `example.com`, a URL, an international name | `/dns/example.com` (punycode) |
+| `10.1.2.3/22`, `10.0.0.0-22`, `192.168.1.10 255.255.255.0` | `/cidr/10.1.0.0/22` (the network address) |
+| `someone@gmail.com`, `mailto:…`, `mail gmail.com --dkim google` | `/mail/gmail.com` (with `?dkim=`) |
+| `port 22`, `port:22`, `22/tcp` | `/port/22` (the page explains the port; nothing is checked) |
+| a terminal command: `dig gmail.com MX`, `whois AS13335`, `lookup 1.1.1.1` | its page |
+| a tool's name: `whois`, `dig`, `leaktest`, `port`, `help`; or nothing | `/whois`, `/dns`, `/leaktest`, `/port`, `/api`; `/` |
+
+Anything else is a 400: JSON for command-line clients, and for browsers a `noindex` page in the terminal's style
+with examples (a bare number is offered as both `asn AS<n>` and `port <n>`). `/go` is in `robots.txt`'s Disallow,
+and a redirect is cached for an hour like the other redirects.
+
+**The Location is never the input.** It is put together only from values that were parsed and written out again
+(`canonIp()`, `AS` and a number, `normalizeDomain()`, `CIDR.calc()`, `PORTS.parse()`, the `DNS_TYPES` list,
+`dkimSelector()`), and `goLocation()` checks the result before it goes out: a path on this site, made of
+`A-Za-z0-9._~:/?=%-` only, not starting with `//` or `/\` (which browsers read as another host), with no dot
+segments. Input with control, zero-width or bidi characters, other URL schemes (`javascript:`, `data:`, `ftp:`) or
+more than 300 characters is refused before parsing. `tools/check_go.sh` runs 78 inputs against `npx wrangler dev`
+(or the live site: `sh tools/check_go.sh https://ipterm.net`), including `//evil.com`, `/\evil.com`, `%2F%2Fevil.com`,
+`javascript:alert(1)`, CRLF and NUL injection, bidi overrides, `__proto__` as a record type, out-of-range ports and
+AS numbers and an over-long name. Every answer must be the exact expected path or a 400. A URL to another site
+(`https://evil.com`) goes to that host's DNS page here, which is a page on this site like any other lookup.
+
+**Browsers.** `public/opensearch.xml` (static, in `run_worker_first`'s exclusions) describes the search, and every
+page links it (`<link rel="search">` in `public/index.html`), so Firefox offers "Add ipterm" in the address bar's
+search menu and Chrome lists ipterm under its site search shortcuts. It's written for `https://ipterm.net`.
+
+**Wikis and intranets.** The `/api` page shows a plain GET form to paste anywhere (no script, `action` pointing at
+`<origin>/go`), and the terminal's `api` output has the same HTML with a copy button (`goForm()` in
+`src/worker.js` and `public/app.js`, kept in step). On `/api` itself the form works without JavaScript too, which is
+why the CSP's `form-action` is `'self'` rather than `'none'`: the form may only submit to this site.
 
 ### Subnet calculator
 
@@ -689,7 +768,8 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   (`/github.com`) redirects to its DNS page. Invalid lookups (`/whois/not-a-domain!`) show the error
   in the terminal instead of raw JSON. None of these pages are indexed by search engines.
 - Inside the terminal, every lookup updates the address bar, Back/Forward replay results, ASNs and
-  prefixes are clickable, and the `share` command copies the current link. Prefixes on ASN pages
+  prefixes are clickable, and each result's `[share] [copy] [md]` buttons (and the `share` command) share its
+  link (see "Share, copy and copy md"). Prefixes on ASN pages
   open the subnet calculator (`/cidr/<prefix>`), whose routing section asks RIPEstat only, and upstreams open their
   own ASN pages (RIPEstat too), so crawlers following them never spend the IPinfo budget. Keep it that way: an ASN
   page must not link to an IP lookup (`/<ip>`).
@@ -814,6 +894,7 @@ Edit `public/sponsors.json` and run `npx wrangler deploy` to change it:
 | `weight` | Relative chance when several sponsors match (default 1) |
 | `label` | Optional tag text instead of `sponsored`, e.g. `affiliate` |
 
+Nothing the visitor copies or shares (`copy`, `copy md`, `share`) carries the sponsored line.
 Targeting by result type works without tracking: a VPN offer fits `check`, a hosting offer fits `asn`.
 `whoami` has no VPN signal, so a VPN offer on `whoami` is also shown to visitors who are already on a VPN;
 `check` only appears when leaktest finds no VPN.
@@ -837,6 +918,7 @@ The policy is a plain-language template, not legal advice.
 | Accessibility help | `access` command, or the "accessibility" link in the footer |
 | Back to defaults | `reset` forgets the saved theme and CRT setting, restoring automatic high-contrast detection |
 | Reduced motion | Follows the system setting: map zoom, pulse and label animation are skipped |
+| Keyboard | Tab completes at the prompt, but on an empty prompt it moves focus on, and Shift+Tab always does, so the terminal never traps the keyboard. The share buttons are real buttons with names (`Copy the address 8.8.8.8`) and say "copied" in place; screen readers hear what was copied, Tab's matches and Ctrl+R's finds |
 | Screen readers | One spoken summary per result plus every error, instead of each line as it types out |
 | Non-color cues | Errors and notes carry `ERR` / `NOTE` tags; status colors avoid red-vs-green |
 | Windows High Contrast | Forced-color mode is respected; effects are dropped |
@@ -857,7 +939,8 @@ fonts, images and map data are served directly by Cloudflare, which is free and 
 headers from `public/_headers`. A first visit costs 1 Worker request (the homepage carries the visitor's
 address, so the terminal doesn't call the API) and each further lookup or page 1, so the free plan's 100,000
 requests a day covers up to about 100,000 visits. Every curl call (`/help`, `/asn`, `/8.8.8.8/org`, a
-`?format=text` lookup) is one request too; `/openapi.json` and `/llms.txt` are not. A `leaktest` costs two (`/api/check`
+`?format=text` lookup) is one request too; `/openapi.json`, `/llms.txt` and `/opensearch.xml` are not. A search
+through `/go` is one request for the redirect plus the page it lands on (the redirect itself makes no outside call). A `leaktest` costs two (`/api/check`
 and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
 which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
 requests. `/me`, `/line` and `/expect/...` are one request each, with no other cost: no subrequest, no Durable
@@ -899,7 +982,8 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | Private, loopback, CGNAT, multicast and documentation addresses rejected before any upstream call | `nonPublicReason()` in `src/worker.js` | |
 | Redirects for router-address typos take their Location from `SITEMAP_PATHS`, never from the request, so they can't be pointed anywhere else; the query string is dropped | `routerTypo()` in `src/worker.js`, tested by `tools/check_seo.sh` | |
 | RIPEstat answers are read with a size cap (a big network's answer can run to megabytes, which would use up the CPU limit), the AS paths come from three collectors only, and every value is checked before use (AS numbers, prefixes, dates) | `ripestat()`, `routeLookup()`, `upstreams()` in `src/worker.js` | |
-| Strict Content-Security-Policy (no inline scripts or styles; the only outside hosts are ipify, for the visitor's other IP version, and, once the DNS leak test is set up, `https://*.dl.ipterm.net` (the configured zone) for its lookups), nosniff, no framing, HSTS, no referrer, locked-down browser permissions | `secure()` and `cspFor()` in `src/worker.js` | Loosen the CSP if you add ads or analytics |
+| Strict Content-Security-Policy (no inline scripts or styles; the only outside hosts are ipify, for the visitor's other IP version, and, once the DNS leak test is set up, `https://*.dl.ipterm.net` (the configured zone) for its lookups; forms may only submit to this site), nosniff, no framing, HSTS, no referrer, locked-down browser permissions | `secure()` and `cspFor()` in `src/worker.js` | Loosen the CSP if you add ads or analytics |
+| Address-bar search (`/go`) redirects only to a path on this site, built from parsed values, never from the input; hostile input is a 400 | `goTarget()` and `goLocation()` in `src/worker.js`; `tools/check_go.sh` | See "Address-bar search" |
 | Only GET and HEAD accepted | `route()` in `src/worker.js` | |
 | IPinfo token kept server-side as a secret | `wrangler secret put` | |
 | proxycheck.io key kept server-side as a secret, masked in logs; its answers validated field by field (VPN name limited to plain letters, digits and punctuation) | `wrangler secret put`, `parseProxycheck` | |
@@ -935,6 +1019,9 @@ Logs name the service and error only: never the visitor's IP or your API token.
 ```sh
 npx wrangler dev
 ```
+
+`sh tools/check_previews.sh` (link previews and crawlers get pages, scripts get JSON) and `sh tools/check_go.sh`
+(address-bar search, hostile inputs included) run against it.
 
 Note that `request.cf` location data is limited when running locally, and `ping` says it can't run there:
 it needs Cloudflare's edge, which answers `/cdn-cgi/trace` on the deployed site. The port check sees
