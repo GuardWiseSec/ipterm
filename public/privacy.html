@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Privacy policy | ipterm</title>
+<meta name="description" content="What ipterm processes when you use it: no accounts, no cookies, no tracking.">
+<link rel="canonical" href="%ORIGIN%/privacy">
+<meta property="og:title" content="Privacy policy | ipterm">
+<meta property="og:image" content="%ORIGIN%/og.png">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#030805">
+<script src="/prefs.js"></script>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="doc">
+  <header class="bar">
+    <div class="brand"><a class="logo" href="/">ip<b>term</b></a><span class="ver">privacy policy</span></div>
+    <span class="doc-tools"><button type="button" class="mode-btn" data-theme-toggle>light</button><a class="doc-back" href="/">← back to the terminal</a></span>
+  </header>
+
+  <main class="doc-body">
+    <p class="ln echo"><span class="ps1">guest@ipterm:~$</span> cat privacy.txt</p>
+    <h1>Privacy policy</h1>
+    <p class="doc-meta">Last updated: October 14, 2026</p>
+
+    <p class="doc-lede">ipterm has no accounts, sets no cookies and runs no analytics or tracking. This page explains the small amount of information it has to handle to work.</p>
+
+    <h2>What ipterm processes</h2>
+    <dl class="kv doc-kv">
+      <dt>your IP address</dt>
+      <dd>Every website receives your IP address when you visit it. ipterm shows it back to you. It is also used as a counter for about one minute to stop automated abuse (rate limiting), then discarded. When you look up an address or run the privacy check, a scrambled form of your IP (a one-way hash whose key changes every hour) is counted for up to an hour so one visitor can't use up the detailed location and VPN-detection data for everyone; it is kept only in memory and then forgotten. ipterm does not store your IP.</dd>
+      <dt>approximate location</dt>
+      <dd>Your city, region, network and time zone come from Cloudflare, which hosts ipterm and derives them from your IP address as part of delivering the page. ipterm displays them and does not store them.</dd>
+      <dt>your other IP address</dt>
+      <dd>A connection uses either IPv4 or IPv6, so ipterm only sees one of your addresses. To show the other one, your browser asks <a href="https://www.ipify.org/" rel="noopener" target="_blank">ipify</a>, a free, open-source service that states it logs no visitor information, which address you have on the other protocol. ipify receives your IP address as part of that request and nothing else. ipterm does not store the result.</dd>
+      <dt>addresses you look up</dt>
+      <dd>When you look up an IP address, that address is sent to IPinfo to find its owner and location, and, unless IPinfo already recognizes it as a VPN or proxy, to proxycheck.io to check whether it is one. When you look up a network (ASN), its number is sent to RIPEstat, and registry (whois) lookups go to the regional internet registries. When you look up a domain, its name is sent to Cloudflare's DNS resolver (1.1.1.1), which is also used to find hostnames; a domain whois lookup sends the name to that domain's registry and registrar. Your own IP address is not passed to these services as part of the lookup, except when you run the privacy check described below.</dd>
+      <dt>privacy check (leaktest)</dt>
+      <dd>Only if you run the <code>leaktest</code> command or open the leak test page: your IP address, and your address on the other IP version if you have one, is looked up with IPinfo and proxycheck.io to see whether it is recognized as a VPN, proxy or data-center address (and which VPN service, if known), your browser contacts a STUN server run by Cloudflare (stun.cloudflare.com) to see which public addresses WebRTC reveals, and your device's time zone is compared with your IP's location inside your browser. The check's results are shown to you and not saved. As with any lookup, IPinfo's answer for an address is cached for up to six hours, and proxycheck.io's for up to one hour, so repeat lookups are fast; those cache entries contain only the address and its network details, nothing about you or your browser. ipterm asks proxycheck.io not to keep these queries in its log.</dd>
+      <dt>cached results</dt>
+      <dd>Lookup results are cached for up to six hours so repeated lookups are fast. The cache is keyed by the address that was looked up, with no record of who asked (if you look up or check your own address, that entry is for your address).</dd>
+      <dt>browser storage</dt>
+      <dd>If you change the color theme or turn off the CRT effects, your choice is saved in your own browser (local storage). It never leaves your device and you can clear it at any time.</dd>
+    </dl>
+
+    <h2>Hosting and service providers</h2>
+    <p>ipterm runs on <a href="https://www.cloudflare.com/privacypolicy/" rel="noopener" target="_blank">Cloudflare</a>, which processes requests to deliver the site and may keep limited operational logs under its own privacy policy. Lookups use <a href="https://ipinfo.io/privacy-policy" rel="noopener" target="_blank">IPinfo</a>, <a href="https://proxycheck.io/privacy/" rel="noopener" target="_blank">proxycheck.io</a> and <a href="https://www.ripe.net/about-us/legal/ripe-ncc-privacy-statement/" rel="noopener" target="_blank">RIPEstat</a> as described above, and ipify shows your other IP address. The site's fonts and map data are served from ipterm itself, so no font or map service sees your visit.</p>
+
+    <h2>Sponsored links</h2>
+    <p>ipterm may show one short line marked <span class="tag">sponsored</span> next to some results. It is plain text and a link: no ad scripts, no tracking pixels and no cookies, and nothing about you is shared with sponsors. Some sponsored links include a referral code that identifies ipterm, not you, so the sponsor can credit the visit. Once you click through, the sponsor's own privacy policy applies.</p>
+
+    <h2>Your choices and rights</h2>
+    <p>Because ipterm does not keep personal information tied to you, there is usually nothing to access, export or delete. If you have a question or a request under privacy laws such as the GDPR or CCPA, contact us using the address below and we will respond.</p>
+
+    <h2>Children</h2>
+    <p>ipterm is a general technical tool and is not directed at children under 13.</p>
+
+    <h2>Changes</h2>
+    <p>If ipterm starts handling information differently, for example by adding analytics, this page will be updated first and the date at the top will change.</p>
+
+    <h2>Contact</h2>
+    <p>Questions about this policy: <a href="mailto:contact@ipterm.net">contact@ipterm.net</a></p>
+  </main>
+</div>
+</body>
+</html>

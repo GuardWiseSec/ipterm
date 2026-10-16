@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>How to find your router&#x27;s IP address | ipterm</title>
+<meta name="description" content="Find your router&#x27;s IP address (default gateway) on Windows, Mac, Linux, iPhone and Android, plus the most common default addresses and what to do if you can&#x27;t log in.">
+<link rel="canonical" href="%ORIGIN%/guides/find-router-ip">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="ipterm">
+<meta property="og:title" content="How to find your router&#x27;s IP address">
+<meta property="og:description" content="Find your router&#x27;s IP address (default gateway) on Windows, Mac, Linux, iPhone and Android, plus the most common default addresses and what to do if you can&#x27;t log in.">
+<meta property="og:url" content="%ORIGIN%/guides/find-router-ip">
+<meta property="og:image" content="%ORIGIN%/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#030805">
+<script src="/prefs.js"></script>
+<link rel="stylesheet" href="/app.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Article","headline":"How to find your router's IP address","description":"Find your router's IP address (default gateway) on Windows, Mac, Linux, iPhone and Android, plus the most common default addresses and what to do if you can't log in.","datePublished":"2026-10-12","dateModified":"2026-10-12","author":{"@type":"Organization","name":"ipterm"},"publisher":{"@type":"Organization","name":"ipterm"},"mainEntityOfPage":"%ORIGIN%/guides/find-router-ip","image":"%ORIGIN%/og.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"ipterm","item":"%ORIGIN%/"},{"@type":"ListItem","position":2,"name":"Guides","item":"%ORIGIN%/guides"},{"@type":"ListItem","position":3,"name":"How to find your router's IP address","item":"%ORIGIN%/guides/find-router-ip"}]}]}</script>
+</head>
+<body>
+<div class="doc">
+  <header class="bar">
+    <div class="brand"><a class="logo" href="/">ip<b>term</b></a><span class="ver">guides</span></div>
+    <span class="doc-tools"><button type="button" class="mode-btn" data-theme-toggle>light</button><a class="doc-back" href="/">← back to the terminal</a></span>
+  </header>
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="/">ipterm</a><span aria-hidden="true">/</span><a href="/guides">guides</a><span aria-hidden="true">/</span><span aria-current="page">router IP</span></nav>
+  <main class="doc-body">
+    <p class="ln echo"><span class="ps1">guest@ipterm:~$</span> man router-ip</p>
+    <h1>How to find your router&#x27;s IP address</h1>
+    <p class="doc-meta">Updated October 12, 2026 · 2 min read</p>
+    <p class="doc-lede">Your router's IP address, also called the <em>default gateway</em>, is the address you type into a browser to open the router's settings page. It is usually 192.168.1.1 or 192.168.0.1, but it varies by brand and internet provider, so the surest way is to ask your device.</p>
+<h2>Windows</h2>
+<p>Open <strong>Command Prompt</strong> or <strong>PowerShell</strong> and run:</p>
+<pre class="doc-pre"><code>ipconfig</code></pre>
+<p>Find the adapter you're connected with (Wi-Fi or Ethernet). The address next to <strong>Default Gateway</strong> is your router.</p>
+
+<h2>Mac</h2>
+<p>Open <strong>System Settings → Wi-Fi</strong> (or <strong>Network</strong> for a cable connection), click <strong>Details</strong> next to your network, then open <strong>TCP/IP</strong>. The <strong>Router</strong> field is the address. In Terminal:</p>
+<pre class="doc-pre"><code>route -n get default | grep gateway</code></pre>
+
+<h2>Linux</h2>
+<pre class="doc-pre"><code>ip route | grep default</code></pre>
+<p>The address after <code>default via</code> is your router.</p>
+
+<h2>iPhone and iPad</h2>
+<p>Go to <strong>Settings → Wi-Fi</strong>, tap the <strong>ⓘ</strong> next to your network, and look for <strong>Router</strong>.</p>
+
+<h2>Android</h2>
+<p>The location varies by phone maker. It is usually under <strong>Settings → Network &amp; internet → Wi-Fi</strong> (or <strong>Connections</strong>): tap your network, open its details or advanced options, and look for <strong>Gateway</strong> or <strong>Router</strong>.</p>
+
+<h2>Common default router addresses</h2>
+<div class="table-wrap"><table class="doc-table">
+<thead><tr><th>Address</th><th>Often used by</th></tr></thead>
+<tbody>
+<tr><td><a href="/192.168.1.1">192.168.1.1</a></td><td>The most common default across many router brands</td></tr>
+<tr><td><a href="/192.168.0.1">192.168.0.1</a></td><td>Another very common default</td></tr>
+<tr><td><a href="/10.0.0.1">10.0.0.1</a></td><td>Many internet provider gateways, including Xfinity</td></tr>
+<tr><td><a href="/192.168.1.254">192.168.1.254</a></td><td>Some provider gateways, including AT&amp;T</td></tr>
+<tr><td><a href="/192.168.100.1">192.168.100.1</a></td><td>Status pages of many cable modems (separate from the router)</td></tr>
+</tbody></table></div>
+
+<h2>Why the address works for everyone</h2>
+<p>These are <a href="/guides/private-ip-ranges">private addresses</a>. They only exist inside your home network, so millions of homes can use 192.168.1.1 at the same time without conflict. That also means nobody can reach your router at that address from the internet, and it can't be traced to a location.</p>
+
+<h2>If you can't log in</h2>
+<ul>
+<li>The default username and password are usually printed on a label on the router. If you've never changed them, change them now: a default admin password is one of the most common ways home networks get taken over.</li>
+<li>Some provider gateways and mesh systems (such as Google Nest Wifi or Eero) are managed through a phone app instead of a web page.</li>
+<li>If nothing loads, check that you're on the router's network, not mobile data or a VPN.</li>
+</ul>
+    <p class="doc-try"><strong>Try it</strong>Look up <a href="/192.168.1.1">192.168.1.1</a> or <a href="/192.168.0.1">192.168.0.1</a> to see what ipterm says about common router addresses.</p>
+    <h2>Related guides</h2>
+    <ul><li><a href="/guides/private-ip-ranges">Private IP address ranges explained</a></li><li><a href="/guides/what-your-ip-reveals">What your IP address reveals (and what it doesn’t)</a></li></ul>
+  </main>
+</div>
+</body>
+</html>

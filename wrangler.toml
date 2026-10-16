@@ -1,0 +1,81 @@
+name = "ipterm"
+main = "src/worker.js"
+compatibility_date = "2026-06-01"
+
+# Serve only on your own domain (ipterm.net, set up in the dashboard). The *.workers.dev address and
+# preview URLs would be a second copy of the site where the cache doesn't work, so every lookup there
+# would spend the IPinfo and proxycheck.io allowances. Custom domains are not affected by these.
+workers_dev = false
+preview_urls = false
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+# The Worker runs first for pages and the API (homepage, /<ip>, /AS<number>, /api/*, guides, sitemap).
+# Static files (CSS, JS, fonts, images, map data) skip the Worker: Cloudflare serves them free and
+# unlimited, and public/_headers gives them their security headers. Add any new static file here.
+run_worker_first = [
+  "/*",
+  "!/app.css",
+  "!/app.js",
+  "!/land.js",
+  "!/cidr.js",
+  "!/prefs.js",
+  "!/sponsors.json",
+  "!/site.webmanifest",
+  "!/favicon.ico",
+  "!/favicon.svg",
+  "!/apple-touch-icon.png",
+  "!/icon-192.png",
+  "!/icon-512.png",
+  "!/og.png",
+  "!/fonts/*",
+]
+
+[vars]
+# Set to "true" to let other websites call your API from the browser (CORS).
+# curl and server-side scripts work either way.
+PUBLIC_API = "false"
+
+# Which IPinfo plan your IPINFO_TOKEN is on: "lite" (free: country and network only) or
+# "core" (paid: adds city, region, coordinates, time zone and connection type).
+# If Core's monthly quota runs out, lookups fall back to Lite automatically.
+IPINFO_PLAN = "core"
+
+# Core only: at most this many fresh Core lookups per day (UTC), so one scraper can't use up the
+# month. 4500 a day is about 140,000 a month, inside Core's 150,000. Past it, lookups use Lite.
+IPINFO_DAILY_BUDGET = "4500"
+
+# Core only: at most this many fresh Core lookups per hour, so a burst only uses up that hour and
+# city-level results return the next hour. 375 is about twice an even share of the daily budget,
+# leaving room for busy hours. Leave it out to use that default; "0" turns hourly pacing off.
+IPINFO_HOURLY_BUDGET = "375"
+
+# Core only: at most this many fresh Core lookups per visitor (IP, or IPv6 /64) per hour, so one
+# visitor can't use up the hourly budget for everyone. Past it, that visitor gets Lite. "0" = no cap.
+IPINFO_VISITOR_HOURLY = "30"
+
+# proxycheck.io (optional second opinion on VPN / proxy / Tor; turns on once the PROXYCHECK_KEY
+# secret is set): at most this many queries a day (UTC). The free plan allows 1,000; 900 leaves a
+# margin. Hourly pacing defaults to twice an even share (75) and each visitor to 10 an hour; set
+# PROXYCHECK_HOURLY_BUDGET / PROXYCHECK_VISITOR_HOURLY to change them. "0" turns proxycheck.io off.
+PROXYCHECK_DAILY_BUDGET = "900"
+
+# The daily counter for IPINFO_DAILY_BUDGET and PROXYCHECK_DAILY_BUDGET (a Durable Object; included in the free Workers plan).
+[[durable_objects.bindings]]
+name = "BUDGET"
+class_name = "LookupBudget"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LookupBudget"]
+
+# Per-visitor limit on lookups: 30 requests per 60 seconds.
+# namespace_id is any number you choose that is unique within your Cloudflare account.
+[[ratelimits]]
+name = "LOOKUP_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60

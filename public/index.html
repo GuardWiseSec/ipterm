@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ipterm · What is my IP address? Terminal IP lookup</title>
+<meta name="description" content="See your IP address, network and approximate location, or look up any IPv4, IPv6 address or ASN from a terminal in your browser.">
+<!--SEO-->
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<meta name="theme-color" content="#030805">
+<link rel="preload" href="/fonts/ibm-plex-mono-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<script src="/prefs.js"></script>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="bar">
+    <h1 class="sr-only">ipterm: IP address and network lookup</h1>
+    <div class="brand"><a class="logo" href="/">ip<b>term</b></a><span class="ver">IP lookup · v0.2</span></div>
+    <div class="status"><button type="button" class="mode-btn" data-theme-toggle>light</button><span class="pill" id="mode">connecting</span><span class="clock" id="clock">--:--:-- UTC</span></div>
+    <p class="intro">An IP address is the number websites see when you connect to them. Yours is in the terminal below. <a href="#about-h">What is ipterm?</a></p>
+  </header>
+
+  <div class="crt">
+    <main class="screen" id="screen">
+      <div id="out" role="region" aria-label="Terminal output"><!--STATIC--></div>
+      <form class="prompt" id="line" autocomplete="off">
+        <label class="ps1" for="cmd">guest@ipterm:~$</label>
+        <input id="cmd" name="cmd" type="text" enterkeyhint="go" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="type an IP, domain or help" aria-label="Command">
+      </form>
+    </main>
+  </div>
+
+  <nav class="chips" aria-label="Quick commands">
+    <span>run</span>
+    <button type="button" data-cmd="whoami">whoami</button>
+    <button type="button" data-cmd="lookup 8.8.8.8">lookup 8.8.8.8</button>
+    <button type="button" data-cmd="lookup github.com">lookup github.com</button>
+    <button type="button" data-cmd="leaktest">leaktest</button>
+    <button type="button" data-cmd="lookup 192.168.1.1">lookup 192.168.1.1</button>
+    <button type="button" data-cmd="theme">theme</button>
+    <button type="button" data-cmd="help">help</button>
+  </nav>
+  <footer class="foot"><span class="foot-links"><a href="/privacy">privacy policy</a><button type="button" class="foot-btn" data-cmd="access">accessibility</button></span><span>no cookies · no tracking · sponsored links are labeled</span></footer>
+  <div id="sr-status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+</div>
+
+<section class="below" aria-labelledby="about-h">
+  <div class="below-inner">
+    <h2 id="about-h">What is ipterm?</h2>
+    <p class="below-lede">ipterm is a free IP address lookup that works like a terminal. Run <code>whoami</code> to see your public IP address, the network (ISP) it belongs to and its approximate location, check whether your browser or VPN leaks more than that with <code>leaktest</code>, or look up any IPv4 or IPv6 address, any domain's DNS records, registry (whois) records and any autonomous system (ASN). Every result has its own page you can share. No accounts, no cookies, no tracking.</p>
+
+    <div class="below-grid">
+      <div>
+        <h3>Public DNS resolvers</h3>
+        <ul class="link-list">
+          <li><a href="/8.8.8.8" data-cmd="lookup 8.8.8.8">8.8.8.8</a> Google Public DNS</li>
+          <li><a href="/1.1.1.1" data-cmd="lookup 1.1.1.1">1.1.1.1</a> Cloudflare DNS</li>
+          <li><a href="/9.9.9.9" data-cmd="lookup 9.9.9.9">9.9.9.9</a> Quad9</li>
+          <li><a href="/208.67.222.222" data-cmd="lookup 208.67.222.222">208.67.222.222</a> OpenDNS</li>
+          <li><a href="/2001:4860:4860::8888" data-cmd="lookup 2001:4860:4860::8888">2001:4860:4860::8888</a> Google, IPv6</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Router addresses</h3>
+        <ul class="link-list">
+          <li><a href="/192.168.1.1" data-cmd="lookup 192.168.1.1">192.168.1.1</a> most common default</li>
+          <li><a href="/192.168.0.1" data-cmd="lookup 192.168.0.1">192.168.0.1</a> common default</li>
+          <li><a href="/10.0.0.1" data-cmd="lookup 10.0.0.1">10.0.0.1</a> many ISP gateways</li>
+          <li><a href="/192.168.1.254" data-cmd="lookup 192.168.1.254">192.168.1.254</a> some ISP gateways</li>
+          <li><a href="/192.168.100.1" data-cmd="lookup 192.168.100.1">192.168.100.1</a> cable modem status</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Networks (ASNs)</h3>
+        <ul class="link-list">
+          <li><a href="/AS15169" data-cmd="asn AS15169">AS15169</a> Google</li>
+          <li><a href="/AS13335" data-cmd="asn AS13335">AS13335</a> Cloudflare</li>
+          <li><a href="/AS16509" data-cmd="asn AS16509">AS16509</a> Amazon</li>
+          <li><a href="/AS8075" data-cmd="asn AS8075">AS8075</a> Microsoft</li>
+          <li><a href="/AS7922" data-cmd="asn AS7922">AS7922</a> Comcast</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Guides</h3>
+        <ul class="link-list guides">
+          <li><a href="/guides/find-router-ip">How to find your router's IP address</a></li>
+          <li><a href="/guides/private-ip-ranges">Private IP address ranges explained</a></li>
+          <li><a href="/guides/what-your-ip-reveals">What your IP address reveals</a></li>
+          <li><a href="/guides/ipv4-vs-ipv6">IPv4 vs IPv6</a></li>
+          <li><a href="/guides/what-is-an-asn">What is an ASN?</a></li>
+          <li><a href="/guides/subnet-cheat-sheet">Subnet mask cheat sheet</a></li>
+        </ul>
+      </div>
+    </div>
+
+    <h3>From the command line</h3>
+    <pre class="doc-pre"><code>curl %ORIGIN%                     # your IP as plain text
+curl %ORIGIN%/json                # your IP details as JSON
+curl %ORIGIN%/8.8.8.8             # any IP as JSON
+curl %ORIGIN%/AS13335             # any network as JSON
+curl %ORIGIN%/dns/example.com     # DNS records as JSON
+curl %ORIGIN%/whois/8.8.8.8       # registry record as JSON
+curl %ORIGIN%/whois/example.com   # domain registration as JSON
+curl %ORIGIN%/cidr/10.0.0.0/22    # subnet calculation as JSON</code></pre>
+    <p class="below-note">IP location is approximate. It usually points to your internet provider's regional hub, not a street address.</p>
+  </div>
+</section>
+
+<!--INITIAL-->
+<script src="/land.js" defer></script>
+<script src="/cidr.js" defer></script>
+<script src="/app.js" defer></script>
+</body>
+</html>
