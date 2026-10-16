@@ -1,0 +1,3 @@
+# These files run on a Linux server: keep Unix line endings even in a Windows checkout
+# (a setup.sh with CRLF endings fails on its first line).
+* text=auto eol=lf

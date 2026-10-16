@@ -1,0 +1,24 @@
+# HTTPS in front of the DNS leak test API (dnsleak-server, on 127.0.0.1:8053). The Worker needs a host
+# name with a certificate, since Workers can't fetch a bare IP address.
+# Caddy gets and renews the certificate from Let's Encrypt by itself, over port 443 (the TLS-ALPN
+# challenge), so port 80 stays closed. There is no `log` directive, so Caddy keeps no access log.
+# setup.sh installs this as /etc/caddy/Caddyfile, with the host name replaced if you chose another.
+{
+	auto_https disable_redirects
+}
+
+dlapi.ipterm.net {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	header -Server
+	@api path /v1/resolvers /healthz
+	handle @api {
+		reverse_proxy 127.0.0.1:8053
+	}
+	handle {
+		respond 404
+	}
+}
