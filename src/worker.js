@@ -587,7 +587,7 @@ async function ipRoute(io, q, html) {
   const p = parseIp(String(q || '').trim());
   if (!p) return reply(io, { error: 'Not a valid IPv4 or IPv6 address.' }, 400);
   const ip = canonIp(p);
-  if (sameIp(q, io.me) && !html) return guard(() => selfInfo(io), d => reply(io, d, 200, {}, ipText), (msg, status) => reply(io, { error: msg }, status));
+  if (sameIp(q, io.me) && !html) return guard(() => withBlock(io, ip, p, selfInfo(io)), d => reply(io, d, 200, {}, ipText), (msg, status) => reply(io, { error: msg }, status));
 
   const reason = nonPublicReason(p);
   if (reason) {
@@ -595,7 +595,7 @@ async function ipRoute(io, q, html) {
     return html ? ipPage(io, d, 200) : reply(io, { error: `${ip} is not a public address (${reason}), so there is nothing to look up.`, ...d }, 400);
   }
   return guard(
-    () => withPrivacy(io, ip, ipData(io, ip, p)),
+    () => withBlock(io, ip, p, ipData(io, ip, p), d => withPrivacy(io, ip, d)),
     // Browsers may reuse an answer for 5 minutes; the Worker's own cache (6 hours) keeps repeats cheap.
     d => html ? ipPage(io, d, 200) : reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, ipText),
     (msg, status) => html ? ipPage(io, { ip, version: p.v, error: msg }, status) : reply(io, { error: msg }, status),
@@ -644,6 +644,14 @@ async function withPrivacy(io, ip, pending) {
   if (!d || d.bogon || (d.flags && d.flags.anonymous)) return d;
   const privacy = await privacyData(io, ip);
   return privacy ? { ...d, privacy } : d;
+}
+
+// Adds the registry date of the address's network (blockData). It starts once the lookup has settled, so it
+// knows whether that already counted toward the visitor's rate limit, and runs beside what comes next (next:
+// withPrivacy's VPN check), so it adds no wait of its own unless the registry is the slower of the two.
+async function withBlock(io, ip, p, pending, next = d => d) {
+  const [d, block] = await Promise.all([pending.then(next), blockData(io, ip, p, pending)]);
+  return block && !d.bogon ? { ...d, block } : d;
 }
 
 function ipData(io, ip, p, opts = {}) {
@@ -1205,6 +1213,7 @@ function ipText(d, o) {
     ['network', [d.asn, d.org].filter(Boolean).join('  ')], ['domain', d.asDomain],
     ['location', [d.city, d.region, ctry].filter(Boolean).join(', ')], ['continent', d.city ? null : d.continent], ['postal', d.postal],
     ['coordinates', d.lat != null && d.lon != null ? `${d.lat}, ${d.lon}` : null], ['time zone', d.timezone],
+    ['block', blockText(d.block)],
     ['connection', connectionText(d)], ['vpn / proxy', self ? null : vpnText(d), vpnTone],
     ['edge', d.colo ? `${d.colo} (the Cloudflare data center that answered you)` : null],
     ['source', (SOURCE_NAMES[d.source] || d.source || '') + (d.privacy ? ' + proxycheck.io' : '')],
@@ -1409,6 +1418,8 @@ function helpBody(h, env = {}) {
       [`curl ${h}/8.8.8.8/text`, 'the same as aligned lines'],
       [`curl ${h}/8.8.8.8/country`, 'one value: asn, org, cc, country,'],
       ['', 'continent or hostname'],
+      ['A block registered in the last 180 days gets a line saying so: location'],
+      ['databases lag behind new blocks, so sites may disagree about where it is.'],
     ]),
     block('NETWORKS, DNS, MAIL, REGISTRY RECORDS, SUBNETS', [
       [`curl ${h}/AS13335`, 'a network and its address blocks'],
@@ -1497,17 +1508,20 @@ async function guard(step, ok, fail = (msg, status) => json({ error: msg }, stat
 
 /* ---------- data ---------- */
 
+const cacheReq = (io, key) => new Request(`${io.url.origin}/__cache/${key}`);
+function cachePut(io, key, data, ttl) {
+  io.ctx.waitUntil(caches.default.put(cacheReq(io, key), new Response(JSON.stringify(data), {
+    headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${ttl}` },
+  })));
+}
+
 async function cached(io, key, ttl, produce) {
-  const cache = caches.default;
-  const req = new Request(`${io.url.origin}/__cache/${key}`);
-  const hit = await cache.match(req);
+  const hit = await caches.default.match(cacheReq(io, key));
   if (hit) return hit.json();
   await limit(io);                       // only cache misses cost an upstream call
   const data = await produce();
   if (data && typeof data._ttl === 'number') { ttl = data._ttl; delete data._ttl; }   // a result can ask to be kept shorter
-  io.ctx.waitUntil(cache.put(req, new Response(JSON.stringify(data), {
-    headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${ttl}` },
-  })));
+  cachePut(io, key, data, ttl);
   return data;
 }
 
@@ -1535,6 +1549,7 @@ async function limit(io) {
   let ok = true;
   try { ok = (await io.env.LOOKUP_LIMITER.limit({ key: limitKey(io.me) })).success; } catch { ok = true; } // fail open
   if (!ok) throw new RateLimited();
+  io.charged = true;                     // this request has counted once (blockData rides on it)
 }
 
 /* Tor exits: leaktest says "Tor" when the visitor's address is a Tor exit. The Tor Project publishes the
@@ -3471,6 +3486,56 @@ async function rdapLookup(target, origin) {
   };
 }
 
+/* ---------- a lookup's block: its registry date ----------
+   Location databases (IPinfo, IP2Location, MaxMind...) place a block from its registration, its holder's geofeed
+   and their own measurements. For months after a block goes to someone new (a new customer, or a lease through a
+   broker), they often still place it where its last user was, or each somewhere different, so two sites can name
+   two cities for one address. So an address lookup carries the date the registry record of its network (the most
+   specific one, as whois <ip> shows it, from the same cache entry, kept a day) was created, and the text, the page
+   and the terminal add a line when that was within BLOCK_RECENT_DAYS. The date never holds a lookup up: past
+   BLOCK_WAIT the answer goes without it, and the registry's answer still fills the cache for the next one.
+   Crawlers and link previews only read the cache, so they never cause an RDAP query; anyone else's counts toward
+   their rate limit, riding on the lookup's own count when it made one (limit() sets io.charged). */
+const BLOCK_RECENT_DAYS = 180;
+const BLOCK_WAIT = 2500;
+async function blockData(io, ip, p, pending) {
+  if (nonPublicReason(p)) return null;
+  const key = 'whois/' + ip;               // whoisRoute's key for an address
+  try {
+    const hit = await caches.default.match(cacheReq(io, key));
+    if (hit) return blockOf(await hit.json());
+    const ua = io.request.headers.get('user-agent') || '';
+    if (PREVIEW_UA.test(ua) || CRAWLER_UA.test(ua)) return null;
+    await pending;                         // the lookup failed or was refused: no registry query either
+    if (!io.charged) await limit(io);
+    const fresh = rdapLookup({ ip, p }, io.url.origin).then(d => { cachePut(io, key, d, 86400); return d; });
+    io.ctx.waitUntil(fresh.catch(e => console.error('[ipterm] registry date skipped:', String((e && e.message) || e))));
+    return blockOf(await Promise.race([fresh, sleep(BLOCK_WAIT)]));
+  } catch { return null; }
+}
+
+// { network, registry, registered (the date part of the registry's own timestamp), days (calendar days from then
+// to today, UTC), recent }, or null when the registry has no record or no date for it.
+function blockOf(w) {
+  const day = w && w.found ? /^(\d{4}-\d{2}-\d{2})/.exec(w.registered || '') : null;
+  const t = day ? Date.parse(day[1]) : NaN;
+  if (!Number.isFinite(t)) return null;
+  const days = Math.max(0, Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - t) / 86400000));
+  return {
+    network: (w.cidrs || []).join(', ') || (w.range ? `${w.range.start} - ${w.range.end}` : null),
+    registry: w.registry || null, registered: day[1], days, recent: days <= BLOCK_RECENT_DAYS,
+  };
+}
+
+// The line for a recent block (null otherwise), in the text and on the page. app.js (blockLine) words it the same.
+function blockText(b) {
+  if (!b || !b.recent) return null;
+  const ago = b.days === 0 ? 'today' : b.days === 1 ? '1 day ago' : `${b.days} days ago`;
+  const rir = Object.values(REGISTRY).includes(b.registry) ? ` with ${b.registry}` : '';
+  return `${b.network || 'this block'} registered${rir} on ${b.registered} (${ago}): IP location databases often take months ` +
+    'to catch up with new or reassigned blocks, so sites may disagree about where this address is';
+}
+
 /* ---------- domain whois (RDAP) ---------- */
 // Domains have two layers: the registry that runs the extension (Verisign for .com, PIR for .org)
 // and the registrar the owner bought it from. The registry answers with dates, status and name
@@ -3801,7 +3866,7 @@ function ipPage(io, d, status) {
   const rows = [
     ['hostname', d.hostname], ['network', owner], ['domain', d.asDomain], ['location', place],
     ['coordinates', d.lat != null && d.lon != null ? `${d.lat}, ${d.lon}` : null], ['time zone', d.timezone],
-    ['connection', connectionText(d)], ['vpn / proxy', vpnText(d)],
+    ['block', blockText(d.block)], ['connection', connectionText(d)], ['vpn / proxy', vpnText(d)],
   ];
   const links = (/^AS\d{1,10}$/i.test(d.asn || '') ? `<p class="ln sys">More from this network: <a href="/${esc(d.asn)}">${esc(d.asn)}${d.org ? ' ' + esc(d.org) : ''}</a></p>` : '') +
     `<p class="ln sys">Registry record: <a href="/whois/${esc(ip)}">whois ${esc(ip)}</a> (owner and abuse contact)</p>` +

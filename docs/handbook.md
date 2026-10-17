@@ -204,6 +204,7 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | Other IPs: city, coordinates, time zone, connection type (optional) | IPinfo Core, with `IPINFO_PLAN = "core"` | Paid, monthly quota; falls back to Lite |
 | VPN / proxy / Tor second opinion, VPN service name (optional) | proxycheck.io, with the `PROXYCHECK_KEY` secret | Free, 1,000 a day; falls back to IPinfo alone |
 | Reverse DNS (hostname) | Cloudflare DNS-over-HTTPS | Free |
+| An address lookup's `block`: when its network's registry record was created (see "Recently registered blocks") | RDAP, the record and cache entry of `whois <ip>` | Free |
 | Mail checks: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI | Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file | Free |
 | Report cards (grade): DNSSEC, AAAA, CAA and HTTPS records, the site's redirect and security headers | Cloudflare DNS-over-HTTPS, the mail check, RDAP, plus up to five header-only requests to the domain's own site (`HEAD`, or a `GET` dropped unread when `HEAD` is refused) | Free |
 | Networks (ASNs): holder, prefixes, main upstreams | RIPEstat (`as-overview`, `announced-prefixes`, `asn-neighbours`) | Free, no key |
@@ -789,6 +790,54 @@ registered domain (`whois blog.github.com` shows github.com). Domain records are
 Every generic extension (.com, .org, .app, .xyz …) publishes RDAP, because ICANN requires it; some
 country extensions don't (.de and .io, for example), and ipterm says so instead of guessing.
 
+### Recently registered blocks
+
+Two sites often name two different cities for one address, and neither is necessarily broken. Location databases
+(IPinfo, which ipterm uses; IP2Location and MaxMind, which many other sites use) place a block from its registry
+record, its holder's geofeed and their own measurements, and for weeks or months after a block goes to someone new
+(a new customer, or a block leased through a broker) they often still place it where its previous user was, or
+each somewhere different. The case that prompted this: a /24 reassigned three months earlier (its record pointed to
+an address-leasing marketplace's geofeed, which had no entry for it), placed by IPinfo in one state and by
+IP2Location-based sites, as a data center, in the next state over, where a traceroute ended at the provider's router.
+
+So every lookup of a public address (`/<ip>`, `/<ip>/text`, `/<ip>/json`, `/api/lookup?ip=`, the page and the
+terminal's `lookup`, your own address included when you ask for it by number) carries `block`: when the registry
+record of the most specific network the address is in was created, as `whois <ip>` shows it:
+
+```json
+"block": { "network": "8.8.8.0/24", "registry": "ARIN", "registered": "2023-12-28", "days": 1024, "recent": false }
+```
+
+`registered` is the date part of the registry's own timestamp and `days` the calendar days from then to today
+(UTC), worked out at each answer, so a cached record never shows a stale count. When the record is at most 180
+days old (`BLOCK_RECENT_DAYS` in `src/worker.js`), `recent` is true and the text answer, the page and the terminal
+add one line, worded the same everywhere (`blockText()` in the Worker, `blockLine()` in `app.js`):
+
+```
+block        203.0.113.0/24 registered with ARIN on 2026-08-31 (47 days ago): IP location databases often take
+             months to catch up with new or reassigned blocks, so sites may disagree about where this address is
+```
+
+(one line in the real answer). It says when the record was made, not why: a new customer, a lease and a registry
+clean-up all look the same in RDAP, so ipterm doesn't guess. It isn't added to `/json`, `/text`, `whoami` or the
+homepage (your own address, from the edge: it would mean a registry request for nearly every visit) or to the
+one-value routes (`/8.8.8.8/org` stays one bare line).
+
+What it costs, and the limits on it (`blockData()` in `src/worker.js`):
+
+- No IPinfo or proxycheck.io budget: RDAP only, and from the same cache entry as `whois <ip>` (a day), so a whois
+  and a lookup of the same address share one registry request. An uncached address adds one RDAP request (plus
+  IANA's bootstrap file, kept a day, when an isolate has no copy yet).
+- It never holds a lookup up: the registry gets 2.5 seconds (`BLOCK_WAIT`), beside the proxycheck.io check, and
+  past that the answer goes out without `block`. The registry's answer still fills the cache for the next lookup.
+  A registry that fails just leaves `block` out.
+- Crawlers and link previews (`CRAWLER_UA`, `PREVIEW_UA`) only read the cache: a page they fetch shows the line
+  only if someone else's lookup or whois already asked the registry, so crawling address pages never sends a
+  request to RDAP.
+- Anyone else's registry request counts toward their rate limit (30 a minute), but rides on the lookup's own count
+  when the lookup made one (`limit()` sets `io.charged`), so a fresh lookup still costs one count, or two with
+  proxycheck.io, as before.
+
 ### Privacy check (leaktest)
 
 `leaktest` (or `dnsleak`) in the terminal, or the page `/leaktest` (which runs it on load; `/dnsleak`
@@ -1271,6 +1320,7 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | Protection | Where | How to change it |
 | --- | --- | --- |
 | Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them | `[[ratelimits]]` in `wrangler.toml` | Edit `limit` (period must be 10 or 60 seconds) |
+| A lookup's registry date (`block`): RDAP only, never IPinfo or proxycheck.io; crawlers and link previews only read the cache (shared with `whois <ip>`, a day); anyone else's registry request counts toward their rate limit, riding on the lookup's own count; 2.5 seconds at most, then the answer goes without it | `blockData()` in `src/worker.js`; `tools/check_block.mjs` | `BLOCK_RECENT_DAYS`, `BLOCK_WAIT`; see "Recently registered blocks" |
 | Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
 | DNS leak test: `/api/dnsleak` only from the ipterm page or a command-line tool, well-formed tokens only, rate limited; the VPS's API needs the `DNSLEAK_KEY` secret (compared in constant time), listens on 127.0.0.1 behind Caddy, hands each token's resolvers over once and forgets them; non-public resolver addresses never go to IPinfo | `dnsleakRoute()` in `src/worker.js`, `dnsleak-server/` | See "DNS leak test server" |
 | Shared leak test results: the code is made in the browser and holds only the grade and per-check flags (no IP, provider, location or resolver); the Worker decodes it strictly (a letter that doesn't match its checks is a 404); the page never runs the test, and isn't indexed | `public/leakgrade.js`, `leakShareRoute()` in `src/worker.js` | See "Shared results" |
@@ -1322,8 +1372,9 @@ Logs name the service and error only: never the visitor's IP or your API token.
 npx wrangler dev
 ```
 
-`sh tools/check_previews.sh` (link previews and crawlers get pages, scripts get JSON) and `sh tools/check_go.sh`
-(address-bar search, hostile inputs included) run against it.
+`sh tools/check_previews.sh` (link previews and crawlers get pages, scripts get JSON), `sh tools/check_go.sh`
+(address-bar search, hostile inputs included) and `node tools/check_block.mjs` (a lookup's registry date) run
+against it.
 
 Note that `request.cf` location data is limited when running locally, and `ping` says it can't run there:
 it needs Cloudflare's edge, which answers `/cdn-cgi/trace` on the deployed site. The port check sees
@@ -1338,9 +1389,19 @@ or JSON for every client, with colors only for `?color=1` and never on JSON, and
 hostile paths, noindex on non-public addresses and on the ASN, whois and `/cidr` pages that name a network holder who
 may be a private person, such an upstream listed by number only, `X-Robots-Tag: noindex` on the `/text` and `/json`
 forms, the sitemap index and its URL counts; `ROUTES=1` adds the routing section). Neither makes an IPinfo lookup;
-the `/text` and `/json` checks use the caller's own address (answered from `request.cf`), non-public addresses and
+the `/text` and `/json` checks use the caller's own address (answered from `request.cf`, plus RDAP for its `block`
+when it is public), non-public addresses and
 AS13335, the ASN pages and the routing section ask RIPEstat, and the whois pages RDAP. In Git Bash on Windows, run them with `MSYS_NO_PATHCONV=1` so paths like
 `/192.168.l.l` aren't rewritten.
+
+`node tools/check_block.mjs [site]` checks a lookup's `block` (see "Recently registered blocks"). First, with no
+server, the logic itself: `blockOf()` and `blockText()` read out of `src/worker.js` and `blockLine()` out of
+`app.js`, run on records dated relative to today (so the checks never age out the way a real recent block does),
+including the 180-day edge and the terminal's wording. Then, against the running copy, the field's shape and that
+the text has a `block` line exactly when `recent` is true, using the caller's own address asked for by number:
+locally `wrangler dev` lets the script be 8.8.8.8 through `CF-Connecting-IP`, and it also checks that a crawler
+gets no registry request for an uncached address. No IPinfo lookup unless `LOOKUPS=1`, which adds one of 8.8.8.8
+and checks that `/8.8.8.8/org` is still one bare line.
 
 ## License
 
