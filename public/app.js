@@ -685,6 +685,16 @@
       : ' (not a guarantee: new VPN servers are often unlisted)');
   }
 
+  // A lookup's block, when the registry record of the address's network is recent (the Worker's blockData):
+  // location databases lag behind new and reassigned blocks, so sites may place the address differently.
+  // Worded like blockText in worker.js.
+  const RIRS = ['ARIN', 'RIPE NCC', 'APNIC', 'LACNIC', 'AFRINIC'];
+  function blockLine(b) {
+    const ago = b.days === 0 ? 'today' : b.days === 1 ? '1 day ago' : `${b.days} days ago`;
+    return `${b.network || 'this block'} registered${RIRS.includes(b.registry) ? ' with ' + b.registry : ''} on ${b.registered} (${ago}): ` +
+      'IP location databases often take months to catch up with new or reassigned blocks, so sites may disagree about where this address is';
+  }
+
   async function render(p, ipText, d, isSelf) {
     const [cls, why] = classify(p);
     const head = el('div', 'head');
@@ -743,6 +753,7 @@
         f.append(a); rows.push(['coords', f]);
       }
       if (d.timezone) rows.push(['local time', localTime(d.timezone)]);
+      if (d.block && d.block.recent) rows.push(['block', blockLine(d.block)]);
       const conn = connection(d);
       if (conn) rows.push(['connection', conn]);
       if (isSelf && live) {                    // your own address is checked by leaktest, not here
@@ -2163,7 +2174,7 @@
         ['INFO', "never part of the grade: how your browser connects (TLS 1.3, HTTP/3 and post-quantum key exchange, from Cloudflare's edge), your browser language's country next to your IP's (expats and travelers differ for good reasons), and a local network address."],
         ['COMPARE', "run leaktest again after turning your VPN on or off, or after a fix, and it prints each line before → after: a line that would be \"a leak if you use a VPN\" becomes a confirmed leak, or not. The last run is kept in this tab's memory only, never stored. copy md gives only each line's status before → after (OK, LEAK or INFO): what either run found, and the verdict, stay on screen."],
         ['SHARE', "share after leaktest copies a link like /leaktest/r/1bjp. It holds only the grade, whether a VPN was on and which checks passed, leaked or weren't tested: no IP address, provider, location or resolver, so every browser with the same result gets the same link. It's made in your browser, and opening one never runs the test."]]],
-    lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
+    lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. When the registry record of its block is at most 180 days old, a block line says so: location databases often take months to catch up with new or reassigned blocks, so sites may disagree about where it is. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
       ['lookup 8.8.8.8', 'lookup 2606:4700:4700::1111', 'lookup github.com'], ['whois', 'asn', 'dig'], ['/8.8.8.8', '/8.8.8.8/org', '/8.8.8.8/text']],
     dig: ['dig <domain> [type]   or   dig <ip>', "DNS records from Cloudflare's resolver (1.1.1.1). With a type, just that type with its TTLs: A AAAA CNAME MX NS TXT CAA SOA SRV PTR DS DNSKEY HTTPS. With an IP address, its reverse DNS name.",
       ['dig example.com', 'dig gmail.com MX', 'dig github.com TXT', 'dig 8.8.8.8'], ['lookup', 'whois', 'mail'], ['/dns/example.com', '/dns/gmail.com/MX', '/dns/example.com?format=text']],
@@ -2406,7 +2417,7 @@
   // name your provider or place you: its network, domain and connection type, the location, local time
   // and data center.
   const SELF_DROP = ['hostname', 'IPv4', 'IPv6', 'postal', 'coords', 'decimal', 'hex', 'binary', 'rdns zone', 'expanded', '/64 prefix',
-    'network', 'domain', 'location', 'continent', 'local time', 'connection', 'edge'];
+    'network', 'domain', 'location', 'continent', 'local time', 'block', 'connection', 'edge'];
   // leaktest's: the browser language's country (the other lines are checks, and keep their status).
   const LEAK_DROP = ['language'];
   // What names or places you in a lookup of your own address (whoami's data, /api/check's, the other IP

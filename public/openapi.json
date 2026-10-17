@@ -464,7 +464,14 @@
           "timezone": { "type": ["string", "null"] },
           "colo": { "type": ["string", "null"], "description": "Your own address only: the Cloudflare data center" },
           "flags": { "type": "object", "description": "IPinfo Core only", "properties": { "mobile": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "anycast": { "type": "boolean" }, "satellite": { "type": "boolean" } } },
-          "privacy": { "type": "object", "description": "proxycheck.io's VPN / proxy / Tor opinion, when configured", "properties": { "vpn": { "type": "boolean" }, "proxy": { "type": "boolean" }, "tor": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "operator": { "type": ["string", "null"] }, "risk": { "type": ["integer", "null"] } } }
+          "privacy": { "type": "object", "description": "proxycheck.io's VPN / proxy / Tor opinion, when configured", "properties": { "vpn": { "type": "boolean" }, "proxy": { "type": "boolean" }, "tor": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "operator": { "type": ["string", "null"] }, "risk": { "type": ["integer", "null"] } } },
+          "block": { "type": "object", "description": "When the registry record of the most specific network the address is in was created (RDAP, the record whois shows). Lookups of a public address only (/{ip}, /{ip}/text, /{ip}/json, /api/lookup?ip=), not /json or the one-value routes; left out when the registry has no date, or didn't answer within about 2.5 seconds (try again a moment later). recent: within the last 180 days. Location databases often take months to catch up with new or reassigned blocks, so for a recent block sites may disagree about where the address is; the text answer adds a block line saying so.",
+            "properties": {
+              "network": { "type": ["string", "null"], "example": "8.8.8.0/24", "description": "The network's CIDR blocks (comma-separated), or its first and last address" },
+              "registry": { "type": ["string", "null"], "example": "ARIN" },
+              "registered": { "type": "string", "format": "date", "example": "2023-12-28", "description": "The date part of the registry's own timestamp" },
+              "days": { "type": "integer", "minimum": 0, "description": "Calendar days from registered to today (UTC)" },
+              "recent": { "type": "boolean" } } }
         }
       },
       "Asn": {
