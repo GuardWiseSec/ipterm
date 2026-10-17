@@ -16,6 +16,8 @@
 //                           common typos of those (/192.168.l.l, /192,168,1,1) get a 301 to the address in the list
 //   GET /<ip>/<field>       one value for any public address as plain text: asn, org, cc, country, continent,
 //                           hostname. IPinfo Lite only (never Core or proxycheck.io), so no budget is spent
+//   GET /<ip>/text, /<ip>/json, /AS<number>/text, /AS<number>/json   the same as ?format=text and ?format=json, without
+//                           the ? that zsh takes for a wildcard in an unquoted URL. Not indexed (x-robots-tag)
 //   GET /AS<number>         page for any autonomous system (ASN), with its main upstreams (add ?format=json for JSON).
 //                           Pages for networks whose holder may be a private person are noindex (src/holder-heuristic.js),
 //                           as are whois and /cidr pages that name one; indexed pages list such an upstream by number only
@@ -60,6 +62,8 @@
 //                           Needs the STATUS_KEY secret (x-status-key header or ?key=); without it, a 404
 //   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /mail/..., /grade/..., /whois/..., /cidr/..., /route/..., /leaktest/r/...
 //                           and their /api/ forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
+//   ?color=1                with a text answer: ANSI colors on the key column and the VPN / proxy verdict. Only when asked
+//                           for (scripts pipe these answers into grep, awk and jq), and never on JSON
 //   /openapi.json, /llms.txt, /opensearch.xml  static files describing the API and the search (served without
 //                           running the Worker)
 //   anything else: a static file if one exists, a domain-shaped path (/example.com) redirects to its
@@ -95,7 +99,7 @@ import { connect } from 'cloudflare:sockets';
 import '../public/cidr.js';                       // shared subnet calculator (also served to the page)
 import '../public/ports.js';                      // what common ports are for (also served to the page)
 import '../public/leakgrade.js';                  // the leak test's grade and share codes (also served to the page)
-import { meCard, ME_WIDTH } from './me.js';         // the /me card and its world map
+import { meCard, ME_WIDTH, ANSI, ansi } from './me.js';   // the /me card and its world map, and its colors
 import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
 import { holderOf, personReason } from './holder-heuristic.js';     // whether a network's holder may be a private person
 // Pages that name a network holder who may be a private person are "noindex, follow" (GDPR caution; the rules are
@@ -186,8 +190,12 @@ async function route(request, env, ctx) {
   if (ASN_RE.test(bare)) return asnRoute(io, bare, html);
   const typo = routerTypo(bare);
   if (typo) return redirect('/' + typo, 301);
+  const suffix = /^([0-9a-f.:]{2,45}|as\d{1,10})\/(text|json)$/i.exec(bare);   // /8.8.8.8/text, /AS15169/json
+  if (suffix && (parseIp(suffix[1]) || ASN_RE.test(suffix[1]))) return formatRoute(io, suffix[1], suffix[2].toLowerCase());
   const field = /^([0-9a-f.:]{2,45})\/([a-z]{1,20})$/i.exec(bare);   // /8.8.8.8/asn
   if (field && parseIp(field[1])) return ipField(io, field[1], field[2].toLowerCase());
+  const asWord = /^as(\d{1,10})\/([a-z]{1,20})$/i.exec(bare);         // /AS15169/txt
+  if (asWord && !html) return textError(`Unknown format "${asWord[2]}". A network comes as /AS${asWord[1]}/text (aligned lines) or /AS${asWord[1]}/json.`, 404);
   if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/mail, /api/grade, /api/cidr, /api/route, /api/port. See /help.' }, 404);
 
   const res = await env.ASSETS.fetch(request);
@@ -519,7 +527,7 @@ async function leakShareRoute(io, raw, html) {
   const cache = 'public, max-age=86400';
   if (!html) {
     const d = { code: r.code, grade: r.grade, vpn: LEAKG.vpnWord(r.vpn), checks: Object.fromEntries(LEAKG.CHECKS.map(([k]) => [k, LEAKG.checkWord(r[k])])) };
-    return reply(io, d, 200, { 'cache-control': cache }, x => kvText([['grade', x.grade], ['vpn', x.vpn], ...lines]));
+    return reply(io, d, 200, { 'cache-control': cache }, (x, o) => kvText([['grade', x.grade], ['vpn', x.vpn], ...lines], [], o));
   }
   const desc = `${says}: ${lines.map(([l, w]) => `${l}: ${w}`).join(', ')}; ${LEAKG.vpnWord(r.vpn)}. Run yours in a few seconds; nothing is stored.`;
   const res = await shell(io, { status: 200, path: '/leaktest/r/' + r.code, title: `${says} | ipterm`, desc, noindex: true, cache,
@@ -715,7 +723,7 @@ async function gradeRoute(io, rawName, html) {
   return guard(
     () => gradeFor(io, name),
     // A nonexistent domain is a valid answer: JSON says so with 200; the HTML page uses 404 so it isn't indexed.
-    d => html ? gradePage(io, d, d.grade ? 200 : 404) : reply(io, withBadge(d, io.url.origin), 200, { 'cache-control': 'public, max-age=300' }, x => gradeText(x)),
+    d => html ? gradePage(io, d, d.grade ? 200 : 404) : reply(io, withBadge(d, io.url.origin), 200, { 'cache-control': 'public, max-age=300' }, (x, o) => gradeText(x, o)),
     (msg, status) => html ? gradePage(io, { domain: name, error: msg }, status) : reply(io, { error: msg }, status),
   );
 }
@@ -1007,19 +1015,19 @@ async function dnsleakData(io, conf, tokens) {
   return { zone: conf.zone, tokens: tokens.length, seen, resolvers };
 }
 
-function dnsleakText(d) {
+function dnsleakText(d, o) {
   const lines = d.resolvers.map(r => (r.private ? `${r.ip}  (${r.range})` : [r.ip, r.asn, r.service || r.org, r.countryCode].filter(Boolean).join('  ')));
   return kvText([['zone', d.zone], ['names seen', `${d.seen} of ${d.tokens}`], ['resolvers', lines.length ? lines : 'none']],
-    d.resolvers.some(r => r.asn) ? [IPINFO_CREDIT] : []);
+    d.resolvers.some(r => r.asn) ? [IPINFO_CREDIT] : [], o);
 }
 
-function portText(d) {
+function portText(d, o) {
   const s = d.service;
   return kvText([
     ['port', `${d.port}/tcp` + (s ? `  ${s.name}` : '')],
     ['your address', d.ip ? `${d.ip} (IPv${d.version}, the address this request came from)` : null],
     ['result', d.summary], ['used for', s && s.use], ['notes', d.notes || []],
-  ]);
+  ], [], o);
 }
 
 // Links to every port with its own explainer: the /port landing page and the foot of each port page.
@@ -1073,10 +1081,12 @@ const SELF_FIELDS = { asn: 'asn', org: 'org', cc: 'countryCode', city: 'city', t
 const IP_FIELDS = { asn: 'asn', org: 'org', cc: 'countryCode', country: 'country', continent: 'continent', hostname: 'hostname' };
 
 // What a script gets from a lookup route: JSON, or with ?format=text the same answer formatted by
-// toText. An error is just its message, with the same status as the JSON would have.
+// toText. An error is just its message, with the same status as the JSON would have. ?color=1 colors the
+// text (kvText); it is never on by default, because scripts pipe these answers into grep, awk and jq.
 function reply(io, d, status = 200, extra = {}, toText = null) {
   if (!io.plain) return json(d, status, extra);
-  return text(d.error ? d.error + '\n' : toText(d), extra['cache-control'] || 'no-store', status, extra);
+  return text(d.error ? d.error + '\n' : toText(d, { color: !!onOff(io.url.searchParams.get('color')) }),
+    extra['cache-control'] || 'no-store', status, extra);
 }
 
 // One value and a newline. A missing value is an empty line with HTTP 404, so `curl -f` fails cleanly.
@@ -1130,12 +1140,23 @@ function expectRoute(io, raw) {
   return textError(plain(`no match: expected ${norm.join(' or ')}, but this request came from ${d.asn || 'an unknown network'} in ${d.countryCode || 'an unknown country'}`), 412);
 }
 
+// /8.8.8.8/text, /2606:4700:4700::1111/json, /AS15169/text: ?format=text and ?format=json as a path, because zsh
+// takes the ? in an unquoted URL for a wildcard. The same lookup as /8.8.8.8?format=text, so the same budgets, rate
+// limit, caching and Vary; the path wins over a ?format= that disagrees. Browsers get the text or JSON too, so search
+// engines are told to leave these copies of the page out.
+async function formatRoute(io, q, fmt) {
+  const sub = { ...io, plain: fmt === 'text' };
+  const res = await (ASN_RE.test(q) ? asnRoute(sub, q, false) : ipRoute(sub, q, false));
+  res.headers.set('x-robots-tag', 'noindex');
+  return res;
+}
+
 function ipField(io, q, name) {
   if (!Object.hasOwn(IP_FIELDS, name)) {
     const why = Object.hasOwn(SELF_FIELDS, name)
       ? `${name} is only available for your own address (curl ${io.url.host}/${name}). Other addresses get country and network data.`
-      : `Unknown field "${name}".`;
-    return textError(`${why} Fields for any address: ${Object.keys(IP_FIELDS).join(', ')}`, 404);
+      : name === 'txt' ? `Unknown field "txt": for the whole answer as aligned text, use /${q}/text.` : `Unknown field "${name}".`;
+    return textError(`${why} Fields for any address: ${Object.keys(IP_FIELDS).join(', ')}; or text or json for the whole answer.`, 404);
   }
   const p = parseIp(q), ip = canonIp(p), reason = nonPublicReason(p);
   if (reason) return textError(`${ip} is not a public address (${reason}), so there is nothing to look up.`, 400);
@@ -1151,17 +1172,29 @@ function ipField(io, q, name) {
 // sequences that rewrite the reader's terminal, or bidi controls that reorder what it shows.
 const plain = v => String(v).replace(/[\t\r\n]+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '?');
 
-// [key, value] rows as aligned lines. Empty values are skipped; an array gets one line per item.
-function kvText(rows, footer = []) {
+// [key, value] rows as aligned lines. Empty values are skipped; an array gets one line per item. With o.color
+// (?color=1) the keys get the /me card's key color, and a row's third item, if any, colors its value after plain()
+// (which would turn the escape codes into ?), so the only escape sequences are these colors.
+function kvText(rows, footer = [], o = {}) {
   const keep = rows.filter(([, v]) => v != null && v !== '' && !(Array.isArray(v) && !v.length));
   const w = Math.max(0, ...keep.map(([k]) => k.length)) + 2;
   const out = [];
-  for (const [k, v] of keep) (Array.isArray(v) ? v : [v]).forEach((x, i) => out.push(((i ? '' : k).padEnd(w) + plain(x)).trimEnd()));
+  for (const [k, v, tone] of keep) (Array.isArray(v) ? v : [v]).forEach((x, i) => {
+    const key = i ? '' : k, val = plain(x);
+    out.push((ansi(o.color, ANSI.key, key) + ' '.repeat(w - key.length) + (o.color && tone ? tone(val) : val)).trimEnd());
+  });
   return out.join('\n') + '\n' + (footer.length ? '\n' + footer.join('\n') + '\n' : '');
 }
 
 const SOURCE_NAMES = { edge: "Cloudflare's edge", 'ipinfo-lite': 'IPinfo Lite', 'ipinfo-core': 'IPinfo Core', ipinfo: 'IPinfo' };
-function ipText(d) {
+// ?color=1: the verdict that starts vpnText's line, in its color: a known VPN, proxy or Tor address bold yellow,
+// a proxycheck.io flag yellow, "not on known VPN or proxy lists" green, "not checked" dim. The rest stays plain.
+const VPN_TONES = { yes: '1;33', flagged: '33', 'not on': '32', 'not checked': ANSI.dim };
+function vpnTone(s) {
+  const m = /^(yes|flagged|not on|not checked)\b[^:,(]*?(?=:|,| \(|$)/.exec(s);
+  return m ? ansi(true, VPN_TONES[m[1]], m[0]) + s.slice(m[0].length) : s;
+}
+function ipText(d, o) {
   const self = d.source === 'edge';
   const ctry = d.country ? d.country + (d.countryCode ? ` [${d.countryCode}]` : '') : d.countryCode;
   return kvText([
@@ -1169,13 +1202,13 @@ function ipText(d) {
     ['network', [d.asn, d.org].filter(Boolean).join('  ')], ['domain', d.asDomain],
     ['location', [d.city, d.region, ctry].filter(Boolean).join(', ')], ['continent', d.city ? null : d.continent], ['postal', d.postal],
     ['coordinates', d.lat != null && d.lon != null ? `${d.lat}, ${d.lon}` : null], ['time zone', d.timezone],
-    ['connection', connectionText(d)], ['vpn / proxy', self ? null : vpnText(d)],
+    ['connection', connectionText(d)], ['vpn / proxy', self ? null : vpnText(d), vpnTone],
     ['edge', d.colo ? `${d.colo} (the Cloudflare data center that answered you)` : null],
     ['source', (SOURCE_NAMES[d.source] || d.source || '') + (d.privacy ? ' + proxycheck.io' : '')],
-  ], /^ipinfo/.test(d.source || '') ? [IPINFO_CREDIT] : []);
+  ], /^ipinfo/.test(d.source || '') ? [IPINFO_CREDIT] : [], o);
 }
 
-function asnText(d) {
+function asnText(d, o) {
   if (!d.found) return `${d.asn} has no registered holder or announced prefixes in RIPEstat.\n`;
   const n = x => Number(x || 0).toLocaleString('en-US');
   const v4 = d.v4 || { prefixes: [] }, v6 = d.v6 || { prefixes: [] };
@@ -1187,7 +1220,7 @@ function asnText(d) {
     ['announced', d.announced ? 'yes, visible in global routing' : 'no prefixes announced right now'],
     ['IPv4 prefixes', n(v4.count)], ['IPv4 space', v4.addresses != null ? n(v4.addresses) + ' addresses' + (bits ? ` (about a /${bits})` : '') : null],
     ['IPv6 prefixes', n(v6.count)], ['upstreams', upstreamText(d.upstreams)], ['largest v4', show4], ['largest v6', show6],
-  ], more > 0 ? [`${n(more)} more prefixes not shown (the JSON lists up to 50 of each).`] : []);
+  ], more > 0 ? [`${n(more)} more prefixes not shown (the JSON lists up to 50 of each).`] : [], o);
 }
 
 // "AS174 Cogent Communications, LLC · AS3356 Level 3 Parent, LLC (2 of 4 seen)", or why there is no list.
@@ -1198,7 +1231,7 @@ function upstreamText(u) {
   return u.list.map(x => x.asn + (x.name ? ' ' + x.name : '')).join(' · ') + (u.total > u.list.length ? `  (${u.list.length} of ${u.total.toLocaleString('en-US')} seen)` : '');
 }
 
-function dnsText(d) {
+function dnsText(d, o) {
   const single = d.types && d.types.length === 1 ? d.types[0] : null, R = d.records || {};
   const val = (t, r) => (t === 'MX' ? mxText(r) : t === 'SOA' && r.admin ? `${r.value} ${r.admin} serial ${r.serial}`
     : t === 'SRV' && r.port != null ? `${r.priority} ${r.weight} ${r.port} ${r.value}` : r.value) + (single && r.ttl != null ? `  (ttl ${r.ttl}s)` : '');
@@ -1210,7 +1243,7 @@ function dnsText(d) {
   const host = d.hosting && d.hosting.org;
   if (host) rows.push(['hosted by', `${d.hosting.org}${d.hosting.asn ? ` (${d.hosting.asn})` : ''}${d.hosting.country ? ', ' + d.hosting.country : ''}`]);
   if (!parseIp(d.name)) rows.push(['DNSSEC', d.dnssec ? 'validated' : 'not validated']);
-  return kvText(rows, host ? [IPINFO_CREDIT] : []);
+  return kvText(rows, host ? [IPINFO_CREDIT] : [], o);
 }
 
 // The mail check as lines like leaktest's: one per finding with its status, and a fix: under each
@@ -1244,10 +1277,10 @@ function mailRows(d, asText) {
   return rows;
 }
 
-function mailText(d) {
+function mailText(d, o) {
   if (d.status !== 'NOERROR') return mailProblem(d) + '\n';
   return kvText([['domain', d.domain], ...mailRows(d, true)],
-    ['Grades: ' + MAIL_GRADES.map(([g, t]) => `${g} ${t}`).join('; ') + '. INFO lines never count.']);
+    ['Grades: ' + MAIL_GRADES.map(([g, t]) => `${g} ${t}`).join('; ') + '. INFO lines never count.'], o);
 }
 const mailProblem = d => (d.status === 'NXDOMAIN' ? `${d.domain} does not exist (NXDOMAIN), so it has no mail records.`
   : `The mail check for ${d.domain} could not run: the resolver answered ${d.status}.`);
@@ -1271,18 +1304,18 @@ function gradeRows(d, asText) {
   if (w && w.headers) rows.push(['page checked', w.final]);
   return rows;
 }
-function gradeText(d) {
+function gradeText(d, o) {
   if (!d.grade) return gradeProblem(d) + '\n';
   const b = d.badge;
   return kvText([['domain', d.domain], ...gradeRows(d, true)], [
     ...(b ? ["README badge (Markdown; shields.io fetches it, so your readers' browsers never contact ipterm):", b.markdown, '',
       "or the same badge served by ipterm itself (fetched by each reader's browser):", b.markdownSvg, ''] : []),
-    'Grades: ' + GRADE_GRADES.map(([g, t]) => `${g} ${t}`).join('; ') + ". INFO lines, and parts that couldn't be checked, never count."]);
+    'Grades: ' + GRADE_GRADES.map(([g, t]) => `${g} ${t}`).join('; ') + ". INFO lines, and parts that couldn't be checked, never count."], o);
 }
 const gradeProblem = d => (d.status === 'NXDOMAIN' ? `${d.domain} does not exist (NXDOMAIN), so there is nothing to grade.`
   : `The report card for ${d.domain} could not run: the resolver answered ${d.status}.`);
 
-function whoisText(d) {
+function whoisText(d, o) {
   if (!d.found) return (d.message || `No registry record was found for ${d.query}.`) + '\n';
   const date = s => (s ? String(s).slice(0, 10) : null), abuse = d.abuse || {};
   if (d.kind === 'domain') {
@@ -1296,7 +1329,7 @@ function whoisText(d) {
       ['DNSSEC', d.dnssec == null ? null : d.dnssec ? 'signed' : 'not signed'],
       ['registrant', d.registrant ? d.registrant + (d.registrantCountry ? ` (${d.registrantCountry})` : '') : 'not published (redacted for privacy)'],
       ['abuse email', abuse.email], ['abuse phone', abuse.phone], ['registry', d.registry], ['rdap', d.rdapUrl],
-    ]);
+    ], [], o);
   }
   return kvText([
     ['query', d.query], ['owner', d.org], ['network name', d.name], ['handle', d.handle && !/ - /.test(d.handle) ? d.handle : null],
@@ -1305,14 +1338,14 @@ function whoisText(d) {
     ['type', d.type], ['country', d.country], ['registered', date(d.registered)], ['last changed', date(d.updated)], ['description', d.description],
     ['abuse email', abuse.email], ['abuse contact', !abuse.email && abuse.handle ? `${abuse.handle} (email not published in RDAP; see the registry)` : null],
     ['abuse phone', abuse.phone], ['rdap', d.rdapUrl],
-  ]);
+  ], [], o);
 }
 
-function cidrText(d) {
+function cidrText(d, o) {
   const list = a => (a ? a.join(', ') : null);
   if (d.v !== 4) {
     return kvText([['network', d.cidr], ['first address', d.network], ['last address', d.last], ['addresses', `${d.totalPow} = ${d.totalText}`],
-      ['/64 subnets', d.subnets64], ['expanded', d.expanded], ['splits into', list(d.halves)], ['part of', d.supernet], ['range', d.rangeNote]]);
+      ['/64 subnets', d.subnets64], ['expanded', d.expanded], ['splits into', list(d.halves)], ['part of', d.supernet], ['range', d.rangeNote]], [], o);
   }
   // network | host bits: the split falls after the prefix-th bit, skipping the dots between octets
   const split = d.prefix > 0 && d.prefix < 32 ? d.prefix + Math.floor((d.prefix - 1) / 8) : null;
@@ -1324,7 +1357,7 @@ function cidrText(d) {
     ['your address', d.hostIndex ? `${d.ip} is address #${CIDR.fmt(d.hostIndex)} in this network` : null],
     ['bits', bits], ['splits into', list(d.halves)], ['contains', d.slash24s > 2 ? `${CIDR.fmt(d.slash24s)} x /24 networks` : null],
     ['part of', d.supernet], ['range', d.rangeNote], ['legacy class', d.legacyClass ? `${d.legacyClass} (classful addressing is historical)` : null],
-  ]);
+  ], [], o);
 }
 
 // The command-line reference: `curl <host>/help`, and /api for command-line clients.
@@ -1369,6 +1402,7 @@ function helpBody(h, env = {}) {
     ]),
     block('ANY ADDRESS', [
       [`curl ${h}/8.8.8.8`, 'owner, network and location as JSON'],
+      [`curl ${h}/8.8.8.8/text`, 'the same as aligned lines'],
       [`curl ${h}/8.8.8.8/country`, 'one value: asn, org, cc, country,'],
       ['', 'continent or hostname'],
     ]),
@@ -1399,9 +1433,15 @@ function helpBody(h, env = {}) {
       ['The code holds nothing else: no IP address, provider or place.'],
     ]),
     block('TEXT INSTEAD OF JSON', [
-      ['Add ?format=text to any lookup for aligned lines, like the web terminal.'],
-      ['Quote the URL so the shell leaves the ? alone:'],
-      [`curl '${h}/8.8.8.8?format=text'`],
+      ['Add /text to an address or AS number for aligned lines, like the web'],
+      ['terminal (/json for JSON):'],
+      [`curl ${h}/AS13335/text`],
+      ['Any other lookup takes ?format=text. Quote the URL so the shell leaves'],
+      ['the ? alone:'],
+      [`curl '${h}/dns/example.com?format=text'`],
+      ['Colors for a terminal: add ?color=1. They are off unless asked for, so'],
+      ['grep, awk and jq never see escape codes:'],
+      [`curl '${h}/8.8.8.8/text?color=1'`],
     ]),
     block('NOTES', [
       ['One-value answers are one line. A missing value is an empty line with'],
@@ -2072,8 +2112,8 @@ function routeRows(r) {
   ];
 }
 
-function routeText(d) {
-  return kvText([['query', d.query], ['summary', d.summary], ...routeRows(d)], ['Routing data: RIPEstat (https://stat.ripe.net), from the RIS route collectors.']);
+function routeText(d, o) {
+  return kvText([['query', d.query], ['summary', d.summary], ...routeRows(d)], ['Routing data: RIPEstat (https://stat.ripe.net), from the RIS route collectors.'], o);
 }
 
 // The n largest prefixes, largest first, then in address order. Only the sizes needed to reach n are parsed
@@ -4134,7 +4174,7 @@ async function statusRoute(io) {
   }, 200, { 'x-robots-tag': 'noindex, nofollow' }, statusText);
 }
 
-function statusText(d) {
+function statusText(d, o) {
   const hhmm = iso => iso.slice(11, 16);
   const of = (used, limit) => `${used ?? '?'} ` + (limit ? `of ${limit}` : '(no limit)');
   const runOut = (hours, at) => [hours.length ? 'hours run out ' + hours.map(h => h + ':00').join(' ') : '',
@@ -4149,7 +4189,7 @@ function statusText(d) {
     ['  error', b.error],
   ];
   return kvText([['time', d.time.slice(0, 16).replace('T', ' ') + ' UTC'], ...part('ipinfo core', d.ipinfoCore), ...part('proxycheck.io', d.proxycheck)],
-    ["Counts of ipterm's own upstream lookups (hours are UTC). Nothing about visitors."]);
+    ["Counts of ipterm's own upstream lookups (hours are UTC). Nothing about visitors."], o);
 }
 
 /* ---------- the deployed build, and copies run by others ----------

@@ -1,11 +1,13 @@
 #!/bin/sh
 # Checks that link-preview bots and search crawlers get the HTML page and curl/scripts get JSON (or plain
 # text for /). No line starts a port check: crawlers get the /port/22 page, and other callers there get
-# a 403 (JSON).
+# a 403 (JSON). Then /text and /json after an address or AS number: text or JSON for every client, ANSI colors
+# only with ?color=1 and never on JSON, and /8.8.8.8/txt a 404 that points to /8.8.8.8/text.
 # Run against `npx wrangler dev` (default) or the live site:
 #   sh tools/check_previews.sh
 #   sh tools/check_previews.sh https://ipterm.net /8.8.8.8
-# The default path is a private address, so the checks make no IPinfo lookups.
+# The default path is a private address, so the checks make no IPinfo lookups. The /text and /json lines use
+# your own address (answered from Cloudflare's edge), non-public ones and AS13335 (RIPEstat only), so they make none.
 B=${1:-http://127.0.0.1:8787}
 P=${2:-/192.168.1.1}
 check() {   # expected-type ua [accept] [path]
@@ -57,3 +59,37 @@ check text/plain 'curl/8.7.1' '*/*' /
 check $H 'Twitterbot/1.0' '*/*' /
 printf 'Vary on a JSON answer:  '; curl -s -o /dev/null -D - -A 'curl/8.7.1' "$B$P" | grep -i '^vary'
 printf 'Vary on an HTML answer: '; curl -s -o /dev/null -D - -A 'Twitterbot/1.0' "$B$P" | grep -i '^vary'
+
+T=$(mktemp); ESC=$(printf '\033'); trap 'rm -f "$T"' EXIT
+fmt() {   # path expected-status expected-type colors (1 = ANSI codes expected, 0 = none) [ua]
+  ua=${5:-curl/8.7.1}
+  got=$(curl -s -o "$T" -w '%{http_code} %{content_type}' -A "$ua" "$B$1")
+  if grep -q "$ESC\[" "$T"; then c=1; else c=0; fi
+  case "$got" in "$2 $3"*) [ "$c" = "$4" ] && r=PASS || r=FAIL ;; *) r=FAIL ;; esac
+  printf '%s  %-30s %-14.14s -> %s, colors %s\n' "$r" "$1" "$ua" "$got" "$([ "$c" = 1 ] && echo yes || echo no)"
+}
+says() {  # the last answer must contain this text
+  if grep -qF "$1" "$T"; then printf 'PASS  ... and points to %s\n' "$1"; else printf 'FAIL  ... and does not point to %s\n' "$1"; fi
+}
+ME=$(curl -s -A curl/8.7.1 "$B/")
+fmt "/$ME/text" 200 text/plain 0
+fmt "/$ME/text?color=1" 200 text/plain 1
+fmt "/$ME/text?color=0" 200 text/plain 0
+fmt "/$ME/json" 200 $J 0
+fmt "/$ME/json?color=1" 200 $J 0
+fmt /AS13335/text 200 text/plain 0
+fmt /AS13335/text?color=1 200 text/plain 1
+fmt /AS13335/json 200 $J 0
+fmt /AS13335/json?color=1 200 $J 0
+fmt /AS13335/text 200 text/plain 0 "$GOOG"      # bots and browsers get the text too, not the page
+fmt /AS13335/json 200 $J 0 'Twitterbot/1.0'
+fmt "/AS13335?format=text&color=1" 200 text/plain 1
+fmt /AS13335?color=1 200 $J 0                    # JSON by default, never colored
+fmt /fe80::1/text 400 text/plain 0               # IPv6 too (not public, so no lookup)
+fmt /2001:db8::1/json 400 $J 0
+fmt /192.168.1.1/text?color=1 400 text/plain 0   # an error message stays plain
+fmt /192.168.1.1/cc 400 text/plain 0             # the /<ip>/<field> route still answers
+fmt /8.8.8.8/txt 404 text/plain 0                # txt is not a field (and /dns/<name>/TXT means TXT records)
+says /8.8.8.8/text
+fmt /AS13335/txt 404 text/plain 0
+says /AS13335/text
