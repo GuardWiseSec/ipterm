@@ -2,7 +2,7 @@
 
 > ipterm (https://ipterm.net) looks up IP addresses, networks (ASNs), DNS records, a domain's email security (SPF, DMARC, DKIM) and its overall report card (DNSSEC, security headers, expiry), registry (whois) records and subnets. Every lookup has its own URL: browsers get a terminal-style page, and curl and scripts get JSON, plain text or aligned text. No API key, no sign-up, no cookies, and nothing about callers is stored.
 
-Answers for the caller's own address come from Cloudflare's edge, so they describe whoever sends the request (the machine running your code), not the person you are talking to. Command-line clients (curl, wget, HTTPie, PowerShell) get JSON by default; other HTTP clients should add `?format=json` to be sure of JSON, or `?format=text` for aligned key/value lines. One-value endpoints return one line of plain text; a missing value is an empty line with HTTP 404. Uncached lookups are limited to 30 a minute per address (HTTP 429 with Retry-After past that).
+Answers for the caller's own address come from Cloudflare's edge, so they describe whoever sends the request (the machine running your code), not the person you are talking to. Command-line clients (curl, wget, HTTPie, PowerShell) get JSON by default; other HTTP clients should add `?format=json` to be sure of JSON, or `?format=text` for aligned key/value lines. For an address or AS number the same works as a path, with no `?` for a shell to expand: `/8.8.8.8/text`, `/AS13335/text`, `/8.8.8.8/json`. `?color=1` adds ANSI colors to a text answer for people at a terminal; colors are never on by default, so leave it out when the output goes to a program. One-value endpoints return one line of plain text; a missing value is an empty line with HTTP 404. Uncached lookups are limited to 30 a minute per address (HTTP 429 with Retry-After past that).
 
 IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Registry records: RDAP. DNS: Cloudflare's public resolver (1.1.1.1).
 
@@ -28,7 +28,7 @@ IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Regis
 - [One value for an IP](https://ipterm.net/8.8.8.8/country): `/<ip>/<field>` with asn, org, cc, country, continent or hostname, as plain text
 - [Network (ASN)](https://ipterm.net/AS13335): holder, registry, announced prefixes and main upstream networks (`/AS<number>`)
 - [Routing](https://ipterm.net/route/1.1.1.0/24): how a public prefix or address is routed (BGP): the route that carries it, the network that announces it, RPKI validity, how many RIS peers see it and sample AS paths, from RIPEstat (`/route/<prefix>` or `/route/<ip>`)
-- [As text](https://ipterm.net/8.8.8.8?format=text): add `?format=text` to any lookup for aligned key/value lines
+- [As text](https://ipterm.net/8.8.8.8/text): `/<ip>/text` and `/AS<number>/text` give aligned key/value lines (`/json` for JSON); add `?format=text` to any other lookup for the same
 
 ## Tools
 

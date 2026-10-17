@@ -327,7 +327,24 @@ an `x-attribution` response header instead (it is in `/help`, `/api`, the OpenAP
 Browsers get the text too. Results that include IPinfo data end with `IP address data powered by IPinfo
 (https://ipinfo.io)`, as IPinfo's free-data terms ask. JSON stays the default for command-line clients,
 and `curl ipterm.net` still prints the bare address. Shells such as zsh treat `?` as a wildcard, so the
-reference quotes those URLs: `curl 'ipterm.net/8.8.8.8?format=text'`.
+reference quotes those URLs: `curl 'ipterm.net/dns/example.com?format=text'`.
+
+**`/text` and `/json` after an address or AS number** say the same without a `?`, so they work unquoted in zsh:
+`curl ipterm.net/8.8.8.8/text`, `/2606:4700:4700::1111/text` and `/AS13335/text` answer exactly what `?format=text`
+does, and `/8.8.8.8/json` and `/AS13335/json` the default JSON (`formatRoute()` in `src/worker.js`). They are the same
+lookup, so the same budgets, rate limit, caching and `Vary` apply, and the path wins over a `?format=` that
+disagrees. Browsers get the text or JSON too, so these answers carry `X-Robots-Tag: noindex` and don't become
+second copies of the address and network pages in search. They sit next to `/<ip>/<field>` and are matched before
+it; the word is `text`, not `txt` (`/dns/<name>/TXT` means TXT records), and `/8.8.8.8/txt` is a 404 that points to
+`/8.8.8.8/text`. There is no YAML or XML.
+
+**Colors on request:** `?color=1` with a text answer (`/8.8.8.8/text?color=1`, or `?format=text&color=1` on any
+route above) colors the key column like the `/me` card and the verdict that starts the `vpn / proxy` line: a known
+VPN, proxy or Tor address bold yellow, a proxycheck.io flag yellow, "not on known VPN or proxy lists" green, "not
+checked" dim. `?color=0` or no `?color` means none, and unlike `/me` it is never turned on by default, even for
+curl: these answers get piped into `grep`, `awk` and `jq`, where escape codes would break the match. JSON is never
+colored. The codes are added after `plain()`, so they are the only escape sequences in the answer (`kvText()`,
+`vpnTone()`; the colors are `ANSI` in `src/me.js`).
 
 Text answers carry no sponsored line (that line only exists in the browser terminal), and every value
 from upstream (TXT records, registry names) has control characters and bidi overrides replaced with `?`,
@@ -1213,7 +1230,7 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | DNS leak test: `/api/dnsleak` only from the ipterm page or a command-line tool, well-formed tokens only, rate limited; the VPS's API needs the `DNSLEAK_KEY` secret (compared in constant time), listens on 127.0.0.1 behind Caddy, hands each token's resolvers over once and forgets them; non-public resolver addresses never go to IPinfo | `dnsleakRoute()` in `src/worker.js`, `dnsleak-server/` | See "DNS leak test server" |
 | Shared leak test results: the code is made in the browser and holds only the grade and per-check flags (no IP, provider, location or resolver); the Worker decodes it strictly (a letter that doesn't match its checks is a 404); the page never runs the test, and isn't indexed | `public/leakgrade.js`, `leakShareRoute()` in `src/worker.js` | See "Shared results" |
 | Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
-| Plain-text answers (`?format=text`, one-value endpoints, `/line`, `/expect`, the `/me` card) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal. The `/me` card's only escape sequences are its own colors | `plain()` in `src/worker.js`, `meRoute()` | |
+| Plain-text answers (`?format=text`, `/<ip>/text`, one-value endpoints, `/line`, `/expect`, the `/me` card) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal. The only escape sequences are ipterm's own colors: the `/me` card's, and `?color=1`'s on text answers, added after `plain()` | `plain()`, `kvText()` in `src/worker.js`, `meRoute()` | |
 | Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
 | The report card's requests to a domain's own site: HEAD only (a GET only after a refused HEAD, its body never read), only to `https://` and `http://` on the default port for a validated name whose addresses are all public, redirects followed only over https within the domain and at most twice, 5- and 4-second limits, at most 100 headers looked at and 8 kept, each capped. A 403, a challenge or a timeout is "couldn't check", never a FAIL | `webCheck()`, `httpsCheck()`, `httpCheck()`, `redirectTarget()` in `src/worker.js` | |
 | Badges: the JSON holds only shields.io's schema fields; the SVG holds only a fixed label and the grade (escaped anyway), and is the only answer sent with `Cross-Origin-Resource-Policy: cross-origin` | `badgeReply()`, `badgeSvg()`, `secure()` in `src/worker.js` | |
@@ -1270,11 +1287,14 @@ your address as `127.0.0.1` locally, so it answers "not tested". `wrangler dev` 
 in it exercises the whole check locally.
 
 Two scripts check a running copy (`wrangler dev` by default, or pass the site's address): `tools/check_previews.sh`
-(link previews and crawlers get HTML, curl gets JSON) and `tools/check_seo.sh` (typo redirects with valid, typo and
+(link previews and crawlers get HTML, curl gets JSON; `/text` and `/json` after an address or AS number answer text
+or JSON for every client, with colors only for `?color=1` and never on JSON, and `/8.8.8.8/txt` is a 404 pointing to
+`/8.8.8.8/text`) and `tools/check_seo.sh` (typo redirects with valid, typo and
 hostile paths, noindex on non-public addresses and on the ASN, whois and `/cidr` pages that name a network holder who
-may be a private person, such an upstream listed by number only, the sitemap index and its URL counts; `ROUTES=1`
-adds the routing section). Neither makes an IPinfo lookup; the ASN pages and the routing section ask RIPEstat, and
-the whois pages RDAP. In Git Bash on Windows, run them with `MSYS_NO_PATHCONV=1` so paths like
+may be a private person, such an upstream listed by number only, `X-Robots-Tag: noindex` on the `/text` and `/json`
+forms, the sitemap index and its URL counts; `ROUTES=1` adds the routing section). Neither makes an IPinfo lookup;
+the `/text` and `/json` checks use the caller's own address (answered from `request.cf`), non-public addresses and
+AS13335, the ASN pages and the routing section ask RIPEstat, and the whois pages RDAP. In Git Bash on Windows, run them with `MSYS_NO_PATHCONV=1` so paths like
 `/192.168.l.l` aren't rewritten.
 
 ## License

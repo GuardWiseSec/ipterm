@@ -12,6 +12,10 @@
 import { LAND_MASK } from './landmask.js';
 
 export const ME_WIDTH = { min: 32, max: 120, def: 64 };   // the card's width in columns, frame included
+// The card's colors (ANSI SGR codes). worker.js uses key and dim for ?format=text&color=1 too.
+export const ANSI = { frame: '90', title: '1;32', land: '32', mark: '1;93', key: '32', ip: '1', dim: '2' };
+// s in one color when `on`, or s as it is (also when it is empty, so no stray codes).
+export const ansi = (on, code, s) => (on && s ? `\x1b[${code}m${s}\x1b[0m` : s);
 
 const MAP_TOP = 84, MAP_BOTTOM = -56;
 const MASK = Uint8Array.from(atob(LAND_MASK.bits), c => c.charCodeAt(0));
@@ -94,8 +98,7 @@ function localTime(tz, now) {
 // (hide the address), host (for the title and footer), now (for the local time).
 export function meCard(d, { width = ME_WIDTH.def, color = false, redact = false, host = 'ipterm.net', now = new Date() } = {}) {
   const W = Math.min(ME_WIDTH.max, Math.max(ME_WIDTH.min, width)), inner = W - 4;
-  const paint = (code, s) => (color && s ? `\x1b[${code}m${s}\x1b[0m` : s);
-  const C = { frame: '90', title: '1;32', land: '32', mark: '1;93', key: '32', ip: '1', dim: '2' };
+  const paint = (code, s) => ansi(color, code, s), C = ANSI;
   const out = [];
   const row = (plainText, painted = plainText) => out.push(paint(C.frame, '│ ') + painted + ' '.repeat(Math.max(0, inner - len(plainText))) + paint(C.frame, ' │'));
   const rule = (left, right, label) => {

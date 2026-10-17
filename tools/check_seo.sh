@@ -3,7 +3,9 @@
 # SITEMAP_PATHS and nowhere else, hostile paths never redirect off the list, pages for non-public addresses
 # are noindex unless curated, pages for networks whose holder may be a private person are noindex and left out
 # of the ASN sitemap (and so are the whois and /cidr pages that name such a holder, while other ASN pages list
-# it as an upstream by number only), and the sitemap index and its files are there with the expected URL counts.
+# it as an upstream by number only), the /text and /json forms of address and network pages are noindex (an
+# X-Robots-Tag header) while the pages stay indexable, and the sitemap index and its files are there with the
+# expected URL counts.
 # Run against `npx wrangler dev` (default) or the live site:
 #   sh tools/check_seo.sh
 #   sh tools/check_seo.sh https://ipterm.net
@@ -105,6 +107,19 @@ else
   case "$page" in *'href="/AS28748"'*) ok '/AS203761 links AS28748' ;; *) no '/AS203761 does not link AS28748' ;; esac
   case "$page" in *"$up"*) no '/AS203761 names AS28748, whose holder may be a person' ;; *) ok '/AS203761 lists AS28748 without its name' ;; esac
 fi
+
+# path: 1 if the answer must carry X-Robots-Tag: noindex, 0 if it must have no X-Robots-Tag
+xrobots() {
+  h=$(curl -s -o /dev/null -D - -A "$UA" "$B$1" | tr -d '\r' | grep -i '^x-robots-tag:')
+  case "$2$h" in 1*noindex*|0) ok "$1 ${h:-(no X-Robots-Tag)}" ;; *) no "$1 ${h:-(no X-Robots-Tag)}, expected $([ "$2" = 1 ] && echo noindex || echo none)" ;; esac
+}
+echo '-- /text and /json copies of address and network pages: noindex, so they never compete with the pages'
+xrobots /AS13335/text 1
+xrobots /AS13335/json 1
+xrobots /192.168.1.1/text 1
+xrobots /fe80::1/json 1
+xrobots /AS13335 0
+xrobots /192.168.1.1 0
 
 echo '-- sitemap index and files'
 idx=$(curl -s "$B/sitemap.xml")
