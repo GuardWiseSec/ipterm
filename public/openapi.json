@@ -41,6 +41,16 @@
         }
       }
     },
+    "/text": {
+      "get": {
+        "tags": ["you"], "operationId": "myDetailsText", "summary": "Your details as aligned key/value lines: /json?format=text without a ? for the shell to expand",
+        "parameters": [{ "$ref": "#/components/parameters/color" }],
+        "responses": {
+          "200": { "description": "Your details.", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
     "/asn": { "get": { "tags": ["you"], "operationId": "myAsn", "summary": "Your network's AS number, e.g. AS13335", "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" } } } },
     "/org": { "get": { "tags": ["you"], "operationId": "myOrg", "summary": "Your network's name", "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" } } } },
     "/cc": { "get": { "tags": ["you"], "operationId": "myCountryCode", "summary": "Your country code (ISO 3166-1 alpha-2; Cloudflare uses T1 for Tor)", "responses": { "200": { "$ref": "#/components/responses/OneValue" }, "404": { "$ref": "#/components/responses/NoValue" } } } },

@@ -4,6 +4,7 @@
 //   GET /                   the terminal, with your IP already in the page (curl/wget get it as plain text)
 //   GET /ip                 your IP as plain text
 //   GET /json               your IP details as JSON
+//   GET /text               the same as aligned lines (/json?format=text without the ?)
 //   GET /help               the command-line reference as plain text (browsers are sent to /api)
 //   GET /asn, /org, /cc, /city, /tz, /colo   one value for your own address as plain text, from request.cf
 //                           (no outside call); /hostname is the one that asks DNS (reverse lookup)
@@ -143,7 +144,7 @@ async function route(request, env, ctx) {
   // plain: ?format=text, the same data as aligned key/value lines instead of JSON
   const io = { request, env, ctx, url, me, plain: url.searchParams.get('format') === 'text' };
 
-  const self = () => guard(() => selfInfo(io), d => reply(io, d, 200, {}, ipText), (msg, status) => reply(io, { error: msg }, status));
+  const self = (o = io) => guard(() => selfInfo(o), d => reply(o, d, 200, {}, ipText), (msg, status) => reply(o, { error: msg }, status));
   if (path === '/' && io.plain) return self();
   if (path === '/') return CLI_UA.test(ua) ? text(me + '\n') : homePage(io);
   if (path === '/ip') return text(me + '\n');
@@ -160,6 +161,7 @@ async function route(request, env, ctx) {
   if (path === '/status' && await statusKeyOk(request, url, env)) return statusRoute(io);
 
   if (path === '/json' || (path === '/api/lookup' && !url.searchParams.get('ip'))) return self();
+  if (path === '/text') return self({ ...io, plain: true });   // /?format=text with no ? for zsh to expand
   if (path === '/api/lookup') return ipRoute(io, url.searchParams.get('ip').trim(), false);
   if (path === '/api/check') return guard(() => checkData(io), d => json(d));
   if (path === '/api/dnsleak') return dnsleakRoute(io);
@@ -396,7 +398,7 @@ function goLocation(path) {
 function goTarget(raw) {
   const s = String(raw || '').replace(/\s+/g, ' ').trim();
   // Control, zero-width and bidi characters never belong in a lookup.
-  if (s.length > 300 || /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁩﻿]/.test(s)) return null;
+  if (s.length > 300 || /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/.test(s)) return null;
   if (Object.hasOwn(GO_TOOLS, s.toLowerCase())) return GO_TOOLS[s.toLowerCase()];
   const typo = routerTypo(s);                       // before the split: typoIp reads spaces as dots (192 168 1 1)
   if (typo) return '/' + typo;
@@ -1081,18 +1083,19 @@ const SELF_FIELDS = { asn: 'asn', org: 'org', cc: 'countryCode', city: 'city', t
 const IP_FIELDS = { asn: 'asn', org: 'org', cc: 'countryCode', country: 'country', continent: 'continent', hostname: 'hostname' };
 
 // What a script gets from a lookup route: JSON, or with ?format=text the same answer formatted by
-// toText. An error is just its message, with the same status as the JSON would have. ?color=1 colors the
-// text (kvText); it is never on by default, because scripts pipe these answers into grep, awk and jq.
+// toText. An error is just its message, with the same status as the JSON would have, and goes through
+// plain() like any value: it often quotes the request back. ?color=1 colors the text (kvText); it is never
+// on by default, because scripts pipe these answers into grep, awk and jq.
 function reply(io, d, status = 200, extra = {}, toText = null) {
   if (!io.plain) return json(d, status, extra);
-  return text(d.error ? d.error + '\n' : toText(d, { color: !!onOff(io.url.searchParams.get('color')) }),
+  return text(d.error ? plain(d.error) + '\n' : toText(d, { color: !!onOff(io.url.searchParams.get('color')) }),
     extra['cache-control'] || 'no-store', status, extra);
 }
 
 // One value and a newline. A missing value is an empty line with HTTP 404, so `curl -f` fails cleanly.
 const one = (v, cache = 'no-store', extra = {}) => (v != null && String(v).trim()
   ? text(plain(v) + '\n', cache, 200, extra) : text('\n', cache, 404, extra));
-const textError = (msg, status) => text(msg + '\n', 'no-store', status);
+const textError = (msg, status) => text(plain(msg) + '\n', 'no-store', status);   // messages quote the request
 
 function selfField(io, name) {
   if (name !== 'hostname') return one(edgeInfo(io)[SELF_FIELDS[name]]);
@@ -1137,7 +1140,7 @@ function expectRoute(io, raw) {
   }
   const d = edgeInfo(io), hit = norm.find(v => v === d.asn || v === d.countryCode);
   if (hit) return text(hit + '\n');
-  return textError(plain(`no match: expected ${norm.join(' or ')}, but this request came from ${d.asn || 'an unknown network'} in ${d.countryCode || 'an unknown country'}`), 412);
+  return textError(`no match: expected ${norm.join(' or ')}, but this request came from ${d.asn || 'an unknown network'} in ${d.countryCode || 'an unknown country'}`, 412);
 }
 
 // /8.8.8.8/text, /2606:4700:4700::1111/json, /AS15169/text: ?format=text and ?format=json as a path, because zsh
@@ -1170,7 +1173,7 @@ function ipField(io, q, name) {
 
 // Terminal-safe text: an upstream value (a TXT record, a registry's name field) could carry escape
 // sequences that rewrite the reader's terminal, or bidi controls that reorder what it shows.
-const plain = v => String(v).replace(/[\t\r\n]+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '?');
+const plain = v => String(v).replace(/[\t\r\n]+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '?');
 
 // [key, value] rows as aligned lines. Empty values are skipped; an array gets one line per item. With o.color
 // (?color=1) the keys get the /me card's key color, and a row's third item, if any, colors its value after plain()
@@ -1378,6 +1381,7 @@ function helpBody(h, env = {}) {
       [`curl ${h}`, 'your IP address'],
       [`curl ${h}/me`, 'a card with a world map: IP, network, place, time'],
       [`curl ${h}/json`, 'your IP, network and location as JSON'],
+      [`curl ${h}/text`, 'the same as aligned lines'],
       [`curl ${h}/asn`, "your network's AS number"],
       [`curl ${h}/org`, "your network's name"],
       [`curl ${h}/cc`, 'your country code (ISO 3166-1)'],

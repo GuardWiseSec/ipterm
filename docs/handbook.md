@@ -269,6 +269,7 @@ Every IP and network has its own address. Browsers get a full page; curl and scr
 curl https://your-domain              # your IP as plain text
 curl https://your-domain/me           # your IP, network and place as a card with a world map
 curl https://your-domain/json         # your details as JSON
+curl https://your-domain/text         # the same as aligned lines
 curl https://your-domain/8.8.8.8      # any IP as JSON
 curl https://your-domain/AS13335      # any network (ASN) as JSON, with its main upstreams
 curl https://your-domain/route/1.1.1.0/24  # how a prefix (or an address) is routed: origin, RPKI, AS paths
@@ -336,7 +337,7 @@ lookup, so the same budgets, rate limit, caching and `Vary` apply, and the path 
 disagrees. Browsers get the text or JSON too, so these answers carry `X-Robots-Tag: noindex` and don't become
 second copies of the address and network pages in search. They sit next to `/<ip>/<field>` and are matched before
 it; the word is `text`, not `txt` (`/dns/<name>/TXT` means TXT records), and `/8.8.8.8/txt` is a 404 that points to
-`/8.8.8.8/text`. There is no YAML or XML.
+`/8.8.8.8/text`. For your own address, `/text` is `/json?format=text` without the `?`. There is no YAML or XML.
 
 **Colors on request:** `?color=1` with a text answer (`/8.8.8.8/text?color=1`, or `?format=text&color=1` on any
 route above) colors the key column like the `/me` card and the verdict that starts the `vpn / proxy` line: a known

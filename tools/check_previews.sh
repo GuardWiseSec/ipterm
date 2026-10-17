@@ -60,7 +60,8 @@ check $H 'Twitterbot/1.0' '*/*' /
 printf 'Vary on a JSON answer:  '; curl -s -o /dev/null -D - -A 'curl/8.7.1' "$B$P" | grep -i '^vary'
 printf 'Vary on an HTML answer: '; curl -s -o /dev/null -D - -A 'Twitterbot/1.0' "$B$P" | grep -i '^vary'
 
-T=$(mktemp); ESC=$(printf '\033'); trap 'rm -f "$T"' EXIT
+# On Windows, curl is a native program: with MSYS_NO_PATHCONV=1 it can't open /tmp/..., so give it C:/... instead
+T=$(mktemp); command -v cygpath >/dev/null && T=$(cygpath -m "$T"); ESC=$(printf '\033'); trap 'rm -f "$T"' EXIT
 fmt() {   # path expected-status expected-type colors (1 = ANSI codes expected, 0 = none) [ua]
   ua=${5:-curl/8.7.1}
   got=$(curl -s -o "$T" -w '%{http_code} %{content_type}' -A "$ua" "$B$1")
@@ -72,6 +73,8 @@ says() {  # the last answer must contain this text
   if grep -qF "$1" "$T"; then printf 'PASS  ... and points to %s\n' "$1"; else printf 'FAIL  ... and does not point to %s\n' "$1"; fi
 }
 ME=$(curl -s -A curl/8.7.1 "$B/")
+fmt /text 200 text/plain 0                       # your own address, like /json
+fmt /text?color=1 200 text/plain 1
 fmt "/$ME/text" 200 text/plain 0
 fmt "/$ME/text?color=1" 200 text/plain 1
 fmt "/$ME/text?color=0" 200 text/plain 0
@@ -88,6 +91,7 @@ fmt /AS13335?color=1 200 $J 0                    # JSON by default, never colore
 fmt /fe80::1/text 400 text/plain 0               # IPv6 too (not public, so no lookup)
 fmt /2001:db8::1/json 400 $J 0
 fmt /192.168.1.1/text?color=1 400 text/plain 0   # an error message stays plain
+fmt "/api/cidr?q=%1B%5B2Jx&format=text" 400 text/plain 0   # ... and an escape code it quotes back comes out as ?
 fmt /192.168.1.1/cc 400 text/plain 0             # the /<ip>/<field> route still answers
 fmt /8.8.8.8/txt 404 text/plain 0                # txt is not a field (and /dns/<name>/TXT means TXT records)
 says /8.8.8.8/text

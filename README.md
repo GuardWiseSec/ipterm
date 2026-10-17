@@ -12,7 +12,7 @@ curl ipterm.net                       # just your IP
 curl ipterm.net/me                    # your IP, network and rough location on a Braille world map
 curl ipterm.net/line                  # IP, network, country and data center on one line, for a prompt or tmux
 curl ipterm.net/8.8.8.8/org           # one value for any address
-curl 'ipterm.net/8.8.8.8?format=text' # everything about an address, as aligned text
+curl ipterm.net/8.8.8.8/text          # everything about an address, as aligned text
 curl ipterm.net/mail/gmail.com        # SPF, DMARC, DKIM and MTA-STS, graded A to F
 curl ipterm.net/grade/github.com      # a domain's report card: DNSSEC, email, expiry and security headers
 curl -4 ipterm.net/port/22            # is a port open on your own IP?

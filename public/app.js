@@ -2153,7 +2153,7 @@
   // man <command>: [synopsis, description, examples, see also, curl paths]
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
-      ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/me', '/json', '/city', '/line', '/?format=text']],
+      ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/me', '/json', '/text', '/city', '/line']],
     // The sixth entry: the grading rubric, from leakgrade.js (also on the /leaktest page and in docs/handbook.md).
     leaktest: ['leaktest   or   leaktest --result <code>', "VPN and DNS leak test, graded A to F: is your IP a known VPN (Cloudflare WARP and Tor by name), which DNS servers look up sites for you, and does WebRTC, IPv6 or your time zone give away more than your IP? For DNS, your browser looks up a few random names under ipterm's own DNS server (which answers \"no such name\"), and the check shows which resolvers asked: on a VPN, any outside the VPN's network is a DNS leak. Runs in your browser in a few seconds; nothing is stored. --result <code> shows a shared result without testing anything.",
       ['leaktest'], ['whoami', 'share'], ['/leaktest/r/1bjp', '/leaktest/r/1bjp?format=text'], [
@@ -2588,6 +2588,7 @@
       [curlLine(''), 'your IP as plain text'],
       [curlLine('/me'), 'a card with a world map: your IP, network, place and time zone (?w=40, ?color=0, ?redact)'],
       [curlLine('/json'), 'your IP details as JSON'],
+      [curlLine('/text'), 'the same as aligned lines'],
       [curlLine('/asn'), 'one value for your own address: /asn /org /cc /city /tz /colo /hostname'],
       [curlLine('/line'), 'IP, network, country and data center on one line, for shell prompts and tmux'],
       [curlLine('/expect/AS13335', '-fs'), 'HTTP 200 if you are on that network (or /expect/CH for a country), 412 if not: a VPN kill switch'],
