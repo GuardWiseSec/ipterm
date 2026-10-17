@@ -483,7 +483,14 @@
     } catch { return { error: 'network error. Check your connection and try again.' }; }
     finally { clearTimeout(t); }
   }
-  const api = ip => getJson('/api/lookup' + (ip ? '?ip=' + encodeURIComponent(ip) : ''));
+  // Addresses this page has seen as yours: the one you connect from (whoami, leaktest, port), your other IP version
+  // (otherFamily) and the public ones WebRTC reveals. The Worker only knows the one each request comes from, so a
+  // lookup of any of them asks for no registry date (block=0), and so do their links and address bar (ipPath), so a
+  // new tab or a reload does too.
+  const ownIps = new Set();
+  const own = ip => { const c = canonIp(ip); if (c) ownIps.add(c); return ip; };
+  const api = ip => getJson('/api/lookup' + (ip ? '?ip=' + encodeURIComponent(ip) + (ownIps.has(canonIp(ip)) ? '&block=0' : '') : ''));
+  const ipPath = ip => '/' + ip + (ownIps.has(canonIp(ip)) ? '?block=0' : '');
   const apiDns = (name, type) => getJson('/api/dns?name=' + encodeURIComponent(name) + (type ? '&type=' + encodeURIComponent(type) : ''));
   const apiWhois = q => getJson('/api/whois?q=' + encodeURIComponent(q));
   const apiMail = (name, sel) => getJson('/api/mail?domain=' + encodeURIComponent(name) + (sel ? '&dkim=' + encodeURIComponent(sel) : ''));
@@ -499,8 +506,9 @@
   function setUrl(path, title) {
     document.title = title;
     if (!live || !navPush) return;
-    // The same page is the same path and, on a mail page, the same ?dkim= (the only query the app writes),
-    // so a tag on the address the visitor came in on (?fbclid=, ?utm_source=) doesn't add a second entry.
+    // The same page is the same path and, on a mail page, the same ?dkim= (the only query that tells two pages
+    // apart: the ?block=0 on your own addresses' pages doesn't), so a tag on the address the visitor came in on
+    // (?fbclid=, ?utm_source=) doesn't add a second entry.
     try {
       const u = new URL(path, location.origin), mail = u.pathname.startsWith('/mail/');
       const sel = search => (mail && new URLSearchParams(search).get('dkim')) || '';
@@ -588,7 +596,7 @@
       }
       case 'lookup':
         if (!a) return null;
-        if (parseIp(a)) return '/' + a;
+        if (parseIp(a)) return ipPath(a);
         if (/^as\d+$/i.test(a)) return hrefFor('asn ' + a);
         if (looksLikeCidr(a)) return hrefFor('cidr ' + a);
         return looksLikeDomain(a) ? '/dns/' + domainOf(a) : null;
@@ -649,7 +657,7 @@
       const r = await fetch(url, { signal: ctrl.signal, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' });
       const j = r.ok ? await r.json() : null;
       const q = j && typeof j.ip === 'string' ? parseIp(j.ip.trim()) : null;
-      return q && q.v !== v ? (q.v === 4 ? q.o.join('.') : j.ip.trim().toLowerCase()) : null;
+      return q && q.v !== v ? own(q.v === 4 ? q.o.join('.') : j.ip.trim().toLowerCase()) : null;
     } catch { return null; } finally { clearTimeout(t); }
   }
 
@@ -687,11 +695,11 @@
 
   // A lookup's block, when the registry record of the address's network is recent (the Worker's blockData):
   // location databases lag behind new and reassigned blocks, so sites may place the address differently.
-  // Worded like blockText in worker.js.
-  const RIRS = ['ARIN', 'RIPE NCC', 'APNIC', 'LACNIC', 'AFRINIC'];
+  // Worded like blockText in worker.js, naming the same registries (REGISTRY there: the RIRs and the NIRs).
+  const REGISTRIES = ['IDNIC', 'JPNIC', 'KRNIC', 'TWNIC', 'NIC.br', 'ARIN', 'RIPE NCC', 'APNIC', 'LACNIC', 'AFRINIC'];
   function blockLine(b) {
     const ago = b.days === 0 ? 'today' : b.days === 1 ? '1 day ago' : `${b.days} days ago`;
-    return `${b.network || 'this block'} registered${RIRS.includes(b.registry) ? ' with ' + b.registry : ''} on ${b.registered} (${ago}): ` +
+    return `${b.network || 'this block'} registered${REGISTRIES.includes(b.registry) ? ' with ' + b.registry : ''} on ${b.registered} (${ago}): ` +
       'IP location databases often take months to catch up with new or reassigned blocks, so sites may disagree about where this address is';
   }
 
@@ -700,7 +708,7 @@
     const head = el('div', 'head');
     head.append(el('span', 'hip', isSelf ? 'whoami' : ipText), el('span', 'tag', 'IPv' + p.v), el('span', 'tag ' + (cls === 'public' ? 'pub' : 'priv'), cls));
     if (d && d.source) head.append(el('span', 'tag', SRC[d.source] || d.source));
-    const res = isSelf ? { cmd: 'whoami', value: ipText, what: 'your IP address', path: '/', self: true, hide: [ipText], terms: placeTerms(d), drop: SELF_DROP }
+    const res = isSelf ? { cmd: 'whoami', value: ipText, what: 'your IP address', path: '/', self: true, hide: [own(ipText)], terms: placeTerms(d), drop: SELF_DROP }
       : { cmd: 'lookup ' + ipText, value: ipText, what: 'the address ' + ipText, path: '/' + ipText };
     head.append(shareBar(res));
     out.appendChild(head);
@@ -715,7 +723,7 @@
       otherFamily(p.v).then(other => {
         slot.textContent = '';
         if (other) res.hide.push(other);           // copy md leaves it out too
-        if (other) { slot.className = ''; slot.append(cmdLink(other, 'lookup ' + other, '/' + other)); announce(`Your IPv${want} address is ${other}.`); }
+        if (other) { slot.className = ''; slot.append(cmdLink(other, 'lookup ' + other, ipPath(other))); announce(`Your IPv${want} address is ${other}.`); }
         else slot.append(`none detected (your connection looks IPv${p.v} only)`);
       });
     }
@@ -948,9 +956,10 @@
     const p = parseIp(d.ip);
     if (!p) { ql.textContent = 'The server returned an address this page cannot read.'; ql.className = 'ln err'; return; }
     if (!d.dnsleak) document.title = LEAKTEST_TITLE_NO_DNS;
+    [d.ip, ...rtc.ips].forEach(own);             // yours, like the other IP version: their lookups skip the registry
     const dnsPending = dnsLookups(d.dnsleak);    // runs alongside the other IP version's lookup
     const other = await otherFamily(p.v);
-    const otherInfo = other ? await api(other) : null;
+    const otherInfo = other ? await api(other) : null;   // with block=0 (otherFamily marked it yours)
     const dns = await dnsPending;
     ql.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
 
@@ -989,7 +998,7 @@
       if (GRADED.includes(key) && o.ran === false && o.skip) skipped.push(label);
       results.push({ key, st, label, v, ...o, flag: !GRADED.includes(key) || !ran ? NOT_TESTED : st === 'warn' ? LEAKED : vpn && st !== 'ok' ? NOT_TESTED : PASS });
     };
-    const ipLink = ip => cmdLink(ip, 'lookup ' + ip, '/' + ip);
+    const ipLink = ip => cmdLink(ip, 'lookup ' + ip, ipPath(ip));
     const ipList = ips => ips.flatMap((ip, i) => (i ? [', ', ipLink(ip)] : [ipLink(ip)]));
 
     // 1. what every site sees: stated, never graded
@@ -1303,7 +1312,7 @@
       d = DEMO[ipText] ? { ...DEMO[ipText], source: 'demo' } : null;
       if (!d) line('Preview mode has sample data for 8.8.8.8, 1.1.1.1 and 9.9.9.9 only. Owner and location for other addresses appear once the Worker is deployed. Computed details below.', 'warn');
     }
-    if (d) setUrl('/' + ipText, ipTitle(ipText, d));
+    if (d) setUrl(ipPath(ipText), ipTitle(ipText, d));
     await render(p, ipText, d, false);
     if (d) await sponsor('ip');
     if (!d && live) return;                      // the lookup failed: retry is offered instead
@@ -1526,7 +1535,7 @@
     head.append(el('span', 'hip', `port ${n}`), el('span', 'tag', 'tcp'), el('span', 'tag ' + cls, label));
     if (d.version) head.append(el('span', 'tag', 'IPv' + d.version));
     // The notes may name your provider (one known for carrier-grade NAT): its Markdown hides that too.
-    head.append(shareBar({ cmd: `port ${n}`, value: String(n), what: 'the port number', path: '/port/' + n, self: true, hide: [d.ip],
+    head.append(shareBar({ cmd: `port ${n}`, value: String(n), what: 'the port number', path: '/port/' + n, self: true, hide: [own(d.ip)],
       terms: PORTSLIB ? PORTSLIB.cgnatNames() : [], drop: SELF_DROP }));
     out.appendChild(head);
     const rows = [['port', `${n}/tcp` + (svc ? '  ' + svc.name : '')]];
@@ -2174,7 +2183,7 @@
         ['INFO', "never part of the grade: how your browser connects (TLS 1.3, HTTP/3 and post-quantum key exchange, from Cloudflare's edge), your browser language's country next to your IP's (expats and travelers differ for good reasons), and a local network address."],
         ['COMPARE', "run leaktest again after turning your VPN on or off, or after a fix, and it prints each line before → after: a line that would be \"a leak if you use a VPN\" becomes a confirmed leak, or not. The last run is kept in this tab's memory only, never stored. copy md gives only each line's status before → after (OK, LEAK or INFO): what either run found, and the verdict, stay on screen."],
         ['SHARE', "share after leaktest copies a link like /leaktest/r/1bjp. It holds only the grade, whether a VPN was on and which checks passed, leaked or weren't tested: no IP address, provider, location or resolver, so every browser with the same result gets the same link. It's made in your browser, and opening one never runs the test."]]],
-    lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. When the registry record of its block is at most 180 days old, a block line says so: location databases often take months to catch up with new or reassigned blocks, so sites may disagree about where it is. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
+    lookup: ['lookup <ip | domain | ASN>', 'owner, network and approximate location of any IPv4 or IPv6 address. When the registry record of its block is at most 180 days old, a block line says so: location databases often take months to catch up with new or reassigned blocks, so sites may disagree about where it is. Your own address never gets one: lookup never sends it to a registry. A domain shows its DNS records and an AS number its network. Typing the address on its own does the same.',
       ['lookup 8.8.8.8', 'lookup 2606:4700:4700::1111', 'lookup github.com'], ['whois', 'asn', 'dig'], ['/8.8.8.8', '/8.8.8.8/org', '/8.8.8.8/text']],
     dig: ['dig <domain> [type]   or   dig <ip>', "DNS records from Cloudflare's resolver (1.1.1.1). With a type, just that type with its TTLs: A AAAA CNAME MX NS TXT CAA SOA SRV PTR DS DNSKEY HTTPS. With an IP address, its reverse DNS name.",
       ['dig example.com', 'dig gmail.com MX', 'dig github.com TXT', 'dig 8.8.8.8'], ['lookup', 'whois', 'mail'], ['/dns/example.com', '/dns/gmail.com/MX', '/dns/example.com?format=text']],
@@ -2580,7 +2589,7 @@
 
   async function privacy() {
     await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
-      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) or RIPEstat; domain names go to Cloudflare\'s DNS resolver, a mail check also fetches the domain\'s own MTA-STS policy file, and a report card (grade) asks the domain\'s own website for its headers (from ipterm\'s server, never from your browser). Your own IP is only sent to them if you run leaktest, which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. Its share link holds only the grade and which checks passed, never your IP or location. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.',
+      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) and to their regional internet registry, for the date their network was registered (never your own address: only whois sends that to one); networks and routes go to RIPEstat, domain names go to Cloudflare\'s DNS resolver, a mail check also fetches the domain\'s own MTA-STS policy file, and a report card (grade) asks the domain\'s own website for its headers (from ipterm\'s server, never from your browser). Your own IP is only sent to them if you run leaktest (to IPinfo and proxycheck.io, with your other IP version), which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. Its share link holds only the grade and which checks passed, never your IP or location. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.',
       'The commands you type are saved in your own browser (the newest 200, never their results) and never leave it: history clear deletes them, history off stops saving.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
     const d = el('div', 'ln sys'); const a = el('a', 'cmd', 'read the full privacy policy ↗'); a.href = '/privacy';
@@ -3002,6 +3011,8 @@
       const mailCmd = ['mail', init.query, ...(init.dkim ? ['--dkim', init.dkim] : [])];
       const cmd = init.kind === 'cidr' ? 'cidr ' + init.query : init.kind === 'dns' ? 'dig ' + init.query + (init.qtype && init.qtype !== 'PTR' ? ' ' + init.qtype : '')
         : init.kind === 'mail' ? mailCmd.join(' ') : (init.kind === 'asn' ? 'asn ' : init.kind === 'whois' ? 'whois ' : init.kind === 'grade' ? 'grade ' : 'lookup ') + init.query;
+      // Opened from one of your own addresses' links (ipPath): it stays yours, so Back and Forward ask without the date too.
+      if (init.kind === 'ip' && new URLSearchParams(location.search).get('block') === '0') own(init.query);
       running = cmd;
       echo(cmd); addHist(cmd);
       const mark = out.lastChild;

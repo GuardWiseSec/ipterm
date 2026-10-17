@@ -24,7 +24,7 @@ IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Regis
 
 ## Any address or network
 
-- [IP lookup](https://ipterm.net/8.8.8.8): owner, network, location and VPN / proxy flags for any IPv4 or IPv6 address (`/<ip>`), plus `block`: when the registry record of the address's network was created (RDAP), with `recent: true` within the last 180 days. Location databases often take months to catch up with new or reassigned blocks, so for a recent block different sites may name different places for the same address; say so rather than picking one
+- [IP lookup](https://ipterm.net/8.8.8.8): owner, network, location and VPN / proxy flags for any IPv4 or IPv6 address (`/<ip>`), plus `block` (not for the caller's own address, which is never sent to a registry; `?block=0` leaves it out): when the registry record of the address's network was created (RDAP), with `recent: true` within the last 180 days. Location databases often take months to catch up with new or reassigned blocks, so for a recent block different sites may name different places for the same address; say so rather than picking one
 - [One value for an IP](https://ipterm.net/8.8.8.8/country): `/<ip>/<field>` with asn, org, cc, country, continent or hostname, as plain text
 - [Network (ASN)](https://ipterm.net/AS13335): holder, registry, announced prefixes and main upstream networks (`/AS<number>`)
 - [Routing](https://ipterm.net/route/1.1.1.0/24): how a public prefix or address is routed (BGP): the route that carries it, the network that announces it, RPKI validity, how many RIS peers see it and sample AS paths, from RIPEstat (`/route/<prefix>` or `/route/<ip>`)

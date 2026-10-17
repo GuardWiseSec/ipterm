@@ -586,18 +586,24 @@ const sameIp = (a, b) => { const x = parseIp(String(a || '').trim()), y = parseI
 async function ipRoute(io, q, html) {
   const p = parseIp(String(q || '').trim());
   if (!p) return reply(io, { error: 'Not a valid IPv4 or IPv6 address.' }, 400);
-  const ip = canonIp(p);
-  if (sameIp(q, io.me) && !html) return guard(() => withBlock(io, ip, p, selfInfo(io)), d => reply(io, d, 200, {}, ipText), (msg, status) => reply(io, { error: msg }, status));
+  const ip = canonIp(p), own = sameIp(q, io.me);
+  if (own && !html) return guard(() => selfInfo(io), d => reply(io, d, 200, {}, ipText), (msg, status) => reply(io, { error: msg }, status));
 
   const reason = nonPublicReason(p);
   if (reason) {
     const d = { ip, version: p.v, bogon: true, range: reason };
     return html ? ipPage(io, d, 200) : reply(io, { error: `${ip} is not a public address (${reason}), so there is nothing to look up.`, ...d }, 400);
   }
+  // The caller's own address never goes to a registry for its date (withBlock): by number it is answered from the
+  // edge (above), and its page goes without. ?block=0 leaves the date out for any address: the terminal sends it, and
+  // puts it on its links and address bar, for the caller's other addresses (the other IP version, WebRTC's), which
+  // look like anyone's here.
+  const block = !own && onOff(io.url.searchParams.get('block')) !== false;
   return guard(
-    () => withBlock(io, ip, p, ipData(io, ip, p), d => withPrivacy(io, ip, d)),
+    () => block ? withBlock(io, ip, p, ipData(io, ip, p), d => withPrivacy(io, ip, d)) : withPrivacy(io, ip, ipData(io, ip, p)),
     // Browsers may reuse an answer for 5 minutes; the Worker's own cache (6 hours) keeps repeats cheap.
-    d => html ? ipPage(io, d, 200) : reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, ipText),
+    // ...except one that went out before its registry date arrived (blockLate): the next lookup should get the date.
+    d => html ? ipPage(io, d, 200) : reply(io, d, 200, { 'cache-control': d.blockLate ? 'no-store' : 'public, max-age=300' }, ipText),
     (msg, status) => html ? ipPage(io, { ip, version: p.v, error: msg }, status) : reply(io, { error: msg }, status),
   );
 }
@@ -646,12 +652,20 @@ async function withPrivacy(io, ip, pending) {
   return privacy ? { ...d, privacy } : d;
 }
 
-// Adds the registry date of the address's network (blockData). It starts once the lookup has settled, so it
-// knows whether that already counted toward the visitor's rate limit, and runs beside what comes next (next:
-// withPrivacy's VPN check), so it adds no wait of its own unless the registry is the slower of the two.
+// Adds the registry date of the address's network (blockData). Its registry request starts once the lookup has
+// settled, so it knows whether that already counted toward the visitor's rate limit, and runs beside what comes
+// next (next: withPrivacy's VPN check). Once the rest of the answer is ready it gets BLOCK_GRACE more at most; a
+// slower registry finishes in the background (waitUntil) and fills the cache for the next lookup. That answer is
+// marked blockLate (not enumerable, so never in the JSON), and ipRoute tells browsers not to keep it.
+const BLOCK_LATE = {};
 async function withBlock(io, ip, p, pending, next = d => d) {
-  const [d, block] = await Promise.all([pending.then(next), blockData(io, ip, p, pending)]);
-  return block && !d.bogon ? { ...d, block } : d;
+  const block = blockData(io, ip, p, pending);           // never rejects
+  io.ctx.waitUntil(block);
+  const d = await pending.then(next);
+  const b = await Promise.race([block, sleep(BLOCK_GRACE).then(() => BLOCK_LATE)]);
+  if (d.bogon) return d;
+  if (b === BLOCK_LATE) return Object.defineProperty({ ...d }, 'blockLate', { value: true });
+  return b ? { ...d, block: b } : d;
 }
 
 function ipData(io, ip, p, opts = {}) {
@@ -1420,6 +1434,7 @@ function helpBody(h, env = {}) {
       ['', 'continent or hostname'],
       ['A block registered in the last 180 days gets a line saying so: location'],
       ['databases lag behind new blocks, so sites may disagree about where it is.'],
+      ['Your own address never gets one: a lookup never sends it to a registry.'],
     ]),
     block('NETWORKS, DNS, MAIL, REGISTRY RECORDS, SUBNETS', [
       [`curl ${h}/AS13335`, 'a network and its address blocks'],
@@ -1544,6 +1559,8 @@ function visitorKey(ip) {
 }
 
 // io.paid: the lookup is part of a report card that has already spent its one token (see gradeFor).
+// io.extra: the one count the VPN check (privacyData) and the registry date (blockData) share when a lookup
+// needs either; the date takes it only when the lookup itself didn't count (io.charged).
 async function limit(io) {
   if (!io.env.LOOKUP_LIMITER || !io.me || io.paid) return;
   let ok = true;
@@ -1892,7 +1909,7 @@ async function privacyData(io, ip) {
   if (now < pcRefusedUntil) return null;
   // The visitor's rate limit applies here too: an IPinfo answer may have come from the cache, and
   // without this, repeating a lookup would reach the budget counter on every request.
-  try { await limit(io); } catch { return null; }
+  try { await (io.extra ||= limit(io)); } catch { return null; }   // one count, shared with blockData's
   if (await proxycheckAllowed(env, visitorKey(io.me)) !== true) return null;
   const refuse = (why, minutes) => {
     pcRefusedUntil = now + minutes * 60 * 1000;
@@ -3346,7 +3363,10 @@ function badgeSvg(label, message, color) {
 // RDAP is the registries' structured replacement for whois. IANA's bootstrap files say which
 // regional registry (ARIN, RIPE NCC, APNIC, LACNIC, AFRINIC) holds each address block and ASN.
 
-const BOOT = {};
+// An address or ASN file that couldn't be read isn't asked for again for a minute (per isolate): while IANA is down,
+// each lookup goes straight to rdap.org instead of spending 12 seconds on two tries first. Not dns.json: through
+// rdap.org a domain's answer names no registry and can't say its TLD has no RDAP, and whois keeps it for 6 hours.
+const BOOT = {}, BOOT_FAILED = {};
 async function bootstrap(kind, origin) {               // kind: ipv4 | ipv6 | asn | dns
   if (BOOT[kind]) return BOOT[kind];
   const key = new Request(`${origin}/__cache/rdap-bootstrap/${kind}`);
@@ -3354,9 +3374,12 @@ async function bootstrap(kind, origin) {               // kind: ipv4 | ipv6 | as
   let data;
   if (hit) data = await hit.json();
   else {
-    const r = await fetchRetry(`https://data.iana.org/rdap/${kind}.json`, {}, 'iana bootstrap', 6000);
-    if (!r.ok) throw new Error('bootstrap ' + r.status);
-    data = await r.json();
+    if (Date.now() < (BOOT_FAILED[kind] || 0)) throw new Error('bootstrap failed a moment ago');
+    try {
+      const r = await fetchRetry(`https://data.iana.org/rdap/${kind}.json`, {}, 'iana bootstrap', 6000);
+      if (!r.ok) throw new Error('bootstrap ' + r.status);
+      data = await r.json();
+    } catch (e) { if (kind !== 'dns') BOOT_FAILED[kind] = Date.now() + 60_000; throw e; }
     await caches.default.put(key, new Response(JSON.stringify(data), {
       headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=86400' },
     }));
@@ -3381,21 +3404,33 @@ function inPrefix(p, prefix) {
   return len;
 }
 
+// The RDAP base of the registry that holds target, null when none does, or rdap.org (which redirects to it) when
+// IANA's file can't be read.
 async function rdapBase(target, origin) {
+  let list;
+  try { list = await bootstrap(target.asn ? 'asn' : target.p.v === 4 ? 'ipv4' : 'ipv6', origin); }
+  catch (e) {
+    console.error('[ipterm] IANA bootstrap unavailable, using rdap.org:', String((e && e.message) || e));
+    return 'https://rdap.org/';
+  }
   if (target.asn) {
-    for (const s of await bootstrap('asn', origin)) {
+    for (const s of list) {
       for (const r of s.ranges) { const [lo, hi] = r.split('-').map(Number); if (target.asn >= lo && target.asn <= (hi || lo)) return s.base; }
     }
     return null;
   }
   let best = null, bestLen = -1;
-  for (const s of await bootstrap(target.p.v === 4 ? 'ipv4' : 'ipv6', origin)) {
+  for (const s of list) {
     for (const r of s.ranges) { const l = inPrefix(target.p, r); if (l > bestLen) { bestLen = l; best = s.base; } }
   }
   return best;
 }
 
-const REGISTRY = { arin: 'ARIN', ripe: 'RIPE NCC', apnic: 'APNIC', lacnic: 'LACNIC', afrinic: 'AFRINIC' };
+// The registries an RDAP record can come from, by a word in their name or their servers' (registryOf()): the five
+// RIRs, and the national registries (NIRs) that keep part of APNIC's and LACNIC's space in databases of their own.
+// The NIRs come first: APNIC answers for IDNIC's records from idnic.rdap.apnic.net.
+const REGISTRY = { idnic: 'IDNIC', jpnic: 'JPNIC', krnic: 'KRNIC', twnic: 'TWNIC', 'registro.br': 'NIC.br',
+  arin: 'ARIN', ripe: 'RIPE NCC', apnic: 'APNIC', lacnic: 'LACNIC', afrinic: 'AFRINIC' };
 const RDAP_INIT = { headers: { accept: 'application/rdap+json, application/json' } };
 
 // Shared readers for RDAP objects. Entities nest (ARIN puts abuse under the org; registrars put it
@@ -3440,21 +3475,28 @@ async function readBody(r, max) {                     // the text of a response,
   return new TextDecoder().decode(buf);
 }
 
-async function rdapLookup(target, origin) {
+// The registry that holds an RDAP record: a name from REGISTRY (or one a registry gives itself), never a hostname.
+// APNIC's and RIPE NCC's answers say it in a "Source" notice (IDNIC, JPNIC, KRNIC or TWNIC for the NIR records APNIC
+// mirrors; CNNIC's, VNNIC's and IRINN's are in APNIC's own database, and NIC Mexico's in LACNIC's). Otherwise it is
+// the server that answered (NIC.br's own, for Brazil), its whois server, or the one IANA's list sent the request to;
+// null when none of them is known (rdap.org).
+function registryOf(o, host, base) {
+  const src = (Array.isArray(o.notices) ? o.notices : []).find(n => n && n.title === 'Source');
+  const said = src && Array.isArray(src.description) ? String(src.description[src.description.length - 1] || '').trim() : '';
+  const known = s => { const k = Object.keys(REGISTRY).find(k => String(s || '').toLowerCase().includes(k)); return k ? REGISTRY[k] : null; };
+  return known(said) || (/^[A-Z][A-Z0-9-]{1,15}$/.test(said) ? said : null) || known(host) || known(o.port43) || known(base);
+}
+
+async function rdapLookup(target, origin, base) {   // base: rdapBase's answer, when the caller already has it
   const query = target.asn ? 'AS' + target.asn : target.ip;
   const kind = target.asn ? 'asn' : 'ip';
   const tail = target.asn ? 'autnum/' + target.asn : 'ip/' + target.ip;
-  let base;
-  try { base = await rdapBase(target, origin); }
-  catch (e) {
-    console.error('[ipterm] IANA bootstrap unavailable, using rdap.org:', String((e && e.message) || e));
-    base = 'https://rdap.org/';
-  }
+  if (base === undefined) base = await rdapBase(target, origin);
   if (!base) return { query, kind, found: false };
   const url = base + tail;
   const r = await fetchRetry(url, RDAP_INIT, 'rdap');
   if (r.status === 404) return { query, kind, found: false };
-  if (!r.ok) throw new Error('rdap ' + r.status);
+  if (!r.ok) throw Object.assign(new Error('rdap ' + r.status), { origin: originOf(r.url || url) });   // the server that answered (after any redirect)
   const o = await readJson(r);
 
   const ents = flatEntities(o.entities);
@@ -3465,11 +3507,10 @@ async function rdapLookup(target, origin) {
   const ev = a => eventDate(o, a);
   const remark = (o.remarks || []).find(x => !x.title || /^description$/i.test(x.title));
   const host = (() => { try { return new URL(r.url || url).hostname; } catch { return ''; } })();
-  const reg = Object.keys(REGISTRY).find(k => host.includes(k));
 
   return {
     query, kind, found: true, source: 'rdap',
-    registry: reg ? REGISTRY[reg] : host || null,
+    registry: registryOf(o, host, base),
     handle: clean(o.handle),
     name: clean(o.name),
     type: clean(o.type),
@@ -3492,12 +3533,23 @@ async function rdapLookup(target, origin) {
    broker), they often still place it where its last user was, or each somewhere different, so two sites can name
    two cities for one address. So an address lookup carries the date the registry record of its network (the most
    specific one, as whois <ip> shows it, from the same cache entry, kept a day) was created, and the text, the page
-   and the terminal add a line when that was within BLOCK_RECENT_DAYS. The date never holds a lookup up: past
-   BLOCK_WAIT the answer goes without it, and the registry's answer still fills the cache for the next one.
-   Crawlers and link previews only read the cache, so they never cause an RDAP query; anyone else's counts toward
-   their rate limit, riding on the lookup's own count when it made one (limit() sets io.charged). */
+   and the terminal add a line when that was within BLOCK_RECENT_DAYS. Once the rest of an answer is ready it waits
+   for the date at most BLOCK_GRACE (withBlock): past that it goes without it, and the registry's answer still fills
+   the cache for the next one. Lookups of an address whose registry request is still in flight share it, and a
+   registry that is unavailable is left alone for a minute (ten after a 429), so an outage adds no wait, no count and no
+   load on it. Crawlers and link previews only read the cache, so they never cause an RDAP query; anyone else's
+   counts toward their rate limit, riding on the lookup's own count when it made one (limit() sets io.charged) or
+   sharing the VPN check's (io.extra). The caller's own address is never sent (ipRoute): asked for by number it is
+   answered from the edge, like /json, its page goes without the date, and the terminal asks with ?block=0 for the
+   caller's other addresses (the other IP version, WebRTC's), its links and address bar too. */
 const BLOCK_RECENT_DAYS = 180;
-const BLOCK_WAIT = 2500;
+const BLOCK_GRACE = 300;                 // ms the date may add once the rest of the answer is ready
+const blockFlight = new Map();           // per isolate: address -> its registry request in flight, { at, fresh }
+const blockPause = {};                   // per isolate: RDAP server (origin) -> until when that registry is left alone
+const originOf = u => { try { return new URL(u).origin; } catch { return String(u); } };
+// The registry request in flight for an address, if any: one older than waitUntil's 30 seconds was cut off with
+// the request that started it and will never settle.
+const blockInFlight = ip => { const f = blockFlight.get(ip); return f && Date.now() - f.at < 30_000 ? f : null; };
 async function blockData(io, ip, p, pending) {
   if (nonPublicReason(p)) return null;
   const key = 'whois/' + ip;               // whoisRoute's key for an address
@@ -3507,11 +3559,33 @@ async function blockData(io, ip, p, pending) {
     const ua = io.request.headers.get('user-agent') || '';
     if (PREVIEW_UA.test(ua) || CRAWLER_UA.test(ua)) return null;
     await pending;                         // the lookup failed or was refused: no registry query either
-    if (!io.charged) await limit(io);
-    const fresh = rdapLookup({ ip, p }, io.url.origin).then(d => { cachePut(io, key, d, 86400); return d; });
-    io.ctx.waitUntil(fresh.catch(e => console.error('[ipterm] registry date skipped:', String((e && e.message) || e))));
-    return blockOf(await Promise.race([fresh, sleep(BLOCK_WAIT)]));
+    let f = blockInFlight(ip);
+    if (!f) {
+      const base = await rdapBase({ ip, p }, io.url.origin);
+      if (!base || Date.now() < (blockPause[originOf(base)] || 0)) return null;   // no registry, or it just failed: no count, no request
+      if (!io.charged) await (io.extra ||= limit(io));                 // one count, shared with privacyData's
+      f = blockInFlight(ip) || blockAsk(io, ip, p, base, key);         // another lookup may have asked meanwhile
+    }
+    return blockOf(await f.fresh);         // a failure, this lookup's or the one it shares, just means no block
   } catch { return null; }
+}
+
+// Asks the registry for blockData: the answer fills whois's cache entry. A registry that is unavailable (a 429, a 5xx,
+// a timeout or no connection) is paused, keyed by the server that failed: the one ARIN redirected to, when it did. One
+// bad record (another 4xx, JSON that doesn't parse) pauses nothing.
+function blockAsk(io, ip, p, base, key) {
+  const f = { at: Date.now() };
+  f.fresh = rdapLookup({ ip, p }, io.url.origin, base).then(d => { cachePut(io, key, d, 86400); return d; }, e => {
+    const why = String((e && e.message) || e), down = /^rdap (?:(429)|5\d\d)$|^rdap: /.exec(why);
+    const minutes = !down ? 0 : down[1] ? 10 : 1, at = (e && e.origin) || originOf(base);
+    if (minutes) blockPause[at] = Date.now() + minutes * 60_000;
+    console.error(`[ipterm] registry date skipped (${why})` + (minutes ? `; ${at} left alone for ${minutes} minute${minutes > 1 ? 's' : ''}` : ''));
+    throw e;
+  });
+  blockFlight.set(ip, f);
+  const done = () => { if (blockFlight.get(ip) === f) blockFlight.delete(ip); };
+  io.ctx.waitUntil(f.fresh.then(done, done));
+  return f;
 }
 
 // { network, registry, registered (the date part of the registry's own timestamp), days (calendar days from then
@@ -3531,8 +3605,9 @@ function blockOf(w) {
 function blockText(b) {
   if (!b || !b.recent) return null;
   const ago = b.days === 0 ? 'today' : b.days === 1 ? '1 day ago' : `${b.days} days ago`;
-  const rir = Object.values(REGISTRY).includes(b.registry) ? ` with ${b.registry}` : '';
-  return `${b.network || 'this block'} registered${rir} on ${b.registered} (${ago}): IP location databases often take months ` +
+  // "with" only names a registry REGISTRY knows: a whois record cached before registryOf() may hold a hostname
+  const reg = Object.values(REGISTRY).includes(b.registry) ? ` with ${b.registry}` : '';
+  return `${b.network || 'this block'} registered${reg} on ${b.registered} (${ago}): IP location databases often take months ` +
     'to catch up with new or reassigned blocks, so sites may disagree about where this address is';
 }
 
@@ -3872,6 +3947,7 @@ function ipPage(io, d, status) {
     `<p class="ln sys">Registry record: <a href="/whois/${esc(ip)}">whois ${esc(ip)}</a> (owner and abuse contact)</p>` +
     `<p class="ln sys">Guide: <a href="/guides/what-your-ip-reveals">What your IP address reveals (and what it doesn't)</a></p>`;
   return shell(io, { status, path, title, desc: summary, initial: { kind: 'ip', query: ip, data: d },
+    cache: d.blockLate ? 'no-store' : null,                // sent before its registry date arrived (withBlock)
     body: staticBlock(ip, [v, 'public'], rows, summary, links) });
 }
 

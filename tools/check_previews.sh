@@ -7,8 +7,8 @@
 #   sh tools/check_previews.sh
 #   sh tools/check_previews.sh https://ipterm.net /8.8.8.8
 # The default path is a private address, so the checks make no IPinfo lookups. The /text and /json lines use
-# your own address (answered from Cloudflare's edge, plus RDAP for its block when it is public), non-public ones and
-# AS13335 (RIPEstat only), so they make none. tools/check_block.mjs checks the block itself.
+# your own address (answered from Cloudflare's edge, and never sent to a registry), non-public ones and AS13335
+# (RIPEstat only), so they make none. tools/check_block.mjs checks the block itself.
 B=${1:-http://127.0.0.1:8787}
 P=${2:-/192.168.1.1}
 check() {   # expected-type ua [accept] [path]
