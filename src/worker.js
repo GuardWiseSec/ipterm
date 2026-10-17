@@ -4333,8 +4333,12 @@ const safeJson = o => JSON.stringify(o).replace(/</g, '\\u003c').replace(/>/g, '
   .replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 const encodePath = p => p.split('/').map(seg => encodeURIComponent(seg).replace(/%3A/gi, ':')).join('/');
 
+// JSON.stringify escapes only U+0000-001F, and curl prints JSON straight to a terminal, so the rest of what plain()
+// catches (DEL, the C1 controls some terminals act on, bidi marks) is written as \u escapes too: the same data
+// for any parser. They can only occur inside strings, where an escape is always valid.
+const termSafe = s => s.replace(/[\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
 function json(data, status = 200, extra = {}) {
-  return new Response(JSON.stringify(data, null, 2) + '\n', {
+  return new Response(termSafe(JSON.stringify(data, null, 2)) + '\n', {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', vary: 'Accept, User-Agent', ...extra },
   });
