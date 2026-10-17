@@ -205,7 +205,7 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | VPN / proxy / Tor second opinion, VPN service name (optional) | proxycheck.io, with the `PROXYCHECK_KEY` secret | Free, 1,000 a day; falls back to IPinfo alone |
 | Reverse DNS (hostname) | Cloudflare DNS-over-HTTPS | Free |
 | Mail checks: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI | Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file | Free |
-| Report cards (grade): DNSSEC, AAAA, CAA and HTTPS records, the site's redirect and security headers | Cloudflare DNS-over-HTTPS, the mail check, RDAP, plus two HEAD requests to the domain's own site | Free |
+| Report cards (grade): DNSSEC, AAAA, CAA and HTTPS records, the site's redirect and security headers | Cloudflare DNS-over-HTTPS, the mail check, RDAP, plus up to five header-only requests to the domain's own site (`HEAD`, or a `GET` dropped unread when `HEAD` is refused) | Free |
 | Networks (ASNs): holder, prefixes, main upstreams | RIPEstat (`as-overview`, `announced-prefixes`, `asn-neighbours`) | Free, no key |
 | Routing of a prefix: route, origin, RPKI, visibility, AS paths | RIPEstat (`prefix-overview`, `routing-status`, `rpki-validation`, `bgp-state`) | Free, no key |
 | The ASN sitemap's ranking (offline, `tools/build_asn_sitemap.mjs`) | RIPE NCC RIS table dump and AS names list (or CAIDA's prefix-to-AS file) | Free, run by hand |
@@ -431,7 +431,7 @@ search box on other sites (`goRoute()` in `src/worker.js`):
 | `example.com`, a URL, an international name | `/dns/example.com` (punycode) |
 | `10.1.2.3/22`, `10.0.0.0-22`, `192.168.1.10 255.255.255.0` | `/cidr/10.1.0.0/22` (the network address) |
 | `someone@gmail.com`, `mailto:…`, `mail gmail.com --dkim google` | `/mail/gmail.com` (with `?dkim=`) |
-| `grade github.com`, `report …`, `badge …` (a domain or URL) | `/grade/github.com` |
+| `grade github.com`, `report …`, `reportcard …`, `scorecard …`, `badge …` (a domain or URL) | `/grade/github.com` |
 | `port 22`, `port:22`, `22/tcp` | `/port/22` (the page explains the port; nothing is checked) |
 | a terminal command: `dig gmail.com MX`, `whois AS13335`, `lookup 1.1.1.1` | its page |
 | `route 1.1.1.0/24`, `bgp 8.8.8.8` (also `rpki`) | `/route/1.1.1.0/24`, `/route/8.8.8.8`: browsers go on to the `/cidr` page with the routing, `curl -L` gets the routing JSON. Space that isn't routed (`route 10.0.0.0/8`) gets its own `/cidr` or address page |
@@ -448,7 +448,7 @@ and a redirect is cached for an hour like the other redirects.
 `dkimSelector()`), and `goLocation()` checks the result before it goes out: a path on this site, made of
 `A-Za-z0-9._~:/?=%-` only, not starting with `//` or `/\` (which browsers read as another host), with no dot
 segments. Input with control, zero-width or bidi characters, other URL schemes (`javascript:`, `data:`, `ftp:`) or
-more than 300 characters is refused before parsing. `tools/check_go.sh` runs 115 inputs against `npx wrangler dev`
+more than 300 characters is refused before parsing. `tools/check_go.sh` runs 122 inputs against `npx wrangler dev`
 (or the live site: `sh tools/check_go.sh https://ipterm.net`), including `//evil.com`, `/\evil.com`, `%2F%2Fevil.com`,
 `javascript:alert(1)`, CRLF and NUL injection, bidi overrides, `__proto__` as a record type, out-of-range ports and
 AS numbers and an over-long name. Every answer must be the exact expected path or a 400. A URL to another site
@@ -598,17 +598,24 @@ selector. No IPinfo or proxycheck.io budget is ever used.
 `grade github.com` in the terminal, `/grade/<domain>` as a page, `curl …/grade/github.com` for JSON (`?format=text` for
 aligned lines), `/api/grade?domain=` for the terminal. One A to F grade for a domain from what ipterm already reads, as
 OK, WARN, FAIL and INFO lines with a `fix:` under each WARN and FAIL, like the mail check (`gradeData()`, `gradeChecks()`
-and `headerChecks()` in `src/worker.js`). `report`, `reportcard`, `scorecard` and `badge` are aliases.
+and `headerChecks()` in `src/worker.js`). `report`, `reportcard`, `scorecard` and `badge` are aliases. A DNS record name,
+one with a label that starts with `_` (`_dmarc.gmail.com`, `selector1._domainkey.outlook.com`), is not a domain: it has
+no site, mail or registration of its own, so `/grade/`, `/api/grade` and `/badge/` answer 400 (`recordName()`), `/go`
+doesn't send it there, and no dig or mail page offers a card for it.
 
 - **DNS** (Cloudflare's resolver): DNSSEC (the resolver's AD flag; a SERVFAIL that carries a DNSSEC Extended DNS Error,
   such as `EDE(9): DNSKEY Missing`, is "broken"), an AAAA record, CAA (at the name, or at its closest parent with
-  records, as RFC 8659 climbs; never at the bare TLD) and an HTTPS record (RFC 9460).
+  records, as RFC 8659 climbs: up to 6 parent names, asked side by side, never the bare TLD; `issuewild` covers only
+  wildcard certificates, so the name itself is judged by `issue`) and an HTTPS record (RFC 9460).
 - **Email**: the mail check's grade, from the same cache entries as `mail <domain>`, so the two always agree. A is OK, B
   is WARN, C or worse is FAIL. The first three problems are listed under the line; the fix is the first problem's.
-- **Registration**: expiry, and the transfer lock (`client transfer prohibited` or `server transfer prohibited`), from the
-  same RDAP record and cache entry as `whois <domain>`. A subdomain is graded with its registered domain's registration.
-- **Website**: one `HEAD` request to `https://<domain>/` for the security headers, and one to `http://<domain>/` for the
-  redirect to HTTPS (see below).
+- **Registration**: expiry (FAIL from the moment the expiry time passes), and the transfer lock (`client transfer
+  prohibited`, `server transfer prohibited`, or RFC 9083's `locked`, a registry lock such as sidn.nl's), from the same
+  RDAP record and cache entry as `whois <domain>`. The .nl and .br registries publish no transfer-lock status at all
+  (`NO_TRANSFER_LOCK_TLDS`: their domains show only `active`), so there the lock is INFO, not graded. A subdomain is
+  graded with its registered domain's registration.
+- **Website**: one `HEAD` request to `https://<domain>/` for the security headers (a `GET` when the server refuses
+  `HEAD`), and one to `http://<domain>/` for the redirect to HTTPS (see below).
 - Certificates aren't checked: a Worker's `fetch()` never shows them. crt.sh isn't asked either.
 
 The grade counts the lines (`GRADE_GRADES`; the same rubric is in `man grade` and on the `/grade` page):
@@ -623,44 +630,67 @@ The grade counts the lines (`GRADE_GRADES`; the same rubric is in `man grade` an
 
 INFO lines never count, and neither does a part that couldn't be checked: it is one INFO line, and the tally names it
 (`3 WARN; not checked: security headers`, `notChecked` in the JSON). A card with such a gap is cached for a minute
-instead of five. What each line reports:
+instead of five, so a timeout, a 429 or a record that couldn't be read is soon tried again. A gap a recheck won't fill
+is marked `lasting` and keeps the five minutes: the TLD has no RDAP, or the registry has no record of the name; the name
+points at a non-public address; the site answers with a 401, a 403 or a bot challenge; `http://` can't be reached while
+`https://` answers (a site that serves only HTTPS); no CAA record in the 6 parent names asked. What each line reports:
 
 | | FAIL | WARN | INFO |
 | --- | --- | --- | --- |
 | DNSSEC | broken: validating resolvers refuse the answers | not signed | the registered domain is signed, but the name is an alias of an unsigned one |
-| IPv6 | | no AAAA record (beside an A record) | no A or AAAA record at all; couldn't be read |
-| CAA | | no CAA record; records without an `issue` tag | couldn't be read |
+| IPv6 | | no AAAA record (beside an A record) | no A or AAAA record at all; couldn't be read (the AAAA record, or the A record when there is no AAAA) |
+| CAA | | no CAA record; records without an `issue` tag (`issuewild` alone covers only wildcards) | couldn't be read, at the name or at a parent closer than the one with records; none in the 6 closest parents of a deeper name |
 | HTTPS record | | | none (optional) |
 | mail | the mail check's grade is C, D or F | its grade is B | the mail check couldn't run |
 | expiry | expired; `redemption period` or `pending delete` | within 30 days | no date published; the TLD has no RDAP; couldn't be read |
-| transfer lock | | no transfer-prohibited status | the registry publishes no status codes |
+| transfer lock | | no transfer-prohibited or `locked` status | the registry publishes no status codes; .nl and .br, whose registries have no transfer-lock status |
 | HTTPS | `https://<domain>/` redirects to plain `http://` | | couldn't check (a 403, a challenge, a timeout, an error) |
 | HTTP | | `http://<domain>/` serves the site over plain HTTP, or redirects to plain http elsewhere | couldn't check |
 | HSTS | | missing; `max-age=0`; under 180 days; no valid `max-age` | |
-| CSP | | missing; only `Content-Security-Policy-Report-Only`; no `default-src` or `script-src`; `'unsafe-inline'` without a nonce or hash; scripts from any host (`*`, `https:`, `http:`, `data:`) | |
-| nosniff | | `X-Content-Type-Options` isn't `nosniff` | |
-| frames | | neither `X-Frame-Options` (`DENY`, `SAMEORIGIN`) nor CSP `frame-ancestors`; `ALLOW-FROM` or another value; `frame-ancestors *` | |
+| CSP | | missing; only `Content-Security-Policy-Report-Only`; no `default-src` or `script-src`; `'unsafe-inline'` without a nonce or hash; scripts from any host (`*`, `https:`, `http:`, `data:`) without `'strict-dynamic'` | |
+| nosniff | | the first value of `X-Content-Type-Options` isn't `nosniff` | |
+| frames | | neither `X-Frame-Options` (`DENY`, `SAMEORIGIN`) nor CSP `frame-ancestors`; `ALLOW-FROM` or another value; a `frame-ancestors` that lets in any site (`*`, `https:`, `http:`, a `*` host such as `https://*`) | |
 | referrer | | `Referrer-Policy: unsafe-url` or `no-referrer-when-downgrade` | not set: browsers default to `strict-origin-when-cross-origin` (the last value a browser knows wins) |
 
 A nonce, a hash or `'strict-dynamic'` in the script policy makes browsers ignore `'unsafe-inline'`, so that CSP is OK.
+Only `'strict-dynamic'` also makes them ignore hosts and schemes, so `*`, `https:` or `data:` beside a nonce or hash is
+still WARN. A header sent twice arrives as one comma list and is read the way browsers read it: the first
+`X-Content-Type-Options` value counts, and a repeated `X-Frame-Options` counts once (several different values that
+include `DENY`, `SAMEORIGIN` or `ALLOWALL` refuse all framing, so that is OK). CSP `frame-ancestors` overrides
+`X-Frame-Options`, so a `DENY` beside a `frame-ancestors https:` doesn't help.
 
 **The website check** (`webCheck()`, `httpsCheck()`, `httpCheck()`):
 
-- It only runs for a name whose A and AAAA records are all public addresses (Workers can't reach private networks
-  anyway; this is defence in depth). A name with no address gets one INFO line: there is no website to check.
+- It only runs for a name that has addresses and whose addresses are all public: for IPv6, the port check's rule
+  (global unicast `2000::/3`, not 6to4, Teredo or the other IETF blocks), so no form that embeds an IPv4 address
+  (`::ffff:0:0/96`, `64:ff9b::/96`, `2002::/16`) is tried; a record that doesn't parse counts as non-public. Otherwise
+  the website is INFO, not checked. When the A or the AAAA record couldn't be read, the site is checked on the other's
+  addresses (an unread AAAA shows on the IPv6 line); when neither gave an address, the website is INFO, not checked. A
+  name with no address gets one INFO line: there is no website to check.
 - `redirect: 'manual'`, always. A redirect is followed only over https, to a host name (never an IP address) on the
   default port with no user name or password, within the domain (the name without a leading `www.`, and anything under
   it), at most twice: three requests at most along the https chain, a `GET` included when a server refuses `HEAD` with a
   405 or 501 (its body is cancelled unread). The headers come from the page that finally answers 2xx.
+- A redirect to another host within the domain is followed only once that host's own A and AAAA records pass the same
+  test, on the same terms when one of them can't be read (up to 6 queries for both chains together, `WEB_DNS_BUDGET`;
+  a host both chains go to is asked once). Otherwise it is INFO: "redirects to an address ipterm doesn't follow" for a
+  non-public address, "redirects to www.example.com, whose address couldn't be read" when neither record gave one, or
+  "..., which has no address". None of this is a guarantee: `fetch()` resolves the name again and may get a different
+  answer (DNS rebinding), which a Worker can't prevent. The real control is Cloudflare's: Workers can't reach private
+  networks. The checks here are defence in depth.
 - A redirect to plain `http://` is a FAIL and isn't followed. A redirect to another domain (gmail.com to mail.google.com)
   is OK for HTTPS, and the headers are INFO, not checked, since they belong to someone else's site.
 - `http://<domain>/`: a redirect to any https address is OK; one redirect on plain http within the domain is followed
   first.
-- Time limits: 5 seconds for the whole https chain and 4 for http, side by side, and beside the DNS and RDAP reads.
-- At most 100 response headers are looked at, and only the 8 the checks use are kept, each capped at 4,000 characters
-  (1,000 in the JSON). No body is ever read.
-- A 401, a 403, a 429, a Cloudflare challenge (`cf-mitigated`), any other answer that isn't 2xx or a redirect, a timeout
-  or a connection error is INFO ("couldn't check"), never a FAIL.
+- Time limits: 5 seconds for the whole https chain and 4 for http (the lookups for redirect hosts included; running
+  out is a timeout), side by side, and beside the DNS and RDAP reads.
+- At most 100 response headers are looked at, and only the 9 the checks use are kept, each capped at 4,000 characters
+  (1,000 in the JSON, which shows only the 6 security headers). No body is ever read.
+- A 401, a 403, a 429, a bot challenge, any other answer that isn't 2xx or a redirect, a timeout or a connection error
+  is INFO ("couldn't check"), never a FAIL. A challenge counts even when it comes with a 2xx: Cloudflare's
+  (`cf-mitigated`), AWS WAF's (`x-amzn-waf-action`, a 202), and a `GET` answer that lacks a security header the
+  server's own refusal of `HEAD` carried (Akamai's interstitial, a 200 with no marker; amazon.com answers with one or
+  the other). The refusal's headers are never graded in the page's place.
 - The requests say who they are: `User-Agent: Mozilla/5.0 (compatible; ipterm-grade/1.0; +https://ipterm.net/grade)`.
   They come from Cloudflare's network, never from the visitor's browser, and carry nothing about the visitor.
 
@@ -686,29 +716,41 @@ address that drops everything (a timeout) got INFO lines for the website, never 
   sits in between (a website, a docs page, GitLab), each reader's browser fetches it from ipterm, which then sees their IP
   address, as any image host does, and stores nothing. It is the one answer sent with
   `Cross-Origin-Resource-Policy: cross-origin`, so other sites can show it; everything else stays `same-origin`.
-- Both are cached for an hour, in the data center's cache and by `Cache-Control` (ten minutes when part of the card
-  couldn't be checked). shields.io gives up on an endpoint after 3.5 seconds, so a badge whose card isn't ready within
-  2.8 seconds answers "checking…" (cached a minute) while the card finishes in the background (`ctx.waitUntil`), and the
-  next fetch gets the grade. When the card can't be had (rate limited, a data source down), the last grade, kept for a
-  day, is served for five minutes, or "busy, try later" or "unavailable" if there is none.
+- Both are cached for an hour in the data center's cache (ten minutes when part of the card couldn't be checked and a
+  recheck might fill it; a `lasting` gap keeps the hour). A cached copy is sent with the time it has left, in
+  `Cache-Control` (never under a minute) and in `cacheSeconds` (never under 300, shields.io's minimum), so shields.io,
+  GitHub's image proxy and browsers let go of it about when ipterm does, not an hour later. shields.io gives up on an endpoint after 3.5 seconds,
+  so a badge whose card isn't ready within 2.8 seconds answers "checking…" (cached a minute) while the card finishes in
+  the background (`ctx.waitUntil`), and the next fetch gets the grade. When the card can't be had (rate limited, a data
+  source down), the last grade, kept for a week, is served for five minutes, or "busy, try later" or "unavailable" if
+  there is none. Neither is saved as the badge, so the next fetch tries again.
+- A badge is graded again about once an hour per data center (every ten minutes with a gap a recheck might fill).
+  Fetches that arrive while its card is being made share that card within a Worker instance, as do `grade` lookups of
+  the same domain; separate instances may each make one. A card is shared for its first 30 seconds only
+  (`GRADE_SHARE_MS`: `ctx.waitUntil` keeps it alive no longer once its first requester has gone), and a fetch still
+  waiting on it then makes its own.
 - shields.io fetches every README's badge from a few addresses, so its fetches share those addresses' 30 lookups a
-  minute. Each badge makes a fresh card at most once an hour per data center, and the last-grade fallback covers a burst.
-  `/badge/` is in `robots.txt`'s Disallow.
+  minute. A fresh card is one of them, so that is about 30 new or expired badges a minute per address per data center.
+  Anyone can ask shields.io for badges of made-up names and use those lookups up: ipterm never sees who is asking, which
+  is the point of the endpoint, so that is accepted. Meanwhile existing badges show their last grade and new ones "busy,
+  try later". `/badge/` is in `robots.txt`'s Disallow.
 - The terminal prints both snippets after each card, with a copy button each; `copy badge` copies the shields.io one.
   The `/grade/<domain>` page shows both too, and `?format=text` ends with them.
 
 **Cost.** Measured under `wrangler dev` by wrapping `fetch()` and the Cache API, on five domains nothing had cached
-(wikipedia.org, mozilla.org, debian.org, bbc.co.uk, python.org): a fresh card made 22 to 28 fetches (4 DNS queries,
-the mail check's 13 to 19, 1 or 2 RDAP requests, 2 or 3 requests to the site) and 8 to 11 cache reads and writes, so 31
-to 39 subrequests, in 0.8 to 1.1 seconds. A fresh badge cost 39 (the card plus the badge's own cache calls); a cached
-card or badge is one cache read. Each part has a budget: 6 DNS queries (`GRADE_DNS_BUDGET`, retries and CAA at parent
-names included), 3 requests along the https chain and 2 along the http one, plus the mail check's own (22 and 7) and
-whois's (two registry names with a retry each, the registrar's record, and IANA's bootstrap file once a day per data
-center). The worst case, every cache cold and every retry firing, is about 57 subrequests, and 61 for a badge: far
-inside Workers Paid's limit of 10,000 a request, but above the Free plan's 50. On a copy run on the Free plan, the extra
-calls would fail and the parts they belong to should show as not checked (not tested). A fresh card counts as up to four
-of the visitor's 30 lookups a minute (the card, the mail records, the DKIM selectors and whois, each only when not
-cached). It never touches IPinfo or proxycheck.io.
+(wikipedia.org, mozilla.org, debian.org, bbc.co.uk, python.org): a fresh card made 24 to 30 fetches (4 DNS queries,
+the mail check's 13 to 19, 1 or 2 RDAP requests, 2 or 3 requests to the site, and 2 DNS queries for the `www.` name
+each of them redirects to) and 8 to 11 cache reads and writes, so 33 to 41 subrequests, in 0.8 to 1.1 seconds. A fresh
+badge cost 41 (the card plus the badge's own cache calls); a cached card or badge is one cache read. Each part has a
+budget: 6 DNS queries (`GRADE_DNS_BUDGET`, retries included), up to 8 for CAA at parent names (`GRADE_CAA_PARENTS` and
+two retries), 3 requests along the https chain and 2 along the http one, 6 DNS queries for the hosts those redirect to
+(`WEB_DNS_BUDGET`), plus the mail check's own (22 and 7) and whois's (two registry names with a retry each, the
+registrar's record, and IANA's bootstrap file once a day per data center). The worst case, every cache cold and every
+retry firing, is about 71 subrequests, and 75 for a badge: far inside Workers Paid's limit of 10,000 a request, but
+above the Free plan's 50. On a copy run on the Free plan, the extra calls would fail and the parts they belong to
+should show as not checked (not tested). A fresh card counts as one of the visitor's 30 lookups a minute, however many
+of its parts (the mail records, the DKIM selectors, whois) it has to fetch (`io.paid` in `limit()`), so one address
+gets at most 30 fresh cards a minute; a cached card counts as none. It never touches IPinfo or proxycheck.io.
 
 ### Registry records (whois)
 
@@ -1178,7 +1220,7 @@ address, so the terminal doesn't call the API) and each further lookup or page 1
 requests a day covers up to about 100,000 visits. Every curl call (`/help`, `/asn`, `/8.8.8.8/org`, a
 `?format=text` lookup) is one request too; `/openapi.json`, `/llms.txt` and `/opensearch.xml` are not. A search
 through `/go` is one request for the redirect plus the page it lands on (the redirect itself makes no outside call). A `leaktest` costs two (`/api/check`
-and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one; its `/cdn-cgi/trace` read and a shared result page's images are free. A shared result page (`/leaktest/r/<code>`) is one request. A report card (`/grade/<domain>`) is one request, with 31 to 39 subrequests when it isn't cached (see "Domain report card"); each badge fetch is one request, and shields.io and GitHub's image proxy keep the image for at least an hour. `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
+and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one; its `/cdn-cgi/trace` read and a shared result page's images are free. A shared result page (`/leaktest/r/<code>`) is one request. A report card (`/grade/<domain>`) is one request, with 33 to 41 subrequests when it isn't cached (see "Domain report card"); each badge fetch is one request, and shields.io and GitHub's image proxy keep the image for as long as ipterm's copy has left (an hour at most; at least five minutes through shields.io, whose minimum that is, and a minute for the `.svg`). `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
 which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
 requests. `/me`, `/line` and `/expect/...` are one request each, with no other cost: no subrequest, no Durable
 Object call, no rate-limiter call.
@@ -1215,7 +1257,7 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
 | Plain-text answers (`?format=text`, one-value endpoints, `/line`, `/expect`, the `/me` card) have control characters and bidi overrides replaced, so upstream data can't send escape sequences to a terminal. The `/me` card's only escape sequences are its own colors | `plain()` in `src/worker.js`, `meRoute()` | |
 | Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
-| The report card's requests to a domain's own site: HEAD only (a GET only after a refused HEAD, its body never read), only to `https://` and `http://` on the default port for a validated name whose addresses are all public, redirects followed only over https within the domain and at most twice, 5- and 4-second limits, at most 100 headers looked at and 8 kept, each capped. A 403, a challenge or a timeout is "couldn't check", never a FAIL | `webCheck()`, `httpsCheck()`, `httpCheck()`, `redirectTarget()` in `src/worker.js` | |
+| The report card's requests to a domain's own site: HEAD only (a GET only after a refused HEAD, its body never read), only to `https://` and `http://` on the default port for a validated name whose addresses are all public, redirects followed only over https within the domain, only to hosts whose addresses are public, and at most twice, 5- and 4-second limits, at most 100 headers looked at and 9 kept, each capped. A 403, a challenge or a timeout is "couldn't check", never a FAIL | `webCheck()`, `httpsCheck()`, `httpCheck()`, `redirectTarget()` in `src/worker.js` | |
 | Badges: the JSON holds only shields.io's schema fields; the SVG holds only a fixed label and the grade (escaped anyway), and is the only answer sent with `Cross-Origin-Resource-Policy: cross-origin` | `badgeReply()`, `badgeSvg()`, `secure()` in `src/worker.js` | |
 | The mail check's one outside fetch, the MTA-STS policy, goes only to `https://mta-sts.<domain>/.well-known/mta-sts.txt` for a validated domain name: no redirects followed, 5-second limit, 64 KB cap. Policy lines, report addresses and logo links are checked before use (host names, plain emails, https URLs only) | `stsPolicy()`, `parseSts()`, `reportUris()`, `httpsUrl()` in `src/worker.js` | |
 | Cross-site browser access (CORS) off by default. Only the static `/openapi.json` and `/llms.txt` allow any origin | `PUBLIC_API` in `wrangler.toml`; `public/_headers` for the two documents | Set to `"true"` to offer a public browser API |
@@ -1299,7 +1341,7 @@ IPinfo's data comes with its own attribution condition (see "Recommended: add a 
   are out of the ASN sitemap, and indexed pages list them as upstreams by number only. The rules can't tell these
   from a person's name without letting people through; a short list of reviewed AS numbers that are organizations,
   in `src/holder-heuristic.js` so the tool and the Worker agree, would bring them back.
-- The report card's worst case, about 57 subrequests, is above the Workers Free plan's 50 (ipterm.net runs on Paid, whose
+- The report card's worst case, about 71 subrequests, is above the Workers Free plan's 50 (ipterm.net runs on Paid, whose
   limit is 10,000). A copy on the Free plan could give the mail check a smaller budget when it runs inside `grade`.
 - The report card grades a subdomain's own mail records (`grade docs.example.org` asks for SPF at docs.example.org), as
   `mail` does. Grading the registered domain's mail instead would fit a website on a subdomain better, but the two

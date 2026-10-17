@@ -237,7 +237,7 @@ const TOOLS = {
     checks: ['DNS: DNSSEC, an AAAA record (IPv6), CAA (which certificate authorities may issue certificates) and an HTTPS record',
       "Email: the mail check's grade (SPF, DMARC, DKIM, MTA-STS) and its main findings",
       'Registration: expiry (WARN within 30 days, FAIL once expired) and the transfer lock, from the registry over RDAP',
-      "Website: one HEAD request to https://<domain>/ for HSTS, CSP, X-Content-Type-Options, frame protection and Referrer-Policy, and one to http://<domain>/ for the redirect to HTTPS. A 403, a bot challenge or a timeout is \"couldn't check\", never a FAIL"],
+      "Website: one HEAD request to https://<domain>/ for HSTS, CSP, X-Content-Type-Options, frame protection and Referrer-Policy (a GET, its body dropped unread, if the site refuses HEAD), and one to http://<domain>/ for the redirect to HTTPS. A 403, a bot challenge or a timeout is \"couldn't check\", never a FAIL"],
     examples: [['grade github.com', '/grade/github.com'], ['grade cloudflare.com', '/grade/cloudflare.com'], ['grade example.com', '/grade/example.com'], ['grade wikipedia.org', '/grade/wikipedia.org']],
   },
   leaktest: {
@@ -351,7 +351,7 @@ const GO_TOOLS = {
   leaktest: '/leaktest', dnsleak: '/leaktest', vpntest: '/leaktest', whois: '/whois', rdap: '/whois', dig: '/dns', dns: '/dns',
   nslookup: '/dns', mail: '/mail', email: '/mail', spf: '/mail', dmarc: '/mail', dkim: '/mail', cidr: '/cidr', subnet: '/cidr',
   ipcalc: '/cidr', route: '/cidr', bgp: '/cidr', rpki: '/cidr', port: '/port', ports: '/port', api: '/api', help: '/api', curl: '/api',
-  privacy: '/privacy', guides: '/guides', grade: '/grade', report: '/grade', badge: '/grade',
+  privacy: '/privacy', guides: '/guides', grade: '/grade', report: '/grade', reportcard: '/grade', scorecard: '/grade', badge: '/grade',
 };
 
 async function goRoute(io, html) {
@@ -402,7 +402,7 @@ function goTarget(raw) {
     case 'asn': case 'as': return args.length === 1 ? goAsn(args[0]) : null;
     case 'route': case 'bgp': case 'rpki': return args.length === 1 ? goRouteCmd(args[0]) : null;
     case 'port': case 'portcheck': return goPort(args);
-    case 'grade': case 'report': case 'badge': return args.length === 1 ? goGrade(args[0]) : null;
+    case 'grade': case 'report': case 'reportcard': case 'scorecard': case 'badge': return args.length === 1 ? goGrade(args[0]) : null;
     case 'leaktest': case 'dnsleak': case 'vpntest': {   // leaktest --result <code>: a shared result, only a valid code
       const r = args.length === 2 && /^--?result$/i.test(args[0]) && LEAKG.decode(args[1]);
       return r ? '/leaktest/r/' + r.code : null;
@@ -487,10 +487,10 @@ function goMail(args, cmd) {
   return s ? '/mail/' + name + '?dkim=' + encodeURIComponent(s) : null;
 }
 
-// grade <domain or URL>: the report card. An address has none (it isn't a domain).
+// grade <domain or URL>: the report card. An address or a record name (_dmarc.gmail.com) has none.
 function goGrade(v) {
   const host = urlHost(v), d = !parseIp(host) && normalizeDomain(host);
-  return d ? '/grade/' + d : null;
+  return d && !recordName(d) ? '/grade/' + d : null;
 }
 
 function goCidr(v) {
@@ -706,9 +706,11 @@ async function mailCheck(io, name, sel) {
 // entries, and the whole card is cached for five minutes, like DNS.
 async function gradeRoute(io, rawName, html) {
   const name = normalizeDomain(rawName);
-  if (!name) {
-    const error = parseIp(String(rawName || '').trim()) ? 'The report card needs a domain name, not an IP address. Example: grade github.com' : 'Not a valid domain name. Example: grade github.com';
-    return html ? gradePage(io, { domain: clip(rawName), error }, 400) : reply(io, { error }, 400);
+  if (!name || recordName(name)) {
+    const base = name && name.replace(/^(?:.*\.)?_[^.]*\./, '');      // the domain under the record: _dmarc.gmail.com -> gmail.com
+    const error = name ? `${name} is a DNS record name, not a domain. Example: grade ${base.includes('.') ? base : 'github.com'}`
+      : parseIp(String(rawName || '').trim()) ? 'The report card needs a domain name, not an IP address. Example: grade github.com' : 'Not a valid domain name. Example: grade github.com';
+    return html ? gradePage(io, { domain: clip(name || rawName), error }, 400) : reply(io, { error }, 400);
   }
   return guard(
     () => gradeFor(io, name),
@@ -717,7 +719,24 @@ async function gradeRoute(io, rawName, html) {
     (msg, status) => html ? gradePage(io, { domain: name, error: msg }, status) : reply(io, { error: msg }, status),
   );
 }
-const gradeFor = (io, name) => cached(io, 'grade/' + name, 300, () => gradeData(io, name));
+// A fresh card is one of the visitor's lookups: its mail, DKIM and whois parts don't count again, so a card costs
+// the same whatever is cached, and each token still buys one bounded card. Requests that arrive while a card is
+// being made share it (within this Worker instance), so a badge on a busy page doesn't start one per fetch. A
+// shared card that fails, rate limited or otherwise, was the first requester's: the others then try their own.
+// waitUntil keeps a card alive for at most 30 s after its first requester leaves, and a cancelled one never settles,
+// so a card is shared only that long from its start, and a waiter that reaches the end of that window tries its own.
+const GRADE_SHARE_MS = 30000;
+const GRADE_INFLIGHT = new Map();
+function gradeFor(io, name) {
+  const own = () => cached(io, 'grade/' + name, 300, () => gradeData({ ...io, paid: true }, name));
+  const key = io.url.origin + '/' + name, shared = GRADE_INFLIGHT.get(key), left = shared ? shared.at + GRADE_SHARE_MS - Date.now() : 0;
+  if (left > 0) return Promise.race([shared.p, sleep(left).then(() => { throw new Error('shared card gone'); })]).catch(own);
+  const entry = { at: Date.now() };
+  entry.p = own().finally(() => { if (GRADE_INFLIGHT.get(key) === entry) GRADE_INFLIGHT.delete(key); });   // a newer card may have taken the key
+  GRADE_INFLIGHT.set(key, entry);
+  io.ctx.waitUntil(entry.p.catch(() => {}));          // the others may still be waiting if this requester leaves
+  return entry.p;
+}
 
 const clip = s => String(s || '').slice(0, 100);
 async function whoisRoute(io, q, html) {
@@ -796,8 +815,10 @@ const CLOUDFLARE_RANGES = ['173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/2
   '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32', '2a09:bac0::/29'];
 // Only global unicast IPv6 (2000::/3) can be a visitor's address, so the check refuses everything else,
 // which includes the forms that embed an IPv4 address (::/96, 64:ff9b::/96). Inside 2000::/3 it also
-// refuses these: the IETF blocks (Teredo and others), 6to4 (which embeds IPv4) and documentation.
+// refuses these: the IETF blocks (Teredo and others), 6to4 (which embeds IPv4) and documentation. The
+// report card's website check uses the same rule for the addresses it would connect to.
 const PORT_V6_RESERVED = ['2001::/23', '2002::/16', '3fff::/20'];
+const v6Reserved = p => p.v === 6 && ((p.g[0] & 0xe000) !== 0x2000 || PORT_V6_RESERVED.some(r => inPrefix(p, r) >= 0));
 
 // Fetches from the page itself say so (Sec-Fetch-Site), and that always wins when it is sent. Browsers
 // without Sec-Fetch-* send no Origin on a same-origin GET, so the terminal also sends X-Ipterm (port or
@@ -844,7 +865,7 @@ async function portCheck(io, n) {
     return untested('cgnat', `not tested: ${base.ip} is in the carrier-grade NAT range (100.64.0.0/10). Your provider shares public addresses between many customers, so nothing on the internet can reach this one and no port forward can work. Ask your provider for a public IPv4 address, or use IPv6 or a tunnel such as Tailscale or Cloudflare Tunnel.`);
   }
   if (range) return untested('not-public', `not tested: ${base.ip} is not a public address (${range}), so nothing on the internet can reach it.`);
-  if (p.v === 6 && ((p.g[0] & 0xe000) !== 0x2000 || PORT_V6_RESERVED.some(r => inPrefix(p, r) >= 0))) {
+  if (v6Reserved(p)) {
     return untested('not-public', `not tested: ${base.ip} is a reserved or transition IPv6 address (IPv4-embedded, 6to4, Teredo or IETF-reserved), so ipterm doesn't connect to it. To test your IPv4 address, run: curl -4 ${io.url.host}/port/${n}`);
   }
   const blocked = PORTS.untestable(n);                   // port 25, the only one (hence the reason code)
@@ -1464,8 +1485,9 @@ function visitorKey(ip) {
   return p.g.slice(0, 3).map(x => x.toString(16)).join(':') + ':' + (p.g[3] & 0xff00).toString(16) + '::/56';
 }
 
+// io.paid: the lookup is part of a report card that has already spent its one token (see gradeFor).
 async function limit(io) {
-  if (!io.env.LOOKUP_LIMITER || !io.me) return;
+  if (!io.env.LOOKUP_LIMITER || !io.me || io.paid) return;
   let ok = true;
   try { ok = (await io.env.LOOKUP_LIMITER.limit({ key: limitKey(io.me) })).success; } catch { ok = true; } // fail open
   if (!ok) throw new RateLimited();
@@ -2129,6 +2151,9 @@ function normalizeDomain(q) {
   if (!new RegExp(`^(?:${label}\\.)+(?=[a-z0-9-]*[a-z])[a-z0-9-]{2,63}$`).test(host) || host.length > 253) return null;
   return host;
 }
+// A label starting with "_" (_dmarc.gmail.com, selector1._domainkey.outlook.com) names a DNS record, not a host.
+// dig takes it, but it has no website, mail or registration of its own, so it gets no report card.
+const recordName = name => /(^|\.)_/.test(name);
 
 function reverseName(p) {
   return p.v === 4 ? [...p.o].reverse().join('.') + '.in-addr.arpa'
@@ -2745,13 +2770,17 @@ function mailResult(base, probe, sel) {
      HTTPS record;
    - the mail check's grade and its main findings (the same cache entries as mail <domain>);
    - the registration (RDAP, the same cache entry as whois <domain>): expiry and the transfer lock;
-   - the website: one HEAD request to https://<domain>/ for its security headers, and one to http://<domain>/
-     for the redirect to HTTPS. Short time limits, redirects followed only within the domain (and only over
-     https), a capped number of headers read, and nothing else. A 403, a bot challenge, a timeout or an error
-     is "couldn't check" (INFO), never a FAIL. Certificates can't be checked: a Worker never sees them.
-   It never touches IPinfo or proxycheck.io. The whole card is cached for five minutes (one minute when a part
-   couldn't be checked). Budgets: GRADE_DNS_BUDGET queries, at most WEB_MAX_FETCH + WEB_HTTP_FETCH requests to
-   the site, plus the mail check's and whois's own (see the handbook for the totals). */
+   - the website: one HEAD request to https://<domain>/ for its security headers (a GET, its body dropped, if
+     the server refuses HEAD), and one to http://<domain>/ for the redirect to HTTPS. Short time limits,
+     redirects followed only within the domain (and only over https) to hosts whose addresses are public, a
+     capped number of headers read, and nothing else. A 403, a bot challenge (even one sent with a 2xx), a
+     timeout or an error is "couldn't check" (INFO), never a FAIL. Certificates can't be checked: a Worker
+     never sees them.
+   It never touches IPinfo or proxycheck.io, and a fresh card is one of the visitor's lookups. The whole card is
+   cached for five minutes (one minute when a part couldn't be checked and a recheck might fill it). Budgets:
+   GRADE_DNS_BUDGET queries (and GRADE_CAA_PARENTS + 2 for CAA at parent names), at most WEB_MAX_FETCH +
+   WEB_HTTP_FETCH requests to the site and WEB_DNS_BUDGET queries for the hosts its redirects go to, plus the mail
+   check's and whois's own (see the handbook for the totals). */
 
 const GRADE_GRADES = [
   ['A', 'no FAIL and no WARN'],
@@ -2760,14 +2789,21 @@ const GRADE_GRADES = [
   ['D', 'two FAIL'],
   ['F', 'three or more FAIL, an expired registration, or broken DNSSEC (validating resolvers refuse the domain)'],
 ];
-const GRADE_DNS_BUDGET = 6;        // A, AAAA, CAA and HTTPS, plus two for retries or CAA at parent names
-const WEB_TIMEOUT = 5000;          // the whole https:// chain, redirects included
+const GRADE_DNS_BUDGET = 6;        // A, AAAA, CAA and HTTPS, plus two for retries
+const GRADE_CAA_PARENTS = 6;       // parent names asked for CAA, side by side, plus two queries for retries; a deeper climb is "unread"
+// Registries whose RDAP has no transfer-lock status at all (.nl and .br show only "active", even for domains whose
+// registrar locks everything it can), so there the lock can't be graded.
+const NO_TRANSFER_LOCK_TLDS = new Set(['nl', 'br']);
+const WEB_TIMEOUT = 5000;          // the whole https:// chain, redirects and their hosts' lookups included
 const WEB_HTTP_TIMEOUT = 4000;     // the plain http:// check
 const WEB_MAX_FETCH = 3;           // requests along the https:// chain (two redirects, or a GET after a refused HEAD)
 const WEB_HTTP_FETCH = 2;          // requests along the http:// chain (one redirect within the domain)
+const WEB_DNS_BUDGET = 6;          // A and AAAA for the other hosts the redirects go to (three at most), retries included
 const WEB_MAX_HEADERS = 100;       // response headers looked at; the rest are ignored
-const WEB_KEEP = new Set(['strict-transport-security', 'content-security-policy', 'content-security-policy-report-only', 'x-content-type-options',
-  'x-frame-options', 'referrer-policy', 'location', 'cf-mitigated']);
+const WEB_SECURITY = ['strict-transport-security', 'content-security-policy', 'content-security-policy-report-only', 'x-content-type-options',
+  'x-frame-options', 'referrer-policy'];
+// cf-mitigated and x-amzn-waf-action mark a bot challenge (Cloudflare's, AWS WAF's), which can come with a 2xx.
+const WEB_KEEP = new Set([...WEB_SECURITY, 'location', 'cf-mitigated', 'x-amzn-waf-action']);
 // Extended DNS Errors (RFC 8914) that mean the answer was refused because the domain's DNSSEC doesn't check out.
 const EDE_DNSSEC = { 5: 'DNSSEC Indeterminate', 6: 'DNSSEC Bogus', 7: 'Signature Expired', 8: 'Signature Not Yet Valid', 9: 'DNSKEY Missing',
   10: 'RRSIGs Missing', 11: 'No Zone Key Bit Set', 12: 'NSEC Missing' };
@@ -2809,20 +2845,26 @@ async function gradeDns(name) {
   let caaFrom = name, caaRecs = recs(caa, 257);
   const labels = name.split('.');
   if (!caaRecs.length && ok(caa) && labels.length > 2) {           // none here: the closest parent with records applies
-    const parents = labels.slice(1, -1).map((_, i) => labels.slice(i + 1).join('.')).slice(0, 3);
-    const up = await Promise.all(parents.map(p => ask(p, 'CAA')));
-    const i = up.findIndex(r => recs(r, 257).length);
-    if (i >= 0) { caaFrom = parents[i]; caaRecs = recs(up[i], 257); }
-    else if (up.some(r => !r || dnsFailed(r))) unread.CAA = true;
+    // Every parent at once, on a budget of its own so the first round's retries can't starve it. The climb stops at
+    // the first parent that has records or couldn't be read; one cut short by GRADE_CAA_PARENTS is unread too.
+    const all = labels.slice(1, -1).map((_, i) => labels.slice(i + 1).join('.')), parents = all.slice(0, GRADE_CAA_PARENTS);
+    const cb = { left: parents.length + 2, used: 0 };
+    const up = await Promise.all(parents.map(p => mailDoh(cb, p, 'CAA').catch(() => null)));
+    b.used += cb.used;
+    const i = up.findIndex(r => !r || dnsFailed(r) || recs(r, 257).length);
+    if (i >= 0 && recs(up[i], 257).length) { caaFrom = parents[i]; caaRecs = recs(up[i], 257); }
+    else if (i >= 0) unread.CAA = true;
+    else if (all.length > parents.length) unread.CAA = 'too deep';       // the names above weren't asked
   }
   const caaList = caaRecs.map(x => caaRecord(x.data)).filter(Boolean);
   const cas = tag => [...new Set(caaList.filter(x => x.tag === tag).map(x => x.ca))];
   return {
-    ...(Object.keys(unread).length ? { _ttl: 60 } : {}),
+    ...(Object.values(unread).includes(true) ? { _ttl: 60 } : {}),   // a read that failed; 'too deep' won't change on a recheck
     status: 'NOERROR', dnssec: !!((ok(a) && a.AD) || (ok(aaaa) && aaaa.AD)), unread,
     cname: [...new Set([...recs(a, 5), ...recs(aaaa, 5)].map(x => host(x.data)))].slice(0, 5),
     v4: recs(a, 1).map(x => String(x.data)).filter(x => parseIp(x)).slice(0, 10),
     v6: recs(aaaa, 28).map(x => String(x.data)).filter(x => parseIp(x)).slice(0, 10),
+    all: [...recs(a, 1), ...recs(aaaa, 28)].map(x => String(x.data)),   // every address, for webCheck's guard
     caa: caaList.length ? { from: caaFrom, issue: cas('issue'), issuewild: cas('issuewild'), records: caaList.slice(0, 12).map(x => `${x.tag} "${x.value}"`) } : null,
     https: recs(https, 65).slice(0, 3).map(x => httpsRecord(x.data)),
     subrequests: b.used,
@@ -2851,34 +2893,48 @@ function redirectTarget(from, loc) {
   if (!h || u.port || u.username || u.password || !/^https?:$/.test(u.protocol)) return null;
   return { scheme: u.protocol.slice(0, -1), host: h, url: `${u.protocol}//${h}${short(u.pathname + u.search, 300)}` };
 }
+const challenged = r => !!(r.h['cf-mitigated'] || r.h['x-amzn-waf-action']);
 function blockedWhy(r) {
-  if (r.h['cf-mitigated']) return 'showed a bot challenge';
+  if (challenged(r)) return 'showed a bot challenge';
   if (r.status === 401) return 'asks for a login (HTTP 401)';
   if (r.status === 403) return 'turned the check away (HTTP 403, usually bot protection)';
   if (r.status === 429) return 'said too many requests (HTTP 429)';
   return `answered HTTP ${r.status}`;
 }
 const fetchFailed = e => (e && (e.name === 'TimeoutError' || e.name === 'AbortError') ? 'timeout' : 'connect');
+// A wait the chain's time limit also covers, though fetch() isn't part of it: a redirect host's lookups, shared by
+// both chains and so not tied to either's signal. It gives up with the signal's TimeoutError, which reads as a timeout.
+const inTime = (p, signal) => Promise.race([p, new Promise((_, no) => (signal.aborted ? no(signal.reason)
+  : signal.addEventListener('abort', () => no(signal.reason), { once: true })))]);
 
-// https://<name>/: follows up to two redirects within the domain, then reads the page's headers.
-async function httpsCheck(name, ua, n) {
+// https://<name>/: follows up to two redirects within the domain, then reads the page's headers. A challenge
+// page is the WAF's, not the site's, so its headers say nothing about the site.
+async function httpsCheck(name, ua, n, noFollow) {
   const base = siteBase(name), signal = AbortSignal.timeout(WEB_TIMEOUT), start = `https://${name}/`;
   let url = start, k = 0;
   const hops = [];
   try {
     while (k < WEB_MAX_FETCH) {
-      let r = await webFetch(url, 'HEAD', signal, ua); k++;
-      if ((r.status === 405 || r.status === 501) && k < WEB_MAX_FETCH) { r = await webFetch(url, 'GET', signal, ua); k++; }
+      let r = await webFetch(url, 'HEAD', signal, ua), refusal = null; k++;
+      if ((r.status === 405 || r.status === 501) && k < WEB_MAX_FETCH) { refusal = r; r = await webFetch(url, 'GET', signal, ua); k++; }
       hops.push({ url, status: r.status });
       if (r.status >= 300 && r.status < 400 && r.status !== 304) {
         const t = r.h.location ? redirectTarget(url, r.h.location) : null;
         if (!t) return { hops, error: r.h.location ? "redirects to an address ipterm doesn't follow" : `answered HTTP ${r.status} without saying where to go` };
         if (t.scheme === 'http') return { hops, downgrade: t.url };
         if (!onSite(t.host, base)) return { hops, offsite: t.host, final: url };
+        const no = await inTime(noFollow(t.host), signal);
+        if (no) return { hops, final: url, error: no };
         url = t.url;
         continue;
       }
-      if (r.status >= 200 && r.status < 300) return { hops, checked: true, final: url, status: r.status, headers: r.h };
+      if (r.status >= 200 && r.status < 300 && !challenged(r)) {
+        // A bot manager can answer the GET with its own page, a 200 with no marker (Akamai's does), which then
+        // lacks a header the site's own refusal of HEAD carried. Those headers aren't graded: they aren't the page's.
+        const gone = refusal && WEB_SECURITY.find(x => refusal.h[x] && !r.h[x]);
+        if (gone) return { hops, final: url, error: `showed what looks like a bot challenge (its page has no ${gone} header, though the site sent one when it refused HEAD)` };
+        return { hops, checked: true, final: url, status: r.status, headers: r.h };
+      }
       return { hops, final: url, error: blockedWhy(r) };
     }
     return { hops, error: `redirects more than ${WEB_MAX_FETCH - 1} times` };
@@ -2887,7 +2943,7 @@ async function httpsCheck(name, ua, n) {
   } finally { n.used += k; }
 }
 // http://<name>/: does it send visitors to HTTPS? One more redirect is followed if it stays on plain http within the domain.
-async function httpCheck(name, ua, n) {
+async function httpCheck(name, ua, n, noFollow) {
   const base = siteBase(name), signal = AbortSignal.timeout(WEB_HTTP_TIMEOUT);
   let url = `http://${name}/`, k = 0;
   try {
@@ -2898,10 +2954,12 @@ async function httpCheck(name, ua, n) {
         if (!t) return { error: "redirects to an address ipterm doesn't follow" };
         if (t.scheme === 'https') return { upgrades: true, to: t.url };
         if (!onSite(t.host, base)) return { plainRedirect: t.url };
+        const no = await inTime(noFollow(t.host), signal);
+        if (no) return { error: no };
         url = t.url;
         continue;
       }
-      if (r.status >= 200 && r.status < 300) return { plain: true, final: url, status: r.status };
+      if (r.status >= 200 && r.status < 300 && !challenged(r)) return { plain: true, final: url, status: r.status };
       return { error: blockedWhy(r) };
     }
     return { error: 'redirects more than once on plain HTTP' };
@@ -2910,19 +2968,39 @@ async function httpCheck(name, ua, n) {
   } finally { n.used += k; }
 }
 
-// The website half. It only runs for a name whose addresses are all public (Workers can't reach private networks
-// anyway; this is defence in depth). The two checks run side by side.
+// The website half. It only runs for a name that has addresses and whose addresses are all public (for IPv6, the
+// port check's rule; an address that doesn't parse, such as ::ffff:127.0.0.1, isn't), and a redirect is followed
+// only to a host whose addresses pass the same test, on the same terms when its A or AAAA can't be read
+// (WEB_DNS_BUDGET queries, shared by both checks, within each chain's time limit). fetch() resolves names again
+// and may get another answer (DNS rebinding), which a Worker can't prevent: the real control is the platform's,
+// since Workers can't reach private networks. This is defence in depth. The two checks run side by side.
 async function webCheck(name, dns, origin) {
-  const addrs = [...dns.v4, ...dns.v6];
-  if (!addrs.length) return { reason: 'noaddr' };
-  const priv = addrs.find(x => nonPublicReason(parseIp(x)));
+  // With one record unread, the site is still checked on the other's addresses (an unread AAAA is on the IPv6 line).
+  if (!dns.all.length && (dns.unread.A || dns.unread.AAAA)) return { reason: 'unread', type: dns.unread.A ? 'A' : 'AAAA' };
+  if (!dns.all.length) return { reason: 'noaddr' };
+  const bad = x => { const p = parseIp(x); return !p || nonPublicReason(p) || v6Reserved(p); };
+  const priv = dns.all.find(bad);
   if (priv) return { reason: 'private', address: priv };
+  const b = { left: WEB_DNS_BUDGET, used: 0 }, seen = new Map();
+  const ask = (h, t) => mailDoh(b, h, t).catch(() => null);
+  // Why a redirect to h isn't followed ('' when it is). As for the name, one unread record is fine beside addresses.
+  const noFollow = h => {
+    if (h === name) return '';
+    if (!seen.has(h)) seen.set(h, Promise.all([ask(h, 'A'), ask(h, 'AAAA')]).then(rs => {
+      const ips = rs.flatMap(r => (r && (r.Status ?? 0) === 0 && Array.isArray(r.Answer) ? r.Answer : []).slice(0, 20)
+        .filter(x => x && (x.type === 1 || x.type === 28)).map(x => String(x.data)));
+      if (ips.some(bad)) return "redirects to an address ipterm doesn't follow";
+      return ips.length ? '' : rs.some(r => !r || dnsFailed(r)) ? `redirects to ${h}, whose address couldn't be read` : `redirects to ${h}, which has no address`;
+    }));
+    return seen.get(h);
+  };
   const ua = `Mozilla/5.0 (compatible; ipterm-grade/1.0; +${origin}/grade)`, n = { used: 0 };
-  const [https, http] = await Promise.all([httpsCheck(name, ua, n), httpCheck(name, ua, n)]);
-  return { https, http, subrequests: n.used };
+  const [https, http] = await Promise.all([httpsCheck(name, ua, n, noFollow), httpCheck(name, ua, n, noFollow)]);
+  return { https, http, subrequests: n.used + b.used };
 }
 
-const daysText = d => (d >= 365 ? `${Math.floor(d / 365)} year${d >= 730 ? 's' : ''}` : d >= 60 ? `${Math.floor(d / 30.44)} months` : `${d} day${d === 1 ? '' : 's'}`);
+// Whole 30-day months, so 180 days (HSTS's six-month bar) reads as six and 179 as five; years are rounded.
+const daysText = d => { const y = Math.round(d / 365.25); return d >= 365 ? `${y} year${y === 1 ? '' : 's'}` : d >= 60 ? `${Math.floor(d / 30)} months` : `${d} day${d === 1 ? '' : 's'}`; };
 // HSTS, CSP, X-Content-Type-Options, frame protection and Referrer-Policy, from the page's own response.
 function headerChecks(add, h, page) {
   const at = ` (at ${page})`;
@@ -2949,19 +3027,27 @@ function headerChecks(add, h, page) {
     else add('web', 'CSP', 'warn', 'no Content-Security-Policy, so nothing limits which scripts the page runs if an attacker injects one', cspFix);
   } else if (!scripts) add('web', 'CSP', 'warn', "a Content-Security-Policy is set, but without script-src or default-src it doesn't limit scripts", cspFix);
   else {
+    // A nonce, a hash or 'strict-dynamic' turns 'unsafe-inline' off; only 'strict-dynamic' also turns off hosts and schemes.
     const strong = scripts.some(s => /^'(nonce-|sha(256|384|512)-|strict-dynamic')/i.test(s));
+    const anySite = s => s === '*' || s === 'https:' || s === 'http:' || s === 'data:';
     if (scripts.includes("'unsafe-inline'") && !strong) add('web', 'CSP', 'warn', `${which} allows 'unsafe-inline', so an injected inline script still runs: little protection against XSS`, "replace 'unsafe-inline' with nonces or hashes (and 'strict-dynamic')");
-    else if (!strong && scripts.some(s => s === '*' || s === 'https:' || s === 'http:' || s === 'data:')) add('web', 'CSP', 'warn', `${which} allows scripts from any site (${scripts.find(s => s === '*' || /:$/.test(s))})`, 'list the hosts your scripts come from instead, or use nonces');
+    else if (!scripts.includes("'strict-dynamic'") && scripts.some(anySite)) add('web', 'CSP', 'warn', `${which} allows scripts from any site (${scripts.find(anySite)})`, "list the hosts your scripts come from instead, or use nonces with 'strict-dynamic'");
     else add('web', 'CSP', 'ok', `limits scripts (${which} ${scripts.slice(0, 3).join(' ')}${scripts.length > 3 ? ' …' : ''})`);
   }
 
+  // A header sent twice arrives joined with ", "; browsers read only its first value (Fetch's "determine nosniff").
   const xcto = String(h['x-content-type-options'] || '').trim().toLowerCase();
-  if (xcto === 'nosniff') add('web', 'nosniff', 'ok', 'X-Content-Type-Options: nosniff');
+  if (xcto.split(',')[0].trim() === 'nosniff') add('web', 'nosniff', 'ok', 'X-Content-Type-Options: nosniff');
   else add('web', 'nosniff', 'warn', xcto ? `X-Content-Type-Options is "${short(xcto, 40)}", not nosniff` : 'no X-Content-Type-Options header, so browsers may guess a file\'s type and run it as a script', 'send X-Content-Type-Options: nosniff');
 
-  const fa = dirs['frame-ancestors'], xfo = String(h['x-frame-options'] || '').trim().toLowerCase();
+  // Browsers read X-Frame-Options as a set (HTML's steps): "SAMEORIGIN, SAMEORIGIN" is SAMEORIGIN, and several values
+  // that include a known one refuse all framing. frame-ancestors overrides it; '*', a '*' host or a bare https: or
+  // http: (which takes https too) lets every site in.
+  const fa = dirs['frame-ancestors'], xfos = [...new Set(String(h['x-frame-options'] || '').split(',').map(x => x.trim().toLowerCase()))];
+  const xfo = xfos.length > 1 && xfos.some(x => x === 'deny' || x === 'sameorigin' || x === 'allowall') ? 'deny' : xfos.join(', ');
+  const anyFrame = fa && fa.find(s => s === 'https:' || s === 'http:' || /^(?:https?:\/\/)?\*(?::[^/]*)?(?:\/.*)?$/.test(s));
   const frameFix = "send Content-Security-Policy: frame-ancestors 'self' (or X-Frame-Options: SAMEORIGIN)";
-  if (fa && fa.includes('*')) add('web', 'frames', 'warn', 'frame-ancestors * lets any site show the page in a frame (clickjacking)', frameFix);
+  if (anyFrame) add('web', 'frames', 'warn', `frame-ancestors ${short(anyFrame, 40)} lets any site show the page in a frame (clickjacking)`, frameFix);
   else if (fa) add('web', 'frames', 'ok', `CSP frame-ancestors ${fa.slice(0, 3).join(' ') || "'none'"}`);
   else if (xfo === 'deny' || xfo === 'sameorigin') add('web', 'frames', 'ok', `X-Frame-Options: ${xfo.toUpperCase()}`);
   else if (xfo) add('web', 'frames', 'warn', `X-Frame-Options is "${short(xfo, 40)}", which current browsers don't honor`, frameFix);
@@ -2981,8 +3067,10 @@ function headerChecks(add, h, page) {
 function gradeChecks(g) {
   const out = [], name = g.domain, dns = g.dns;
   const add = (section, check, status, text, fix, extra = {}) => out.push({ section, check, status, text, ...(fix && (status === 'warn' || status === 'fail') ? { fix } : {}), ...extra });
-  // what: the part the grade leaves out, as the tally names it ("not checked: security headers")
-  const skip = (section, check, text, what = check) => add(section, check, 'info', text, null, { skipped: what });
+  // what: the part the grade leaves out, as the tally names it ("not checked: security headers"). lasting: a recheck
+  // won't fill the gap (the TLD has no RDAP, the site turns ipterm away), so the card keeps its usual cache time.
+  const skip = (section, check, text, what = check, lasting = false) => add(section, check, 'info', text, null, { skipped: what, ...(lasting ? { lasting } : {}) });
+  const walled = e => /HTTP 40[13]|bot challenge/.test(e || '');   // a login, a 403 or a challenge: the same every time
   const unreadText = what => `couldn't be read (Cloudflare's resolver got no usable answer for ${what}), so it wasn't checked`;
   const reg = g.registration && g.registration.found ? g.registration : null;
 
@@ -2996,17 +3084,23 @@ function gradeChecks(g) {
     const u = dns.unread;
     if (dns.v6.length) add('dns', 'IPv6', 'ok', `reachable over IPv6: ${dns.v6.length} AAAA record${dns.v6.length > 1 ? 's' : ''} (${dns.v6[0]}${dns.v6.length > 1 ? ' …' : ''})`);
     else if (u.AAAA) skip('dns', 'IPv6', unreadText('AAAA'));
+    else if (u.A) skip('dns', 'IPv6', "no AAAA record, but the A record couldn't be read (Cloudflare's resolver got no usable answer), so it wasn't checked");
     else if (dns.v4.length) add('dns', 'IPv6', 'warn', `no AAAA record, so visitors on IPv6-only networks can't reach ${name}`, `add an AAAA record for ${name}: most hosts and CDNs give you an IPv6 address`);
     else add('dns', 'IPv6', 'info', `no A or AAAA record: ${name} has no web address`);
 
     const c = dns.caa, at = c && c.from !== name ? ` (the CAA records at ${c.from})` : '';
-    const issuers = c ? [...new Set([...c.issue, ...c.issuewild].filter(Boolean))] : [];
+    // issuewild only governs wildcard certificates (RFC 8659 4.3): without an issue tag, any CA may issue for the name itself.
+    const named = xs => [...new Set(xs.filter(Boolean))], few = xs => (xs.length > 4 ? `${xs.slice(0, 4).join(', ')} and ${xs.length - 4} more` : andList(xs));
+    const issuers = c ? named(c.issue) : [], wild = c ? named(c.issuewild) : [];
+    const wildText = c && c.issuewild.length && !(wild.length === issuers.length && wild.every(x => issuers.includes(x)))
+      ? (wild.length ? `; for wildcard certificates, only ${few(wild)}` : '; no wildcard certificates') : '';
     const caaFix = `add a CAA record naming the CA that issues your certificates, such as ${name}. CAA 0 issue "letsencrypt.org"`;
-    if (u.CAA) skip('dns', 'CAA', unreadText('CAA'));
+    if (u.CAA) skip('dns', 'CAA', u.CAA === 'too deep' ? `none at ${name} or its ${GRADE_CAA_PARENTS} closest parent names, and the names above those weren't asked, so it wasn't checked` : unreadText('CAA'), 'CAA', u.CAA === 'too deep');
     else if (!c) add('dns', 'CAA', 'warn', `no CAA record, so any certificate authority may issue certificates for ${name}`, caaFix);
-    else if (!c.issue.length && !c.issuewild.length) add('dns', 'CAA', 'warn', `CAA records${at} name no CA (no issue tag), so any certificate authority may still issue`, caaFix);
-    else if (!issuers.length) add('dns', 'CAA', 'ok', `no certificate authority may issue certificates for ${name} (issue ";")${at}`);
-    else add('dns', 'CAA', 'ok', `only ${issuers.length > 4 ? `${issuers.slice(0, 4).join(', ')} and ${issuers.length - 4} more` : andList(issuers)} may issue certificates${at}`);
+    else if (!c.issue.length) add('dns', 'CAA', 'warn', c.issuewild.length ? `CAA records${at} cover only wildcard certificates (issuewild, no issue tag), so any certificate authority may still issue for ${name}`
+      : `CAA records${at} name no CA (no issue tag), so any certificate authority may still issue`, caaFix);
+    else if (!issuers.length) add('dns', 'CAA', 'ok', `no certificate authority may issue certificates for ${name} (issue ";")${at}${wildText}`);
+    else add('dns', 'CAA', 'ok', `only ${few(issuers)} may issue certificates${at}${wildText}`);
 
     const hr = dns.https[0];
     if (u.HTTPS) skip('dns', 'HTTPS record', unreadText('HTTPS'));
@@ -3032,37 +3126,42 @@ function gradeChecks(g) {
   const r = g.registration;
   if (!r || r.error) skip('registration', 'registration', `the registry record couldn't be read${r && r.error ? ` (${r.error})` : ''}, so expiry and the transfer lock weren't checked`);
   else if (!r.found) skip('registration', 'registration', r.reason === 'no-rdap' ? `the .${r.tld} registry doesn't publish RDAP, so expiry and the transfer lock weren't checked`
-    : `no registry record was found for ${r.domain || name}, so expiry and the transfer lock weren't checked`);
+    : `no registry record was found for ${r.domain || name}, so expiry and the transfer lock weren't checked`, 'registration', r.reason !== 'unknown');   // unknown: asked rdap.org while IANA's file was down
   else {
     const left = r.expires ? dayDiff(r.expires) : null, date = r.expires ? String(r.expires).slice(0, 10) : null, st = r.status || [];
     const at = r.registrar && r.registrar.name ? r.registrar.name : 'your registrar';
     const lapsed = st.find(x => /redemption period|pending delete/.test(x));
     if (lapsed) add('registration', 'expiry', 'fail', `${r.domain} is in "${lapsed}": it has lapsed and is about to be released`, `restore it at ${at} now, before someone else can register it`);
     else if (left == null) add('registration', 'expiry', 'info', `the registry gives no expiry date for ${r.domain}`);
-    else if (left < 0) add('registration', 'expiry', 'fail', `${r.domain} expired on ${date}, ${daysText(-left)} ago`, `renew it at ${at} now: an expired domain stops working and can be registered by someone else`);
-    else if (left <= 30) add('registration', 'expiry', 'warn', `${r.domain} expires on ${date}, in ${daysText(left)}`, `renew it now, and turn on auto-renew at ${at}`);
+    // Expired is decided from the timestamp: left is rounded, so the first twelve hours after expiry would be "in 0 days".
+    else if (Date.parse(r.expires) < Date.now()) add('registration', 'expiry', 'fail', `${r.domain} expired on ${date}, ${left < 0 ? `${daysText(-left)} ago` : 'less than a day ago'}`, `renew it at ${at} now: an expired domain stops working and can be registered by someone else`);
+    else if (left <= 30) add('registration', 'expiry', 'warn', `${r.domain} expires on ${date}, in ${left ? daysText(left) : 'less than a day'}`, `renew it now, and turn on auto-renew at ${at}`);
     else add('registration', 'expiry', 'ok', `${r.domain} expires on ${date}, in ${daysText(left)}`);
-    const lock = st.filter(x => /transfer prohibited/.test(x));
+    // RFC 9083's "locked" (a registry lock, such as sidn.nl's) also stops transfers.
+    const lock = st.filter(x => /transfer prohibited|^locked$/.test(x));
     if (!st.length) add('registration', 'transfer lock', 'info', `the registry publishes no status codes for ${r.domain}, so the transfer lock wasn't checked`);
     else if (lock.length) add('registration', 'transfer lock', 'ok', `${r.domain} is locked against transfers (${lock.join(', ')})`);
+    else if (NO_TRANSFER_LOCK_TLDS.has(r.tld)) add('registration', 'transfer lock', 'info', `the .${r.tld} registry has no transfer-lock status, so the transfer lock wasn't checked`);
     else add('registration', 'transfer lock', 'warn', `${r.domain} isn't locked against transfers, so whoever gets into the registrar account can move it away more easily`, `turn on the transfer lock (registrar lock) at ${at}`);
   }
 
   const w = g.web, why = e => (e === 'timeout' ? "didn't answer in time" : e === 'connect' ? "couldn't be reached (nothing listening, or a certificate or network problem)" : e);
   if (dns.broken) skip('web', 'website', "not checked: the domain's address can't be read");
+  else if (w && w.reason === 'unread') skip('web', 'website', `${name}'s ${w.type} record couldn't be read (Cloudflare's resolver got no usable answer), so the website wasn't checked`);
   else if (!w || w.reason === 'noaddr') add('web', 'website', 'info', `${name} has no A or AAAA record, so there is no website to check`);
-  else if (w.reason === 'private') skip('web', 'website', `${name} points at a non-public address (${w.address}), so the website wasn't checked`);
+  else if (w.reason === 'private') skip('web', 'website', `${name} points at a non-public address (${w.address}), so the website wasn't checked`, 'website', true);
   else {
     const s = w.https, p = w.http, home = `https://${name}/`;
     if (s.downgrade) add('web', 'HTTPS', 'fail', `${home} redirects to plain HTTP (${s.downgrade}), so visitors lose the encryption they came with`, 'redirect to an https:// address instead');
     else if (s.checked) add('web', 'HTTPS', 'ok', s.final === home ? `${home} answers (HTTP ${s.status})` : `${home} redirects to ${s.final}, which answers (HTTP ${s.status})`);
     else if (s.offsite) add('web', 'HTTPS', 'ok', `${home} redirects to ${s.offsite}, another domain`);
-    else skip('web', 'HTTPS', `${s.final && s.final !== home ? s.final : home} ${why(s.error)}, so the security headers weren't checked`, 'security headers');
+    else skip('web', 'HTTPS', `${s.final && s.final !== home ? s.final : home} ${why(s.error)}, so the security headers weren't checked`, 'security headers', walled(s.error));
 
     if (p.upgrades) add('web', 'HTTP', 'ok', `http://${name}/ redirects to HTTPS`);
     else if (p.plain) add('web', 'HTTP', 'warn', `http://${name}/ serves the site over plain HTTP instead of sending visitors to HTTPS`, `redirect every http:// request to https:// (a 301 to https://${name}/)`);
     else if (p.plainRedirect) add('web', 'HTTP', 'warn', `http://${name}/ redirects to ${p.plainRedirect}, still plain HTTP`, `redirect every http:// request to https:// (a 301 to https://${name}/)`);
-    else skip('web', 'HTTP', `http://${name}/ ${p.error === 'connect' ? "couldn't be reached (fine if the site only serves HTTPS)" : why(p.error)}, so the redirect to HTTPS wasn't checked`, 'HTTP redirect');
+    else skip('web', 'HTTP', `http://${name}/ ${p.error === 'connect' ? "couldn't be reached (fine if the site only serves HTTPS)" : why(p.error)}, so the redirect to HTTPS wasn't checked`, 'HTTP redirect',
+      (p.error === 'connect' && !!s.checked) || walled(p.error));
 
     if (s.checked) headerChecks(add, s.headers, s.final);
     else if (s.offsite) add('web', 'headers', 'info', `not checked: ${home} sends visitors to ${s.offsite}, another domain`);
@@ -3077,6 +3176,8 @@ function gradeOf(checks, dns) {
 }
 // What the grade leaves out, for the tally line ("not checked: website").
 const gradeTally = d => mailTally(d.counts) + (d.notChecked && d.notChecked.length ? `; not checked: ${[...new Set(d.notChecked)].join(', ')}` : '');
+// A gap a recheck might fill (a timeout, a 429, an unread record) keeps the card and its badge briefly.
+const regrade = checks => (checks || []).some(c => c.skipped && !c.lasting);
 
 async function gradeData(io, name) {
   const dns = await gradeDns(name);
@@ -3093,7 +3194,7 @@ async function gradeData(io, name) {
   const notChecked = checks.filter(c => c.skipped).map(c => c.skipped);
   const h = web && web.https && web.https.checked ? web.https.headers : null;
   return {
-    ...(notChecked.length || dns._ttl ? { _ttl: 60 } : {}),
+    ...(regrade(checks) || dns._ttl ? { _ttl: 60 } : {}),
     domain: name, status: dns.status, grade: gradeOf(checks, dns), counts: { ok: n('ok'), warn: n('warn'), fail: n('fail'), info: n('info') },
     checks, notChecked,
     dns: { dnssec: dns.dnssec || false, broken: dns.broken || null, cname: dns.cname || [], addresses: [...(dns.v4 || []), ...(dns.v6 || [])],
@@ -3102,7 +3203,7 @@ async function gradeData(io, name) {
     registration: registration && registration.found ? { domain: registration.domain, registrar: registration.registrar ? registration.registrar.name : null,
       expires: registration.expires, status: registration.status, dnssec: registration.dnssec } : null,
     web: web && web.https ? { https: { start: `https://${name}/`, final: web.https.final || null, status: web.https.status || null, hops: web.https.hops,
-      headers: h ? Object.fromEntries(Object.entries(h).filter(([k]) => k !== 'location' && k !== 'cf-mitigated').map(([k, v]) => [k, short(v, 1000)])) : null },
+      headers: h ? Object.fromEntries(Object.entries(h).filter(([k]) => WEB_SECURITY.includes(k)).map(([k, v]) => [k, short(v, 1000)])) : null },
       http: web.http } : web ? { skipped: web.reason } : null,
     checked: new Date().toISOString(), source: 'cloudflare-dns, rdap, the site itself',
     subrequests: (dns.subrequests || 0) + (mail && mail.subrequests || 0) + (web && web.subrequests || 0),
@@ -3124,25 +3225,28 @@ const withBadge = (d, origin) => (d.grade ? { ...d, badge: badgeLinks(d.domain, 
    https://img.shields.io/endpoint?url=<that URL> in a Markdown image, so shields.io (and GitHub's image proxy)
    fetch it, never the reader's browser. /badge/<domain>.svg is the same badge drawn by ipterm, which reaches
    ipterm directly unless a proxy sits in between. Both are cached for an hour (ten minutes when part of the card
-   couldn't be checked). shields.io gives up after 3.5 seconds, so a card that isn't ready within BADGE_WAIT
-   answers "checking" (or the last known grade) and finishes in the background. A card that can't be had (rate
-   limited, a data source down) falls back to the last grade, kept for a day. */
+   couldn't be checked and a recheck might fill it), and a cached copy says how long it has left. shields.io
+   gives up after 3.5 seconds, so a card that isn't ready within BADGE_WAIT answers "checking" (or the last known
+   grade) and finishes in the background. A card that can't be had (rate limited, a data source down) falls back
+   to the last grade, kept for a week. */
 const BADGE_LABEL = 'domain security';
 const BADGE_WAIT = 2800;
 const BADGE_COLORS = { A: ['brightgreen', '#4c1'], B: ['green', '#97ca00'], C: ['yellow', '#dfb317'], D: ['orange', '#fe7d37'], F: ['red', '#e05d44'] };
 function badgeOf(d) {
-  if (d.grade) return { message: d.grade, color: d.grade, ttl: d.notChecked && d.notChecked.length ? 600 : 3600 };
+  if (d.grade) return { message: d.grade, color: d.grade, ttl: regrade(d.checks) ? 600 : 3600 };
   return d.status === 'NXDOMAIN' ? { message: 'no such domain', error: true, ttl: 3600 } : { message: 'unknown', error: true, ttl: 300 };
 }
 async function badgeRoute(io, raw) {
   const m = /^([^/]{1,260})\.(json|svg)$/i.exec(raw || ''), kind = m ? m[2].toLowerCase() : 'json', name = m && normalizeDomain(m[1]);
-  if (!name) return badgeReply(kind, { message: 'not a domain', error: true }, 400, 'public, max-age=300');
+  if (!name || recordName(name)) return badgeReply(kind, { message: 'not a domain', error: true }, 400, 'public, max-age=300');
   const cache = caches.default, key = new Request(`${io.url.origin}/__cache/badge/${name}`), lastKey = new Request(`${io.url.origin}/__cache/badge-last/${name}`);
   const hit = await cache.match(key);
-  if (hit) return badgeReply(kind, await hit.json(), 200, hit.headers.get('cache-control') || 'public, max-age=3600');
+  // A copy goes out with the time it has left, so shields.io and browsers drop it when this cache does, not a full ttl later.
+  if (hit) { const b = await hit.json(); return badgeReply(kind, b, 200, `public, max-age=${b.exp ? Math.max(60, Math.ceil((b.exp - Date.now()) / 1000)) : 300}`); }
   const save = b => Promise.all([
-    cache.put(key, new Response(JSON.stringify(b), { headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${b.ttl}` } })),
-    !b.error ? cache.put(lastKey, new Response(JSON.stringify({ ...b, ttl: 300 }), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=86400' } })) : null,
+    cache.put(key, new Response(JSON.stringify({ ...b, exp: Date.now() + b.ttl * 1000 }), { headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${b.ttl}` } })),
+    // Kept a week, so an existing badge keeps its last grade while shields.io's lookups are used up (see the handbook).
+    !b.error ? cache.put(lastKey, new Response(JSON.stringify({ ...b, ttl: 300 }), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=604800' } })) : null,
   ]).catch(() => {});
   const work = gradeFor(io, name).then(badgeOf);
   const got = await Promise.race([work.then(b => ({ b }), e => ({ e })), sleep(BADGE_WAIT).then(() => null)]);
@@ -3745,7 +3849,7 @@ function dnsPage(io, d, status) {
   const links = (d.hosting ? `<p class="ln sys">First address: <a href="/${esc(d.hosting.ip)}">${esc(d.hosting.ip)}</a> · <a href="/whois/${esc(d.hosting.ip)}">whois</a></p>` : '') +
     (!parseIp(name) ? `<p class="ln sys">Registration: <a href="/whois/${esc(name)}">whois ${esc(name)}</a> (registrar, dates, status)</p>` : '') +
     (takesMail ? `<p class="ln sys">Email security: <a href="/mail/${esc(name)}">mail check for ${esc(name)}</a> (SPF, DMARC, DKIM, MTA-STS, graded A to F)</p>` : '') +
-    (!parseIp(name) ? `<p class="ln sys">Report card: <a href="/grade/${esc(name)}">grade ${esc(name)}</a> (DNSSEC, email, expiry and security headers, graded A to F)</p>` : '');
+    (!parseIp(name) && !recordName(name) ? `<p class="ln sys">Report card: <a href="/grade/${esc(name)}">grade ${esc(name)}</a> (DNSSEC, email, expiry and security headers, graded A to F)</p>` : '');
   const typesTitle = single ? `${single} record` : 'DNS records';
   return shell(io, { status, path, title: `${name} ${typesTitle}` + (R.A ? ` · ${R.A[0].value}` : '') + ' | ipterm', desc: summary,
     initial: { kind: 'dns', query: name, qtype: single, data: d },
@@ -3836,7 +3940,7 @@ function mailPage(io, d, status) {
   ].join('; ') + '.';
   const links = `<p class="ln sys">Records: <a href="/dns/${esc(name)}/MX">dig ${esc(name)} MX</a> · <a href="/dns/${esc(name)}/TXT">dig ${esc(name)} TXT</a>` +
     ` · <a href="/dns/_dmarc.${esc(name)}/TXT">dig _dmarc.${esc(name)} TXT</a> · <a href="/whois/${esc(name)}">whois ${esc(name)}</a></p>` +
-    `<p class="ln sys">Report card: <a href="/grade/${esc(name)}">grade ${esc(name)}</a> (DNSSEC, expiry and security headers too) · How the grade works: <a href="/mail">email security check</a></p>`;
+    `<p class="ln sys">${recordName(name) ? '' : `Report card: <a href="/grade/${esc(name)}">grade ${esc(name)}</a> (DNSSEC, expiry and security headers too) · `}How the grade works: <a href="/mail">email security check</a></p>`;
   return shell(io, { status, path, title: `${name} SPF, DMARC and DKIM check: grade ${d.grade} | ipterm`, desc: summary,
     initial: { ...initial, data: d }, body: staticBlock(`Mail check: ${name}`, ['mail', `grade ${d.grade}`], rows, summary, links) });
 }

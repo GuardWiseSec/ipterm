@@ -3,7 +3,8 @@
 # SITEMAP_PATHS and nowhere else, hostile paths never redirect off the list, pages for non-public addresses
 # are noindex unless curated, pages for networks whose holder may be a private person are noindex and left out
 # of the ASN sitemap (and so are the whois and /cidr pages that name such a holder, while other ASN pages list
-# it as an upstream by number only), and the sitemap index and its files are there with the expected URL counts.
+# it as an upstream by number only), DNS record names (_dmarc.gmail.com) get no report card and no link to one,
+# and the sitemap index and its files are there with the expected URL counts.
 # Run against `npx wrangler dev` (default) or the live site:
 #   sh tools/check_seo.sh
 #   sh tools/check_seo.sh https://ipterm.net
@@ -105,6 +106,22 @@ else
   case "$page" in *'href="/AS28748"'*) ok '/AS203761 links AS28748' ;; *) no '/AS203761 does not link AS28748' ;; esac
   case "$page" in *"$up"*) no '/AS203761 names AS28748, whose holder may be a person' ;; *) ok '/AS203761 lists AS28748 without its name' ;; esac
 fi
+
+echo '-- DNS record names (a label starting with _) get no report card, and their dig and mail pages offer none (DNS only)'
+# path, a name, and 1 if the page must link that name's report card, 0 if it must not
+cardlink() {
+  page=$(curl -s -A "$UA" "$B$1")
+  case "$page" in *'<title>'*) ;; *) no "$1 did not load"; return ;; esac
+  case "$page" in *"href=\"/grade/$2\""*) has=1 ;; *) has=0 ;; esac
+  [ "$has" = 1 ] && says="links /grade/$2" || says="has no link to /grade/$2"
+  if [ "$has" = "$3" ]; then ok "$1 $says"; else no "$1 $says"; fi
+}
+cardlink /dns/gmail.com/TXT gmail.com 1
+cardlink /dns/_dmarc.gmail.com/TXT _dmarc.gmail.com 0
+cardlink /mail/_dmarc.gmail.com _dmarc.gmail.com 0
+redir '/grade/_dmarc.gmail.com' 400 ''
+redir '/grade/selector1._domainkey.outlook.com' 400 ''
+redir '/badge/_dmarc.gmail.com.json' 400 ''
 
 echo '-- sitemap index and files'
 idx=$(curl -s "$B/sitemap.xml")

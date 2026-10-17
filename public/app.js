@@ -565,7 +565,7 @@
         const m = mailArgs(parts.slice(1));
         return '/mail' + (m.dom ? '/' + name(m.dom) + (m.sel ? '?dkim=' + encodeURIComponent(m.sel.toLowerCase()) : '') : '');
       }
-      case 'grade': return !a ? '/grade' : looksLikeDomain(a) && !parseIp(domainOf(a)) ? '/grade/' + domainOf(a).toLowerCase() : null;
+      case 'grade': return !a ? '/grade' : looksLikeDomain(a) && !parseIp(domainOf(a)) && !recordName(a) ? '/grade/' + domainOf(a).toLowerCase() : null;
       case 'cidr': {                                           // also "cidr 192.168.1.10 255.255.255.0"
         const rest = parts.slice(1).join(' ');
         if (!rest) return '/cidr';
@@ -1657,6 +1657,8 @@
     const d = domainOf(raw);
     return d.length <= 253 && !/[\s:@\\]/.test(d) && /^[^.]+(\.[^.]+)+$/.test(d) && /[^\d.]/.test(d.split('.').pop());
   }
+  // A label starting with "_" (_dmarc.gmail.com) names a DNS record, not a domain: dig takes it, grade doesn't.
+  function recordName(raw) { return /(^|\.)_/.test(domainOf(raw)); }
   // Sample records for the preview, using documentation addresses (deployed sites query DNS live).
   const DEMO_DNS = {
     'example.com': { name: 'example.com', sample: true, status: 'NOERROR', dnssec: true, cname: [],
@@ -1759,7 +1761,8 @@
   }
 
   // The report card, offered after dig, whois and mail (it reads live DNS and the site, so not in the preview).
-  const gradeNext = name => live && [`grade ${name}`, `grade ${name}`, 'report card: DNSSEC, email, expiry and security headers, graded A to F'];
+  // Never for a record name (_dmarc.gmail.com): it has no site or mail of its own, so the Worker refuses it.
+  const gradeNext = name => live && !recordName(name) && [`grade ${name}`, `grade ${name}`, 'report card: DNSSEC, email, expiry and security headers, graded A to F'];
 
   /* ---------- mail check ----------
      mail <domain> [--dkim <selector>]: the Worker reads the records (MX, SPF, DMARC, DKIM, MTA-STS,
@@ -2002,7 +2005,7 @@
     }
     if (d.updated) rows.push(['last changed', date(d.updated)]);
     if (d.status && d.status.length) {
-      const locked = d.status.some(x => /transfer prohibited/.test(x));
+      const locked = d.status.some(x => /transfer prohibited|^locked$/.test(x));   // RFC 9083's "locked" is a registry lock
       rows.push(['status', withNote(d.status.join(' · '), locked ? '(locked against transfers)' : '')]);
     }
     if (d.nameservers && d.nameservers.length) {
@@ -2146,7 +2149,7 @@
     vpncheck: 'leaktest', dnsleak: 'leaktest', dnsleaktest: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
     spf: 'mail', dmarc: 'mail', dkim: 'mail', email: 'mail', mailcheck: 'mail', report: 'grade', reportcard: 'grade', scorecard: 'grade', badge: 'grade',
     as: 'asn', bgp: 'route', rpki: 'route', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
-    portcheck: 'port', shortcuts: 'keys', bindkey: 'keys', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
+    portcheck: 'port', shortcuts: 'keys', bindkey: 'keys', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', trace: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
   // man <command>: [synopsis, description, examples, see also, curl paths]
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
@@ -2174,12 +2177,12 @@
         ['DKIM', "selectors can't be listed, so only google, selector1, selector2, default, k1 and s1 are tried, and no key there is INFO (so is a selector the resolver couldn't read). Name yours with --dkim: it is the s= value in a message's DKIM-Signature header."],
         ['NULL MX', 'a domain that accepts no mail (MX 0 .) should have v=spf1 -all and DMARC p=reject; the other checks don\'t apply']]],
     // The sixth entry: the grading rubric, the same as GRADE_GRADES in worker.js, the /grade page and docs/handbook.md.
-    grade: ['grade <domain>', "a domain's report card, graded A to F: DNSSEC, an AAAA record (IPv6), CAA and an HTTPS record from Cloudflare's resolver; the mail check's grade and its main findings; the registration's expiry and transfer lock, from the registry over RDAP; and the website, from one HEAD request to https://<domain>/ (HSTS, CSP, X-Content-Type-Options, frame protection, Referrer-Policy) and one to http://<domain>/ (the redirect to HTTPS). Redirects are followed only within the domain. A 403, a bot challenge or a timeout is \"couldn't check\", never a FAIL. Each line is OK, WARN, FAIL or INFO, with a fix under every problem. Cached for five minutes.",
+    grade: ['grade <domain>', "a domain's report card, graded A to F: DNSSEC, an AAAA record (IPv6), CAA and an HTTPS record from Cloudflare's resolver; the mail check's grade and its main findings; the registration's expiry and transfer lock, from the registry over RDAP; and the website, from one HEAD request to https://<domain>/ (HSTS, CSP, X-Content-Type-Options, frame protection, Referrer-Policy; a GET, its body dropped unread, if the site refuses HEAD) and one to http://<domain>/ (the redirect to HTTPS). Redirects are followed only within the domain. A 403, a bot challenge or a timeout is \"couldn't check\", never a FAIL. Each line is OK, WARN, FAIL or INFO, with a fix under every problem. Cached for five minutes.",
       ['grade github.com', 'grade cloudflare.com', 'grade example.com'], ['mail', 'dig', 'whois', 'copy'], ['/grade/github.com', '/grade/github.com?format=text', '/badge/github.com.json'],
       [['GRADE', 'A: no FAIL and no WARN'], ['', 'B: no FAIL, one to three WARN'], ['', 'C: one FAIL, or four or more WARN'], ['', 'D: two FAIL'],
         ['', 'F: three or more FAIL, an expired registration, or broken DNSSEC (validating resolvers refuse the domain)'], ['', "INFO lines, and parts that couldn't be checked, never count."],
         ['FAIL', 'broken DNSSEC; a mail grade of C or worse; an expired or lapsing registration; https:// redirecting to plain http://'],
-        ['WARN', 'no DNSSEC; no AAAA record; no CAA record; a mail grade of B; expiry within 30 days; no transfer lock; http:// that doesn\'t redirect to HTTPS; HSTS missing or under 180 days; no CSP, or one that lets any inline script or any host run; no nosniff; no frame protection; Referrer-Policy unsafe-url or no-referrer-when-downgrade'],
+        ['WARN', 'no DNSSEC; no AAAA record; no CAA record, or none that names a CA for the domain itself; a mail grade of B; expiry within 30 days; no transfer lock; http:// that doesn\'t redirect to HTTPS; HSTS missing or under 180 days; no CSP, or one that lets any inline script or any host run; no nosniff; no frame protection; Referrer-Policy unsafe-url or no-referrer-when-downgrade'],
         ['INFO', "no HTTPS record; no Referrer-Policy (browsers default to strict-origin-when-cross-origin); anything that couldn't be checked"],
         ['BADGE', "copy badge copies Markdown for a README badge that shields.io draws from /badge/<domain>.json, so your readers' browsers never contact ipterm. /badge/<domain>.svg is the same badge served by ipterm itself, which each reader's browser fetches from here (unless a proxy like GitHub's sits in between). Both are cached for an hour."],
         ['CERTS', "certificates aren't checked: ipterm's server never sees them."]]],
