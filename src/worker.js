@@ -14,7 +14,8 @@
 //   GET /expect/<ASN|cc>    200 and the value if your address is on that network or in that country, else 412
 //   GET /<ip>               page for any IPv4/IPv6 address        (add ?format=json to force JSON). Pages for
 //                           non-public addresses are noindex, except the router and well-known ones in SITEMAP_PATHS;
-//                           common typos of those (/192.168.l.l, /192,168,1,1) get a 301 to the address in the list
+//                           common typos of those (/192.168.l.l, /192,168,1,1) get a 301 to the address in the list.
+//                           A network's first address (x.x.x.0, or an IPv6 /64's) is noindex too, unless it is listed
 //   GET /<ip>/<field>       one value for any public address as plain text: asn, org, cc, country, continent,
 //                           hostname. IPinfo Lite only (never Core or proxycheck.io), so no budget is spent
 //   GET /<ip>/text, /<ip>/json, /AS<number>/text, /AS<number>/json   the same as ?format=text and ?format=json, without
@@ -91,7 +92,10 @@
 //   - Upstream lookups are cached; cache misses are rate limited per visitor IP (LOOKUP_LIMITER).
 //   - Cross-site browser access (CORS) is off unless PUBLIC_API = "true".
 //   - Private and other non-public addresses never reach a provider.
+//   - Bots never spend the IPinfo Core or proxycheck.io budgets: they get the cache or IPinfo Lite (isBot).
 //   - Redirects for router-address typos take their Location from SITEMAP_PATHS, never from the request.
+//   - Over plain http, pages (browsers, crawlers, link previews) get a 301 to https on the same host; curl and scripts
+//     are answered over http, and every link and cache key says https either way (route()).
 //   - Every value placed into HTML is escaped; embedded JSON cannot close its script tag.
 //   - Every response carries a strict Content-Security-Policy and related headers.
 
@@ -118,7 +122,34 @@ const CLI_UA = /^(curl|wget|httpie|xh|fetch|libfetch|aria2)\b|powershell/i;
 // /port/<n>, a 403) instead of the page. Named bots only: anything else without text/html still gets JSON.
 const PREVIEW_UA = /facebookexternalhit|WhatsApp|Slackbot|Discordbot|TelegramBot|Twitterbot|LinkedInBot|Applebot|redditbot|Mastodon\/|Bluesky|Cardyb|Embedly|Iframely/i;
 const CRAWLER_UA = /Googlebot|bingbot|msnbot|BingPreview|DuckDuckBot|YandexBot|Baiduspider|Amazonbot|PetalBot|SeznamBot|Qwantbot/i;
+// Bots the two lists don't name: AI and SEO crawlers (GPTBot, ClaudeBot, CCBot, Bytespider, PerplexityBot, AhrefsBot,
+// SemrushBot, MJ12bot, DotBot, DataForSeoBot...), the AI assistants that fetch for a person's question (ChatGPT-User,
+// Claude-User, Perplexity-User: public/llms.txt tells them), headless browsers, and anything else that calls itself a
+// bot, crawler, spider or scraper. For the budgets only (isBot), never for wantsHtml: a script named "...bot" still
+// gets JSON. "bot" has to end a word, and Cubot's doesn't count: it makes phones, whose browsers say "CUBOT P30".
+const BOT_UA = /(?<!cu)bot\b|crawl|spider|slurp|scrap[ey]|archiver|anthropic-ai|claude-(?:user|web)|chatgpt-user|perplexity-user|meta-external|cohere-ai|google-?other|google-inspectiontool|headless|lighthouse/i;
 const ASN_RE = /^as(\d{1,10})$/i;
+
+// Who may spend the IPinfo Core and proxycheck.io budgets: people, and the API. A bot (io.bot) gets Core's and
+// proxycheck.io's answers only from the cache, where someone else's lookup put them, and otherwise IPinfo Lite (free),
+// with no VPN check and no registry date (ipData, privacyData and blockData see to it, so no route can forget). It gets
+// country and network where a person gets a city: less detail on the same page, never different content. The test is
+// conservative about who is a person:
+// - a named crawler or link preview, or anything in BOT_UA, is a bot whatever else it sends;
+// - a client that asks for HTML (Accept: text/html, even on a ?format= or /json copy) is a person only when the request
+//   looks like a browser's own: a navigation (Sec-Fetch-Mode: navigate or Sec-Fetch-Dest: document, which browsers set
+//   and plain HTTP clients don't) or the terminal's fetch (Sec-Fetch-Site: same-origin, or X-Ipterm). So an unnamed
+//   crawler that asks for HTML is a bot, and so is a browser too old to send Sec-Fetch-* (it gets Lite);
+// - the rest, curl and other command-line tools and scripts asking for JSON, is the documented API and keeps full
+//   data, within the per-visitor shares and the rate limit.
+// docs/handbook.md ("Bots never spend the budgets") says the same; tools/check_bots.mjs checks it.
+function isBot(request, ua) {
+  if (PREVIEW_UA.test(ua) || CRAWLER_UA.test(ua) || BOT_UA.test(ua)) return true;
+  const h = request.headers;
+  if (CLI_UA.test(ua) || !(h.get('accept') || '').includes('text/html')) return false;
+  return !(h.get('sec-fetch-mode') === 'navigate' || h.get('sec-fetch-dest') === 'document' ||
+    h.get('sec-fetch-site') === 'same-origin' || h.has('x-ipterm'));
+}
 
 class RateLimited extends Error {}
 
@@ -127,6 +158,10 @@ export default {
     return secure(await route(request, env, ctx), env);
   },
 };
+
+// wrangler dev's addresses, where plain http is all there is: route() doesn't send them to https, and dnsleakConf()
+// takes a plain-http DNSLEAK_API there.
+const localHost = u => ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname);
 
 async function route(request, env, ctx) {
   const url = new URL(request.url);
@@ -141,8 +176,20 @@ async function route(request, env, ctx) {
   }
 
   const html = wantsHtml(request, url, ua);
-  // plain: ?format=text, the same data as aligned key/value lines instead of JSON
-  const io = { request, env, ctx, url, me, plain: url.searchParams.get('format') === 'text' };
+  // Plain http, anywhere but wrangler dev: browsers, crawlers and link previews (html) get a 301 to the same address on
+  // https, so search engines keep one copy of each page. Everyone else is answered over http as before: curl doesn't
+  // follow redirects, so `curl ipterm.net` would print nothing, and `curl -fs ipterm.net/expect/AS13335 || pkill ...`
+  // would exit 0 on a 301 and never fire. That is why this isn't Cloudflare's "Always Use HTTPS", which can't tell
+  // them apart. From here on url says https (default port), so every address an answer builds from it (canonical,
+  // og:url, JSON-LD, %ORIGIN%, robots.txt, the sitemaps, the /api and badge snippets) and every cache key is the https
+  // one, however the request came. sameOrigin() still holds: browsers get pages only over https, so a page's Origin is
+  // the https one (and Sec-Fetch-Site, when sent, decides alone).
+  if (url.protocol === 'http:' && !localHost(url)) {
+    url.protocol = 'https:'; url.port = '';
+    if (html) return redirect(url.href, 301);
+  }
+  // plain: ?format=text, the same data as aligned key/value lines instead of JSON; bot: no budget spent (isBot)
+  const io = { request, env, ctx, url, me, plain: url.searchParams.get('format') === 'text', bot: isBot(request, ua) };
 
   const self = (o = io) => guard(() => selfInfo(o), d => reply(o, d, 200, {}, ipText), (msg, status) => reply(o, { error: msg }, status));
   if (path === '/' && io.plain) return self();
@@ -324,6 +371,10 @@ function toolRoute(io, tool, html) {
 // defined further down).
 let curated = null;
 const curatedIps = () => curated || (curated = new Set(SITEMAP_PATHS.map(p => p.slice(1)).filter(s => parseIp(s))));
+// A network's first address: IPv4 ending in .0, IPv6 with its low 64 bits zero. Its page places one address of a block
+// that may hold millions, so unless it is curated it is "noindex, follow" (ipPage), and the block's /cidr page is the
+// one to find: whois links that, not the address, for a registry block's first address (whoisPage).
+const netStart = p => (p.v === 4 ? p.o[3] === 0 : p.g.slice(4).every(x => x === 0));
 
 // What an IPv4 address typed with the usual slips would be: l, i, I, | and ! for 1, o and O for 0, commas,
 // semicolons, underscores or spaces for dots, doubled dots, and zero padding (192.168.l.l, 192,168,1,1,
@@ -599,6 +650,7 @@ async function ipRoute(io, q, html) {
   // puts it on its links and address bar, for the caller's other addresses (the other IP version, WebRTC's), which
   // look like anyone's here.
   const block = !own && onOff(io.url.searchParams.get('block')) !== false;
+  // A bot (isBot) gets what the cache holds or IPinfo Lite: ipData, privacyData and blockData spend nothing for it.
   return guard(
     () => block ? withBlock(io, ip, p, ipData(io, ip, p), d => withPrivacy(io, ip, d)) : withPrivacy(io, ip, ipData(io, ip, p)),
     // Browsers may reuse an answer for 5 minutes; the Worker's own cache (6 hours) keeps repeats cheap.
@@ -644,7 +696,8 @@ async function routeRoute(io, raw, html) {
 }
 
 // Adds proxycheck.io's VPN / proxy opinion, unless IPinfo already flagged the address (then a
-// second query adds little, and the free allowance is better spent on unflagged ones).
+// second query adds little, and the free allowance is better spent on unflagged ones). A bot gets
+// only a cached one (privacyData).
 async function withPrivacy(io, ip, pending) {
   const d = await pending;
   if (!d || d.bogon || (d.flags && d.flags.anonymous)) return d;
@@ -672,6 +725,8 @@ function ipData(io, ip, p, opts = {}) {
   // The plan is part of the cache key, so switching IPinfo plans takes effect at once instead of
   // serving older (e.g. country-only) answers until they expire. opts.lite: never use Core.
   const core = !opts.lite && io.env.IPINFO_TOKEN && String(io.env.IPINFO_PLAN || '').toLowerCase() === 'core';
+  // A bot (isBot) never pays for Core: it gets Core's answer only when someone else's lookup cached it, else Lite.
+  if (core && io.bot) return fromCache(io, 'ip/core/' + ip).then(d => d || ipData(io, ip, p, { lite: true }));
   const plan = io.env.IPINFO_TOKEN ? (core ? 'core' : 'lite') : 'public';
   return cached(io, `ip/${plan}/${ip}`, 21600, async () => {
     const [geo, hostname] = await Promise.all([provider(ip, io.env, { core, who: visitorKey(io.me) }), ptr(ip)]);
@@ -992,7 +1047,7 @@ function dnsleakConf(env) {
   try {
     const u = new URL(String(env.DNSLEAK_API || '').trim());
     // https only; plain http just for a responder or mock on this machine under `wrangler dev`
-    if (u.protocol === 'https:' || (u.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname))) api = u.origin;
+    if (u.protocol === 'https:' || (u.protocol === 'http:' && localHost(u))) api = u.origin;
   } catch { api = null; }
   if (!api || key.length < 32 || !/^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/.test(zone)) return null;
   return { zone, api, key };
@@ -1540,6 +1595,11 @@ async function cached(io, key, ttl, produce) {
   return data;
 }
 
+// What the cache holds under key, or null: no limit, no upstream call. What a bot gets (isBot).
+async function fromCache(io, key) {
+  try { const hit = await caches.default.match(cacheReq(io, key)); return hit ? await hit.json() : null; } catch { return null; }
+}
+
 // One IPv6 connection usually owns a whole /64 (18 quintillion addresses), so IPv6 visitors are
 // limited per /64; otherwise rotating the address would dodge the limit entirely.
 function limitKey(ip) {
@@ -1693,8 +1753,8 @@ async function ipinfoCore(ip, env) {
    every Cloudflare location, per day (UTC) and per hour, so a scraper can use at most one hour's
    share, and never more than one day's share of the monthly quota. Once a limit is reached, lookups
    use IPinfo Lite (country and network) until the next hour or day. Only fresh lookups count:
-   lookups of other addresses and leaktest's check of your own address. Cached results, whoami,
-   DNS and whois never do. */
+   lookups of other addresses and leaktest's check of your own address, by people. Cached results,
+   whoami, DNS and whois never do, and neither does a bot (isBot). */
 export class LookupBudget extends DurableObject {
   // who: the visitor's rate-limit key (IP or IPv6 /64); perVisitor: their share per hour (0 = no cap).
   // The object uses its own clock, so a late-arriving request can't roll the counters back.
@@ -1906,6 +1966,7 @@ async function privacyData(io, ip) {
     const hit = await caches.default.match(req);
     if (hit) return await hit.json();
   } catch { /* cache trouble: just ask */ }
+  if (io.bot) return null;                 // a bot only reads what someone else's check paid for (isBot)
   if (now < pcRefusedUntil) return null;
   // The visitor's rate limit applies here too: an IPinfo answer may have come from the cache, and
   // without this, repeating a lookup would reach the budget counter on every request.
@@ -3537,7 +3598,7 @@ async function rdapLookup(target, origin, base) {   // base: rdapBase's answer, 
    for the date at most BLOCK_GRACE (withBlock): past that it goes without it, and the registry's answer still fills
    the cache for the next one. Lookups of an address whose registry request is still in flight share it, and a
    registry that is unavailable is left alone for a minute (ten after a 429), so an outage adds no wait, no count and no
-   load on it. Crawlers and link previews only read the cache, so they never cause an RDAP query; anyone else's
+   load on it. Bots (isBot) only read the cache, so they never cause an RDAP query; anyone else's
    counts toward their rate limit, riding on the lookup's own count when it made one (limit() sets io.charged) or
    sharing the VPN check's (io.extra). The caller's own address is never sent (ipRoute): asked for by number it is
    answered from the edge, like /json, its page goes without the date, and the terminal asks with ?block=0 for the
@@ -3556,8 +3617,7 @@ async function blockData(io, ip, p, pending) {
   try {
     const hit = await caches.default.match(cacheReq(io, key));
     if (hit) return blockOf(await hit.json());
-    const ua = io.request.headers.get('user-agent') || '';
-    if (PREVIEW_UA.test(ua) || CRAWLER_UA.test(ua)) return null;
+    if (io.bot) return null;               // bots (isBot) only read the cache
     await pending;                         // the lookup failed or was refused: no registry query either
     let f = blockInFlight(ip);
     if (!f) {
@@ -3762,8 +3822,9 @@ async function loadShell(io) {
 // without JavaScript (and for search engines), and the data the terminal boots from. Pages other
 // than the homepage get their own h1 (the title without " | ipterm") in place of the generic one.
 // noindex: a working page that search engines should skip but whose links they may follow (ports without an
-// explainer of their own, non-public addresses that aren't in SITEMAP_PATHS, ASN, whois and /cidr pages that
-// name a network holder who may be a private person, and shared leak test results).
+// explainer of their own, non-public addresses that aren't in SITEMAP_PATHS, a network's first address unless it is
+// there (netStart), ASN, whois and /cidr pages that name a network holder who may be a private person, and shared
+// leak test results).
 // image: the share image's path (a shared leak test result uses its grade's).
 async function shell(io, { status = 200, title, desc, path = '/', body = '', initial = null, cache = null, noindex = false, image = '/og.png' }) {
   let h = await loadShell(io);
@@ -3943,10 +4004,15 @@ function ipPage(io, d, status) {
     ['coordinates', d.lat != null && d.lon != null ? `${d.lat}, ${d.lon}` : null], ['time zone', d.timezone],
     ['block', blockText(d.block)], ['connection', connectionText(d)], ['vpn / proxy', vpnText(d)],
   ];
-  const links = (/^AS\d{1,10}$/i.test(d.asn || '') ? `<p class="ln sys">More from this network: <a href="/${esc(d.asn)}">${esc(d.asn)}${d.org ? ' ' + esc(d.org) : ''}</a></p>` : '') +
+  // A network's first address isn't indexed unless curated (netStart), and leads with its registered block, when the
+  // lookup has it: the block's /cidr page is the one that answers a search for it.
+  const p = parseIp(ip), start = netStart(p) && !curatedIps().has(ip);
+  const net = start && d.block ? String(d.block.network || '').split(', ').find(c => c.includes('/') && inPrefix(p, c) >= 0) : null;
+  const links = (net ? `<p class="ln sys">Registered block: <a href="/cidr/${esc(net)}">${esc(net)}</a> (subnet and routing)</p>` : '') +
+    (/^AS\d{1,10}$/i.test(d.asn || '') ? `<p class="ln sys">More from this network: <a href="/${esc(d.asn)}">${esc(d.asn)}${d.org ? ' ' + esc(d.org) : ''}</a></p>` : '') +
     `<p class="ln sys">Registry record: <a href="/whois/${esc(ip)}">whois ${esc(ip)}</a> (owner and abuse contact)</p>` +
     `<p class="ln sys">Guide: <a href="/guides/what-your-ip-reveals">What your IP address reveals (and what it doesn't)</a></p>`;
-  return shell(io, { status, path, title, desc: summary, initial: { kind: 'ip', query: ip, data: d },
+  return shell(io, { status, path, title, desc: summary, noindex: start, initial: { kind: 'ip', query: ip, data: d },
     cache: d.blockLate ? 'no-store' : null,                // sent before its registry date arrived (withBlock)
     body: staticBlock(ip, [v, 'public'], rows, summary, links) });
 }
@@ -4062,7 +4128,15 @@ function whoisPage(io, d, status) {
     ['registered', date(d.registered)], ['last changed', date(d.updated)],
     ['abuse email', d.abuse && d.abuse.email], ['abuse phone', d.abuse && d.abuse.phone], ['description', d.description],
   ];
-  const back = d.kind === 'asn' ? `<a href="/${esc(q)}">${esc(q)} network details</a>` : `<a href="/${esc(q)}">${esc(q)} location and network</a>`;
+  // A registry block's first address links the block's /cidr page (RIPEstat only) rather than a lookup of it (mostly a
+  // noindex page: netStart): crawlers reach whois from /cidr pages, a block at a time. Curated addresses keep theirs,
+  // and so does a record of one address (a /32 or /128 reassignment): that is a host, not a block.
+  const start = d.kind === 'ip' && !curatedIps().has(q) ? (d.cidrs || []).find(c => {
+    const [a, n] = c.split('/');
+    return Number(n) < (a.includes(':') ? 128 : 32) && sameIp(a, q);
+  }) : null;
+  const back = d.kind === 'asn' ? `<a href="/${esc(q)}">${esc(q)} network details</a>`
+    : start ? `<a href="/cidr/${esc(start)}">${esc(start)} subnet and routing</a>` : `<a href="/${esc(q)}">${esc(q)} location and network</a>`;
   // noindex, follow when the holder may be a private person, as on ASN pages. RDAP gives the holder in org (the
   // registrant, or else the administrative contact) and the AS or network name in name; "<name> <org>" is the
   // holder as RIPEstat gives it, so this page and the network's ASN page come to the same answer.
@@ -4184,8 +4258,9 @@ function asnPage(io, d, status) {
     ['IPv6 prefixes', d.v6.count.toLocaleString('en-US')], ['upstreams', upstreamText(d.upstreams)],
   ];
   // Prefixes link to the subnet calculator, whose routing section asks RIPEstat only, never IPinfo, and
-  // upstreams to their ASN pages (RIPEstat too): crawlers following 30 links per ASN page would otherwise
-  // spend the IPinfo budget. Keep it that way: no IP lookup links here.
+  // upstreams to their ASN pages (RIPEstat too): crawlers following 30 links per ASN page land on pages that
+  // answer the search (a block, not one address in it) and cost no IPinfo Lite lookups or rate-limit counts.
+  // Keep it that way: no IP lookup links here. The budgets themselves are isBot()'s (ipData, privacyData, blockData).
   const list = [...d.v4.prefixes.slice(0, 20), ...d.v6.prefixes.slice(0, 10)]
     .map(px => `<li><a href="/cidr/${esc(px)}">${esc(px)}</a></li>`).join('');
   const upList = ups.map(u => `<li><a href="/${esc(u.asn)}">${esc(u.asn)}${u.name ? ' ' + esc(u.name) : ''}</a></li>`).join('');

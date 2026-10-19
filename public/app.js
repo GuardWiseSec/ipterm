@@ -1932,7 +1932,8 @@
     }
     rows.push('sep');
     const dn = d.dns || {}, r = d.registration, w = d.web && d.web.https;
-    // Addresses stay plain text: a link to /<ip> would let crawlers that run scripts spend IPinfo lookups.
+    // Addresses stay plain text: a link to /<ip> would send crawlers that run scripts to one-address pages, each an
+    // IPinfo Lite lookup and a rate-limit count (isBot() in the Worker keeps them off the paid budgets either way).
     if (dn.addresses && dn.addresses.length) rows.push(['addresses', dn.addresses.slice(0, 4).join('  ') + (dn.addresses.length > 4 ? `  and ${dn.addresses.length - 4} more` : '')]);
     if (dn.caa) dn.caa.records.forEach((v, i) => rows.push([i ? '' : dn.caa.from !== d.domain ? `CAA (${dn.caa.from})` : 'CAA records', v]));
     if (r && r.registrar) rows.push(['registrar', r.registrar]);
@@ -1993,9 +1994,9 @@
     }
     setUrl('/whois/' + q, `whois ${q}` + (d.org ? ` · ${d.org}` : '') + ' | ipterm');
     await renderWhois(d);
-    const block = (d.cidrs || [])[0];
+    const start = blockStart(d), block = start || (d.cidrs || [])[0];   // a block's first address leads to the block
     if (d.kind === 'asn') next([`asn ${d.query}`, `asn ${d.query}`, 'announced prefixes and address space'], share);
-    else next([`lookup ${d.query}`, `lookup ${d.query}`, 'network and approximate location'], block && [`cidr ${block}`, `cidr ${block}`, 'the registered address block'], share);
+    else next(!start && [`lookup ${d.query}`, `lookup ${d.query}`, 'network and approximate location'], block && [`cidr ${block}`, `cidr ${block}`, 'the registered address block'], share);
   }
 
   function relDays(iso) {                       // "in 41 days", "3 years ago"
@@ -2048,6 +2049,15 @@
       (d.nameservers && d.nameservers.length ? `, name servers ${d.nameservers.slice(0, 2).join(' and ')}` : '') + '.');
   }
 
+  // The registry block whose first address a whois record's query is, or null. Its whois leads to that block's subnet
+  // page rather than a lookup of the address (mostly a noindex page: netStart() in the Worker). whoisPage() in the
+  // Worker does the same, and keeps the lookup for curated addresses, none of which starts a block, and for a record of
+  // one address (a /32 or /128 reassignment), which is a host, not a block.
+  function blockStart(d) {
+    if (d.kind !== 'ip' || !CIDRLIB) return null;
+    return (d.cidrs || []).find(c => { const x = CIDRLIB.calc(c); return !x.error && x.prefix < (x.v === 4 ? 32 : 128) && x.network === d.query; }) || null;
+  }
+
   async function renderWhois(d) {
     const head = el('div', 'head');
     head.append(el('span', 'hip', 'whois ' + d.query), el('span', 'tag pub', 'registry'));
@@ -2076,7 +2086,9 @@
     } else if (d.abuse && d.abuse.handle) rows.push(['abuse contact', `${d.abuse.handle} (email not published in RDAP; see the registry)`]);
     else rows.push(['abuse contact', 'none listed in the registry record']);
     if (d.abuse && d.abuse.phone) rows.push(['abuse phone', d.abuse.phone]);
-    rows.push(['details', cmdLink(d.kind === 'asn' ? `asn ${d.query}` : `lookup ${d.query}`, d.kind === 'asn' ? `asn ${d.query}` : `lookup ${d.query}`, '/' + d.query)]);
+    const start = blockStart(d);
+    rows.push(['details', d.kind === 'asn' ? cmdLink(`asn ${d.query}`, `asn ${d.query}`, '/' + d.query)
+      : start ? cmdLink(`cidr ${start}`, `cidr ${start}`, '/cidr/' + start) : cmdLink(`lookup ${d.query}`, `lookup ${d.query}`, '/' + d.query)]);
     await kv(rows);
     if (d.abuse && d.abuse.email) line('When reporting abuse, include the IP address, the exact date and time with time zone, and relevant log lines.', 'sys');
     if (d.sample) line('Sample data. The live version queries the regional registry (RDAP) for the full record.', 'sys');

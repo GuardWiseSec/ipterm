@@ -5,7 +5,9 @@
 # of the ASN sitemap (and so are the whois and /cidr pages that name such a holder, while other ASN pages list
 # it as an upstream by number only), DNS record names (_dmarc.gmail.com) get no report card and no link to one,
 # the /text and /json forms of address and network pages are noindex (an X-Robots-Tag header) while the
-# pages stay indexable, and the sitemap index and its files are there with the expected URL counts.
+# pages stay indexable, and the sitemap index and its files are there with the expected URL counts. Against the live
+# site it also asks over plain http: Googlebot gets a 301 to https, curl the bare address, /expect a 200 or 412 (never a
+# redirect) and robots.txt an https Sitemap line (tools/check_https.mjs checks the same with no server).
 # Run against `npx wrangler dev` (default) or the live site:
 #   sh tools/check_seo.sh
 #   sh tools/check_seo.sh https://ipterm.net
@@ -151,6 +153,25 @@ printf '%s\n' "$idx" | grep -q 'sitemap-asn-1.xml' && ok 'the index lists sitema
 for a in AS35100 AS50053; do case "$asns" in *"/$a</loc>"*) no "$a is in an ASN sitemap, but its page is noindex" ;; *) ok "$a (noindex) is in no ASN sitemap" ;; esac; done
 for a in AS13335 AS15169 AS3356 AS5617; do case "$asns" in *"/$a</loc>"*) ok "$a is in an ASN sitemap" ;; *) no "$a is in no ASN sitemap" ;; esac; done
 curl -s "$B/sitemap-pages.xml" | grep -q '<loc>[a-z]*://[^/]*/AS[0-9]*</loc>' && no 'sitemap-pages.xml still lists ASN pages' || ok 'sitemap-pages.xml leaves ASN pages to the ASN files'
+
+# Plain http, on a deployed copy only: wrangler dev's 127.0.0.1, localhost and [::1] stay on http (route()). Run it
+# with the https address; these lines ask the same host over http.
+host=${B#*://}; host=${host%%/*}
+case "$host" in 127.0.0.1*|localhost*|'[::1]'*) ;; *)
+  echo "-- plain http (http://$host): pages get a 301 to https, curl gets its answer over http"
+  for p in / /cidr/10.0.0.0/30 /robots.txt /sitemap.xml; do
+    out=$(curl -s -o /dev/null -A "$UA" -w '%{http_code} %header{location}' "http://$host$p")
+    if [ "$out" = "301 https://$host$p" ]; then ok "http $p (Googlebot) -> $out"; else no "http $p (Googlebot) -> $out, expected 301 https://$host$p"; fi
+  done
+  # curl doesn't follow redirects: a 301 would print nothing, and exit 0 under -f, so the kill switch would never fire
+  ip=$(curl -s -A curl/8.7.1 "http://$host/")
+  if printf '%s' "$ip" | grep -Eq '^[0-9a-fA-F.:]{2,45}$'; then ok "curl http://$host/ -> $ip"; else no "curl http://$host/ -> [$ip], expected the bare address"; fi
+  code=$(curl -s -o /dev/null -A curl/8.7.1 -w '%{http_code}' "http://$host/expect/AS13335")
+  case "$code" in 200|412) ok "curl http://$host/expect/AS13335 -> $code" ;; *) no "curl http://$host/expect/AS13335 -> $code, expected 200 or 412" ;; esac
+  sm=$(curl -s -A curl/8.7.1 "http://$host/robots.txt" | grep '^Sitemap:')
+  if [ "$sm" = "Sitemap: https://$host/sitemap.xml" ]; then ok "curl http://$host/robots.txt -> $sm"; else no "curl http://$host/robots.txt -> [$sm], expected https"; fi
+  ;;
+esac
 
 if [ -n "$ROUTES" ]; then
   echo '-- routing on /cidr pages (RIPEstat)'

@@ -33,7 +33,9 @@ npm run deploy
 
 Wrangler prints your URL, something like `https://ipterm.<you>.workers.dev`.
 To use your own domain, add it under the Worker's **Settings → Domains & Routes**
-in the Cloudflare dashboard.
+in the Cloudflare dashboard. Leave **Always Use HTTPS** (under SSL/TLS, Edge Certificates) off and add no
+http-to-https Redirect Rule: the Worker sends browsers and crawlers to https itself and keeps plain http for curl
+(see "One copy of the site, on https" under "Shareable pages and search").
 
 **Which code is running.** `npm run deploy` runs `tools/deploy.mjs`, which calls `wrangler deploy --tag <git short SHA>`
 (plain Node, no shell substitution, so it works the same in PowerShell, cmd and sh). The Worker reads the tag back
@@ -107,7 +109,8 @@ is paused for a minute; if Core refuses the token or quota, it's paused for ten.
 `wrangler deploy` sets it up automatically the first time. If you move to a bigger IPinfo plan,
 raise the number to about your monthly allowance divided by 31.
 
-Only fresh lookups count: lookups of other addresses, and `leaktest`'s check of the visitor's own address. Cached results (six hours), `whoami` (your visitors'
+Only fresh lookups count: lookups of other addresses, and `leaktest`'s check of the visitor's own address, by people
+(bots never spend it: see "Bots never spend the budgets" below). Cached results (six hours), `whoami` (your visitors'
 own location comes from Cloudflare), DNS, mail checks, report cards and their badges, whois, the subnet calculator and the command line's one-value
 endpoints (`/asn`, `/8.8.8.8/org` and the rest, which use IPinfo Lite) never use the quota. If
 the monthly quota runs out anyway, or the token is refused, or the counter can't be reached,
@@ -125,7 +128,8 @@ npx wrangler secret put PROXYCHECK_KEY
 
 - **When it's asked:** every `leaktest` (your own address), and lookups of other addresses that
   IPinfo hasn't already flagged. Not for whoami, DNS, whois, the "hosted by" lines or the one-value
-  endpoints (`/8.8.8.8/org`).
+  endpoints (`/8.8.8.8/org`), and never for a bot, which gets a cached answer or none (see "Bots never spend the
+  budgets" below).
 - **Budget:** `PROXYCHECK_DAILY_BUDGET` (default 900) queries a day, paced to
   `PROXYCHECK_HOURLY_BUDGET` an hour (default twice an even share, 75) and
   `PROXYCHECK_VISITOR_HOURLY` per visitor (default 10), counted by the same `LookupBudget` Durable
@@ -154,6 +158,44 @@ The verdict on the **vpn / proxy** line combines both sources (`vpnText()` in `s
 proxycheck.io's API reference defines `anonymous` as "any kind of anonymising service (proxy, VPN,
 TOR, etc.)", and it's also set on addresses that are none of those: Google Public DNS (8.8.8.8) has
 it, with only `hosting` besides. So on its own it isn't reported as a VPN, here or in `leaktest`.
+
+### Bots never spend the budgets
+
+Crawlers, link previews and other bots never spend IPinfo Core or proxycheck.io. That is a rule in the code, where the
+budgets are spent, not a matter of which pages link where: crawlers reach address pages from whois, DNS and `/cidr`
+pages, from links they found long ago, and from the terminal's own links when they run its JavaScript (Googlebot
+does). Until October 2026 only the registry date had such a rule, and Googlebot's lookups of uncached addresses used
+Core and proxycheck.io like anyone's.
+
+`isBot()` in `src/worker.js` decides once per request (`io.bot`), and is conservative about who is a person:
+
+- A user agent that names a crawler or link preview (`CRAWLER_UA`, `PREVIEW_UA`) or matches `BOT_UA` is a bot,
+  whatever else the request sends. `BOT_UA` covers AI and SEO crawlers (GPTBot, ClaudeBot, CCBot, Bytespider,
+  PerplexityBot, AhrefsBot, SemrushBot, MJ12bot, DotBot, DataForSeoBot and more), headless browsers, and anything that
+  calls itself a bot, crawler, spider or scraper. "bot" has to end a word, and a Cubot phone's browser ("CUBOT P30")
+  doesn't count. `BOT_UA` is for the budgets only: it doesn't change who gets HTML (`wantsHtml()`). It also covers
+  the AI assistants that fetch a page for a person's question (ChatGPT-User, Claude-User, Perplexity-User), on the API
+  too: for an address not looked up recently they get country and network with no VPN check, and `llms.txt` says so.
+- A request that asks for HTML (`Accept: text/html`, even on a `?format=json` or `/json` copy) counts as a person only
+  when it looks like a browser's own: a navigation (`Sec-Fetch-Mode: navigate` or `Sec-Fetch-Dest: document`, which
+  browsers send and plain HTTP clients don't) or the terminal's fetch (`Sec-Fetch-Site: same-origin`, or the
+  `X-Ipterm` header). So an unnamed crawler asking for pages is a bot, and so is a browser too old to send
+  `Sec-Fetch-*` (Safari before 16.4, for one): it gets the bot's answer on uncached addresses.
+- Everything else, curl and the other command-line tools (`CLI_UA`) and scripts asking for JSON, is the documented
+  API and keeps full data, held in check by the per-visitor shares and the rate limit as before.
+
+What a bot gets, on every route that looks an address up (`/<ip>` and its `/text`, `/json` and `?format=` forms,
+`/api/lookup`, and leaktest's `/api/check`, which Googlebot calls when it renders `/leaktest`):
+
+- IPinfo: Core's answer when it is in the cache (someone else's lookup paid for it; six hours, per data center),
+  otherwise IPinfo Lite, which is free (`ipData()`).
+- proxycheck.io: a cached answer or none, never a new query, a budget count or a rate-limit count (`privacyData()`).
+- The registry date: from the cache only, as before (`blockData()`).
+
+So a bot sees country and network where a person sees a city, on the same page with the same title, links and
+wording, the way a visitor past their hourly share does: less detail, never different content. Everything else the
+site does (DNS, whois, `/cidr`, ASN pages, mail checks, report cards, one-value answers) never spends either budget
+for anyone. `node tools/check_bots.mjs` checks all of this with no server and no network (see "Local development").
 
 ### Budget status for the owner: /status (optional)
 
@@ -201,8 +243,8 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | Visitor's own IP, city, ASN, timezone, edge location | Cloudflare `request.cf` | Free, unlimited |
 | Visitor's other IP version (IPv6 for an IPv4 visit, or the reverse) | [ipify](https://www.ipify.org/) `api.ipify.org` / `api6.ipify.org`, called from the browser | Free, open source, no logging |
 | Other IPs: owner and country | IPinfo Lite | Free, unlimited |
-| Other IPs: city, coordinates, time zone, connection type (optional) | IPinfo Core, with `IPINFO_PLAN = "core"` | Paid, monthly quota; falls back to Lite |
-| VPN / proxy / Tor second opinion, VPN service name (optional) | proxycheck.io, with the `PROXYCHECK_KEY` secret | Free, 1,000 a day; falls back to IPinfo alone |
+| Other IPs: city, coordinates, time zone, connection type (optional) | IPinfo Core, with `IPINFO_PLAN = "core"` | Paid, monthly quota; falls back to Lite. Never for bots, which get it from the cache or Lite |
+| VPN / proxy / Tor second opinion, VPN service name (optional) | proxycheck.io, with the `PROXYCHECK_KEY` secret | Free, 1,000 a day; falls back to IPinfo alone. Never for bots, which get it from the cache or not at all |
 | Reverse DNS (hostname) | Cloudflare DNS-over-HTTPS | Free |
 | An address lookup's `block`: when its network's registry record was created (see "Recently registered blocks") | RDAP, the record and cache entry of `whois <ip>` | Free |
 | Mail checks: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI | Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file | Free |
@@ -231,7 +273,7 @@ ipterm is MIT-licensed, so you can run your own copy. Follow "Deploy" above, the
 4. Edit what names ipterm.net: the contact address in `public/privacy.html` (and anything in the policy your copy
    does differently) and the URLs in `public/openapi.json`, `public/llms.txt` and `public/opensearch.xml` (otherwise
    browsers that add your copy as a search engine search ipterm.net). Canonical and share links, the search form on
-   `/api` and the terminal's copy of it use your own address automatically.
+   `/api` and the terminal's copy of it use your own address automatically, on https.
 5. Optional: `npx wrangler secret put IPINFO_TOKEN` (and `PROXYCHECK_KEY`, `STATUS_KEY`), as described above. Your
    copy uses your own IPinfo and proxycheck.io allowances, and keeps IPinfo's attribution in the footer.
 
@@ -328,7 +370,8 @@ an `x-attribution` response header instead (it is in `/help`, `/api`, the OpenAP
 `/mail/...`, `/grade/...`, `/whois/...`, `/cidr/...`, `/route/...`, `/leaktest/r/...` (and their `/api/...` forms) for key/value lines like the terminal draws.
 Browsers get the text too. Results that include IPinfo data end with `IP address data powered by IPinfo
 (https://ipinfo.io)`, as IPinfo's free-data terms ask. JSON stays the default for command-line clients,
-and `curl ipterm.net` still prints the bare address. Shells such as zsh treat `?` as a wildcard, so the
+and `curl ipterm.net` still prints the bare address (over plain http, which stays open for them: only pages are sent
+to https, see "One copy of the site, on https"). Shells such as zsh treat `?` as a wildcard, so the
 reference quotes those URLs: `curl 'ipterm.net/dns/example.com?format=text'`.
 
 **`/text` and `/json` after an address or AS number** say the same without a `?`, so they work unquoted in zsh:
@@ -853,7 +896,7 @@ What it costs, and the limits on it (`blockData()` in `src/worker.js`):
   of addresses it holds skip the date without waiting, counting or adding to its load until then. One bad record
   (another 4xx, a reply that doesn't parse) just leaves `block` out and pauses nothing. When IANA's bootstrap file can't be read, lookups use rdap.org (which redirects to the
   registry), and the file isn't asked for again for a minute.
-- Crawlers and link previews (`CRAWLER_UA`, `PREVIEW_UA`) only read the cache: a page they fetch shows the line
+- Bots (`isBot()`, see "Bots never spend the budgets") only read the cache: a page they fetch shows the line
   only if someone else's lookup or whois already asked the registry, so crawling address pages never sends a
   request to RDAP.
 - Anyone else's registry request counts toward their rate limit (30 a minute), but rides on the lookup's own count
@@ -1121,12 +1164,22 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   crawlers (Googlebot, Bingbot, DuckDuckBot, Yandex, Baidu, Amazonbot, Petal, Seznam, Qwant), which
   often send `Accept: */*` or none, so they index the pages rather than JSON (or, for `/port/<n>`, a
   403). Both are matched by name (`PREVIEW_UA` and `CRAWLER_UA` in `src/worker.js`); `?format=json`
-  and `?format=text` still win, and curl, scripts and other clients still get JSON.
+  and `?format=text` still win, and curl, scripts and other clients still get JSON. Who counts as a bot for the
+  IPinfo and proxycheck.io budgets is a wider test (`isBot()`: see "Bots never spend the budgets").
 - Private addresses like `/192.168.1.1` get a page explaining the range and how to reach a router,
   a popular search topic, without any upstream lookup. Only the router and well-known addresses in `SITEMAP_PATHS`
   (`/192.168.1.1`, `/10.0.0.1`, `/127.0.0.1` ...) are indexed; the page of any other non-public address (private,
   CGNAT, loopback, link-local, documentation, IPv6 unique local ...) carries `<meta name="robots" content="noindex,
   follow">`, since the private space is millions of near-identical pages (`curatedIps()` in `src/worker.js`).
+- A network's first address (IPv4 ending in `.0`, IPv6 with its low 64 bits zero: `netStart()` in `src/worker.js`) has
+  a working page that is `noindex, follow` unless it is in `SITEMAP_PATHS`. It places one address of a block that may
+  hold millions ("73.0.0.0 ... located in Coral Springs" for Comcast's /8), and the block's `/cidr` page is the one that
+  answers a search for it; Google had indexed 21 such pages (`/104.21.0.0`, `/2603:2000::`) from ASN pages
+  that used to link each prefix's first address. The page stays reachable with its own canonical, and leads with a
+  link to its registered block's `/cidr` page when the lookup has the registry date (`block`). The whois page of a
+  registry block's first address (`/whois/75.0.0.0` when the record is 75.0.0.0/8) links that block's `/cidr` page
+  instead of the address, on the page and in the terminal (`whoisPage()`; `blockStart()` in `public/app.js`); other
+  addresses, curated ones included, keep their "location and network" link.
 - Router-address typos get a 301 to the exact address in that list: `/192.168.l.l`, `/192.168.1.l`, `/192,168,1,1`,
   `/192.168.0.l`, `/10.0.0.l`, `/l92.168.1.1`, `/192.168.o.1`, `/192.168.001.001`, `/192;168;1;1`, `/192.168.1.1.`
   (l, i, I, `|` and `!` read as 1, o and O as 0, commas, semicolons, underscores and spaces as dots). The Location is
@@ -1145,8 +1198,36 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   prefixes are clickable, and each result's `[share] [copy] [md]` buttons (and the `share` command) share its
   link (see "Share, copy and copy md"; after `leaktest`, the link is to the grade: see "Shared results"). Prefixes on ASN pages
   open the subnet calculator (`/cidr/<prefix>`), whose routing section asks RIPEstat only, and upstreams open their
-  own ASN pages (RIPEstat too), so crawlers following them never spend the IPinfo budget. Keep it that way: an ASN
-  page must not link to an IP lookup (`/<ip>`).
+  own ASN pages (RIPEstat too). Keep it that way: an ASN page must not link to an IP lookup (`/<ip>`). A prefix's
+  page is the one that answers a search for it, and linking each prefix's first address had Google crawl and index
+  thin address pages. Links are not what keeps crawlers off the budgets, though: they reach address pages anyway,
+  from whois, DNS and `/cidr` pages, and those cost nothing only because of `isBot()` (see "Bots never spend the
+  budgets").
+- **One copy of the site, on https.** Plain `http://ipterm.net` stays open: `curl ipterm.net`, the README's first
+  line, goes over http, and curl doesn't follow redirects. Until October 2026 the pages answered over http as well,
+  each naming its http address as canonical, and over http robots.txt and the sitemaps listed http URLs, so Google
+  indexed `http://ipterm.net/` and `https://ipterm.net/` as two pages. Now `route()` answers a request over http in
+  one of two ways:
+  - Whatever gets pages (`wantsHtml()`: browsers, crawlers and link previews, for robots.txt and the sitemaps too)
+    gets a 301 to the same address on https, path and query kept (and a port such as 8080 dropped), before any route
+    runs, so a router typo is one hop to https and then its own 301.
+  - Everyone else is answered over http as before: `curl ipterm.net` prints the address, and
+    `curl -fs ipterm.net/expect/AS13335 || pkill ...` still gets its 412. A 301 would print nothing, and `-f` only
+    fails on 400 and above, so the kill switch would exit 0 and never fire.
+
+  Either way the Worker treats the request as https from then on, so everything it builds from its own address names
+  https: the canonical, `og:url`, `og:image` and JSON-LD of every page, the guides' `%ORIGIN%`, robots.txt's
+  `Sitemap:` line, every sitemap `<loc>`, the `/api` and badge snippets, and the Cache API keys (http and https share
+  one cache, so an http lookup doesn't pay again). `wrangler dev`'s hosts (127.0.0.1, localhost, `[::1]`) are left
+  on http (`localHost()`). **Leave Cloudflare's "Always Use HTTPS" off and add no http-to-https Redirect Rule**:
+  they redirect curl too. HSTS stays as it is (`max-age=31536000; includeSubDomains` from `secure()` and
+  `public/_headers`) and isn't preloaded, since preloading requires redirecting every client on the apex. Static
+  files that skip the Worker (`run_worker_first`'s exclusions: `/app.js`, `/og.png`, `/openapi.json`, `/llms.txt`
+  ...) still answer over http; pages load them over https, and the three documents name https URLs.
+  `node tools/check_https.mjs` checks all of this with no server, and `tools/check_seo.sh` run against the live site
+  asks it over http too. After a deploy that changes this, in Search Console: make sure the submitted sitemap is
+  `https://ipterm.net/sitemap.xml`, inspect `http://ipterm.net/` (it should report the redirect) and request
+  indexing for `https://ipterm.net/` only. The http URLs then move to "Page with redirect", which is the goal.
 - `/robots.txt` and the sitemaps are generated. `/sitemap.xml` is a sitemap index (submit that one in Google Search
   Console and Bing Webmaster Tools) listing:
 
@@ -1231,7 +1312,7 @@ Network data comes from [RIPEstat](https://stat.ripe.net/) (free, no key). Resul
   popular lookups and the guides, so search engines see real text and links. Clicking a lookup there runs it
   in the terminal.
 - **Share image:** `public/og.png` (1200×630) is used when any page is shared, except a shared leak test result, which uses its grade's `public/og-leak-<a-f>.png` (made by `tools/build_og_leak.mjs`).
-- **Placeholders:** static pages use `%ORIGIN%`, which the Worker replaces with your site's address.
+- **Placeholders:** static pages use `%ORIGIN%`, which the Worker replaces with your site's https address.
 - **Sitemap:** `/sitemap.xml` is an index of `/sitemap-pages.xml` (`SITEMAP_PATHS` in `src/worker.js`: guides,
   router addresses, public DNS resolvers, the most searched port pages and more) and the ASN files
   (`/sitemap-asn-<n>.xml`, from `src/asn-sitemap.js`). See "Shareable pages and search".
@@ -1324,7 +1405,9 @@ Object call, no rate-limiter call.
 so it doesn't count against the limit. Watch usage under **Workers & Pages → ipterm → Metrics**.
 
 **What crawling the network pages costs.** The sitemap lists 10,000 ASN pages, each linking up to 30 prefixes to
-`/cidr` and up to 5 upstreams to other ASN pages. None of them ever reaches IPinfo or proxycheck.io. Measured under
+`/cidr` and up to 5 upstreams to other ASN pages. None of them ever reaches IPinfo or proxycheck.io. A public `/cidr`
+page links its whois page, which links an address page (or, for a block's first address, the block's `/cidr` page):
+for a crawler, that address page is IPinfo Lite or the cache (`isBot()`), so it adds a request and no budget. Measured under
 `wrangler dev` (subrequests by wrapping `fetch` and the Cache API; CPU time by running the Worker's own code in Node
 with RIPEstat's answers replayed, on a laptop, so treat it as an estimate):
 
@@ -1346,7 +1429,8 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | Protection | Where | How to change it |
 | --- | --- | --- |
 | Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them | `[[ratelimits]]` in `wrangler.toml` | Edit `limit` (period must be 10 or 60 seconds) |
-| A lookup's registry date (`block`): RDAP only, never IPinfo or proxycheck.io; never for the visitor's own address (`?block=0` from the terminal for their other IP version); crawlers and link previews only read the cache (shared with `whois <ip>`, a day); anyone else's registry request counts toward their rate limit, riding on the lookup's own count or sharing the VPN check's; 0.3 seconds at most once the rest of the answer is ready, then the answer goes without it and the request finishes in the background; lookups of one address share a request in flight; a registry that fails is left alone for a minute (ten after a 429) | `blockData()` in `src/worker.js`; `tools/check_block.mjs` | `BLOCK_RECENT_DAYS`, `BLOCK_GRACE`; see "Recently registered blocks" |
+| Bots never spend IPinfo Core or proxycheck.io: named crawlers and link previews, `BOT_UA`, and anything asking for HTML without a browser's `Sec-Fetch-*` get Core's answer only from the cache, otherwise IPinfo Lite, and a VPN check only from the cache; command-line tools and scripts asking for JSON keep full data | `isBot()`, `ipData()`, `privacyData()`, `blockData()` in `src/worker.js`; `tools/check_bots.mjs` | See "Bots never spend the budgets" |
+| A lookup's registry date (`block`): RDAP only, never IPinfo or proxycheck.io; never for the visitor's own address (`?block=0` from the terminal for their other IP version); bots (`isBot()`) only read the cache (shared with `whois <ip>`, a day); anyone else's registry request counts toward their rate limit, riding on the lookup's own count or sharing the VPN check's; 0.3 seconds at most once the rest of the answer is ready, then the answer goes without it and the request finishes in the background; lookups of one address share a request in flight; a registry that fails is left alone for a minute (ten after a 429) | `blockData()` in `src/worker.js`; `tools/check_block.mjs` | `BLOCK_RECENT_DAYS`, `BLOCK_GRACE`; see "Recently registered blocks" |
 | Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
 | DNS leak test: `/api/dnsleak` only from the ipterm page or a command-line tool, well-formed tokens only, rate limited; the VPS's API needs the `DNSLEAK_KEY` secret (compared in constant time), listens on 127.0.0.1 behind Caddy, hands each token's resolvers over once and forgets them; non-public resolver addresses never go to IPinfo | `dnsleakRoute()` in `src/worker.js`, `dnsleak-server/` | See "DNS leak test server" |
 | Shared leak test results: the code is made in the browser and holds only the grade and per-check flags (no IP, provider, location or resolver); the Worker decodes it strictly (a letter that doesn't match its checks is a 404); the page never runs the test, and isn't indexed | `public/leakgrade.js`, `leakShareRoute()` in `src/worker.js` | See "Shared results" |
@@ -1359,6 +1443,7 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | Cross-site browser access (CORS) off by default. Only the static `/openapi.json` and `/llms.txt` allow any origin | `PUBLIC_API` in `wrangler.toml`; `public/_headers` for the two documents | Set to `"true"` to offer a public browser API |
 | Private, loopback, CGNAT, multicast and documentation addresses rejected before any upstream call | `nonPublicReason()` in `src/worker.js` | |
 | Redirects for router-address typos take their Location from `SITEMAP_PATHS`, never from the request, so they can't be pointed anywhere else; the query string is dropped | `routerTypo()` in `src/worker.js`, tested by `tools/check_seo.sh` | |
+| Plain http: pages (browsers, crawlers, link previews) get a 301 to the same path on https and the same host; curl and scripts are answered over http (`curl ipterm.net`, the `/expect` kill switch), and every link and cache key names https either way. HSTS on every answer, not preloaded | `route()` in `src/worker.js`; `tools/check_https.mjs` | Don't turn on Cloudflare's "Always Use HTTPS": see "One copy of the site, on https" |
 | RIPEstat answers are read with a size cap (a big network's answer can run to megabytes, which would use up the CPU limit), the AS paths come from three collectors only, and every value is checked before use (AS numbers, prefixes, dates) | `ripestat()`, `routeLookup()`, `upstreams()` in `src/worker.js` | |
 | Strict Content-Security-Policy (no inline scripts or styles; the only outside hosts are ipify, for the visitor's other IP version, and, once the DNS leak test is set up, `https://*.dl.ipterm.net` (the configured zone) for its lookups; forms may only submit to this site), nosniff, no framing, HSTS, no referrer, locked-down browser permissions | `secure()` and `cspFor()` in `src/worker.js` | Loosen the CSP if you add ads or analytics |
 | Address-bar search (`/go`) redirects only to a path on this site, built from parsed values, never from the input; hostile input is a 400 | `goTarget()` and `goLocation()` in `src/worker.js`; `tools/check_go.sh` | See "Address-bar search" |
@@ -1400,7 +1485,8 @@ npx wrangler dev
 
 `sh tools/check_previews.sh` (link previews and crawlers get pages, scripts get JSON), `sh tools/check_go.sh`
 (address-bar search, hostile inputs included) and `node tools/check_block.mjs` (a lookup's registry date) run
-against it.
+against it. `node tools/check_bots.mjs` (bots never spend the budgets) and `node tools/check_https.mjs` (plain http)
+need no server (Node 22.15 or later).
 
 Note that `request.cf` location data is limited when running locally, and `ping` says it can't run there:
 it needs Cloudflare's edge, which answers `/cdn-cgi/trace` on the deployed site. The port check sees
@@ -1414,7 +1500,8 @@ or JSON for every client, with colors only for `?color=1` and never on JSON, and
 `/8.8.8.8/text`) and `tools/check_seo.sh` (typo redirects with valid, typo and
 hostile paths, noindex on non-public addresses and on the ASN, whois and `/cidr` pages that name a network holder who
 may be a private person, such an upstream listed by number only, `X-Robots-Tag: noindex` on the `/text` and `/json`
-forms, the sitemap index and its URL counts; `ROUTES=1` adds the routing section). Neither makes an IPinfo lookup;
+forms, the sitemap index and its URL counts; `ROUTES=1` adds the routing section; against the live site it also asks
+over plain http, since `wrangler dev`'s 127.0.0.1 stays on http). Neither makes an IPinfo lookup;
 the `/text` and `/json` checks use the caller's own address (answered from `request.cf`), non-public addresses and
 AS13335, the ASN pages and the routing section ask RIPEstat, and the whois pages RDAP. In Git Bash on Windows, run them with `MSYS_NO_PATHCONV=1` so paths like
 `/192.168.l.l` aren't rewritten.
@@ -1436,6 +1523,32 @@ cache. That is one ordinary lookup, from IPinfo's free API under `wrangler dev` 
 `.dev.vars` sets one); live, these are left out. `LOOKUPS=1` adds a lookup of 8.8.8.8, with and without
 `?block=0` (live, unless cached, that is one IPinfo Core lookup and one proxycheck.io query of their budgets), and
 checks that `/8.8.8.8/org` (IPinfo Lite, free) is still one bare line.
+
+`node tools/check_bots.mjs` (Node 22.15 or later) checks that bots never spend the budgets (see "Bots never spend the
+budgets"), with no server and no network: it runs the whole Worker in Node with `IPINFO_PLAN = "core"`, an `IPINFO_TOKEN` and a
+`PROXYCHECK_KEY`, a budget counter that throws when a bot reaches it, and `fetch` stubbed to answer as IPinfo,
+proxycheck.io, RDAP and DNS would and to note every request. First `isBot()` itself, on the user agents of crawlers,
+link previews, AI and SEO bots and headless browsers, and of browsers (a Cubot phone's included) and command-line
+tools. Then Googlebot, a link preview, GPTBot and an unnamed client asking for an address's page without
+`Sec-Fetch-*`, GPTBot on `/api/lookup`, ClaudeBot on `/<ip>/json`, an HTML client on `?format=json` and Googlebot
+rendering leaktest (`/api/check`) must get IPinfo Lite with no VPN check or registry date, and never reach the budget
+counter, Core, proxycheck.io or a registry; a browser navigation, the terminal's own fetch, curl, a Cubot phone and
+leaktest in a browser must still get Core and proxycheck.io; then Googlebot gets the Core answer one of them cached,
+for free. Last, the pages: whois of a registry block's first address links the block's `/cidr` page (the Worker's
+page and the terminal's `renderWhois()`), other addresses and curated ones keep their lookup link, and a network's
+first address has a noindex page with its own canonical and, when the lookup has it, its registered block.
+
+`node tools/check_https.mjs` (Node 22.15 or later) checks plain http (see "One copy of the site, on https"), also
+with no server and no network: the whole Worker in Node, its static files read from `public/`, and `fetch` stubbed. Over
+`http://ipterm.net`, Googlebot, a link preview and a browser navigation get a 301 to the same path and query on https
+(a port dropped, the HSTS header kept, `Vary: Accept, User-Agent`), robots.txt and the sitemaps included, while curl
+gets the bare address, `/expect` its 200 or 412, and a script or `?format=json` its JSON. What curl gets over http
+names https: robots.txt's `Sitemap:` line, every sitemap `<loc>` and a guide's `%ORIGIN%`; a lookup over http writes
+an `https://` cache key, which the same lookup over https then reads; and the homepage a script gets over http (one
+that doesn't ask for HTML still gets it at `/`), like a page after the redirect, has an https canonical, `og:url`,
+`og:image` and JSON-LD. Last, 127.0.0.1, localhost and `[::1]` stay on http, and `DNSLEAK_API` may still be plain
+http there only. (Under `wrangler dev`, a request sent with `Host: ipterm.net` does get the 301, but wrangler's proxy
+rewrites its Location to `http://`, so test the redirect here or on the live site.)
 
 ## License
 

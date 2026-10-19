@@ -48,6 +48,9 @@ const W = Function('REGISTRY', 'ANSI', 'ansi', 'shell', [slice(worker, 'const IP
   slice(worker, 'function registryOf(', 'async function rdapLookup('), slice(worker, 'const BLOCK_RECENT_DAYS', '/* ---------- domain whois'),
   slice(worker, 'const plain = ', 'function asnText('), slice(worker, 'function connectionText(', 'function cidrPage('),
   slice(worker, 'function staticBlock(', '/* ---------- robots'), slice(worker, 'const esc = ', 'const safeJson'),
+  // what ipPage asks of an address: is it a network's first address (netStart), curated, inside the block
+  slice(worker, 'const V4 = ', 'function countryName('), slice(worker, 'let curated = null;', '// What an IPv4 address typed'),
+  slice(worker, 'const SITEMAP_PATHS = [', '\n];') + '\n];', slice(worker, 'function inPrefix(', '// The RDAP base'),
   'return { registryOf, blockOf, blockText, BLOCK_RECENT_DAYS, ipText, ipPage, esc };'].join('\n'))(REGISTRY, ANSI, ansi, (io, o) => o.body);
 // The terminal's line and its lookup, with what render() draws on stubbed: kv() gets the rows it shows.
 let shown = [];
