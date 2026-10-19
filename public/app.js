@@ -609,18 +609,20 @@
      result is a dead end. They print as one line after the command finishes (after any sponsored
      line, which stays separate and labeled). Links only run when clicked, so they cost nothing. */
   let nextItems = null;
-  // Each item: [label, command, hint], or [label, null, hint, href] for a plain link (a guide).
+  // Each item: [label, command, hint], or [label, null, hint, href] for a plain link (a guide). A fifth, rel, goes on
+  // the link (nofollow: cidrNext).
   const next = (...items) => { nextItems = items.filter(Boolean).slice(0, 4); };
   function flushNext() {
     const items = nextItems; nextItems = null;
     if (!items || !items.length) return;
     const d = el('div', 'ln sys next'); d.append('next: ');
-    items.forEach(([label, cmd, hint, href], i) => {
+    items.forEach(([label, cmd, hint, href, rel], i) => {
       if (i) d.append('  ·  ');
       let n;
       if (!cmd) { n = el('a', 'cmd', label); n.href = href; }
       else { const h = hrefFor(cmd); n = h ? cmdLink(label, cmd, h) : cmdButton(label, cmd); }
       if (hint) n.title = hint;
+      if (rel && n.href) n.rel = rel;
       d.append(n);
     });
     out.appendChild(d); scroll();
@@ -1369,6 +1371,12 @@
   // The math lives in cidr.js, shared with the Worker so pages and the terminal always agree.
   const CIDRLIB = window.IPTERM_CIDR;
   const looksLikeCidr = s => { const t = String(s || '').trim(); return /\//.test(t) && !!parseIp(t.split('/')[0].trim()); };
+  // A public block's page has routing (RIPEstat), so links from one block to its neighbours ("part of", "splits into"
+  // and next:) are rel="nofollow" when the block they open is public: a click works as ever, but crawlers aren't led
+  // from block to block without end. Private and other non-public ranges' pages make no outside call, and rank: their
+  // links stay ordinary.
+  const cidrRel = c => (CIDRLIB.calc(c).range === 'public' ? 'nofollow' : null);
+  const cidrNext = (c, hint) => [`cidr ${c}`, `cidr ${c}`, hint, null, cidrRel(c)];
 
   async function cidr(raw, pre) {
     if (!CIDRLIB) return line('The subnet calculator did not load. Reload the page and try again.', 'err');
@@ -1380,25 +1388,33 @@
     setUrl('/cidr/' + d.cidr, (d.v === 4 ? `${d.cidr} subnet: ${d.netmask}, ${d.usableText} usable hosts` : `${d.cidr} IPv6 subnet`) + ' | ipterm');
     await renderCidr(d);
     // A public range also gets its routing: from the page when the server sent it, else one request (RIPEstat, cached).
+    // A page sent without it because it looked like a bot's (route.bot, routeData() in worker.js) asks too: a browser
+    // too old to send Sec-Fetch-* gets that page, but this JSON request is a person's. A crawler that runs the script
+    // can't fetch /api/ (robots.txt), or gets a 403, so the page's note for bots (.route-bot) goes only when routing came.
     let r = null;
-    if (d.range === 'public' && pre && pre.route) r = pre.route;
-    else if (d.range === 'public' && live && !pre) {
+    const ask = d.range === 'public' && live && (!pre || !!(pre.route && pre.route.bot));
+    if (d.range === 'public' && pre && pre.route && !ask) { r = pre.route; if (r.error) line(r.error, 'warn'); }
+    else if (ask) {
       const q = line('routing: asking RIPEstat…', 'sys'); const t0 = performance.now();
       r = await apiRoute(d.cidr);
-      q.textContent = r.error ? r.error : `routing: ok · ${Math.round(performance.now() - t0)} ms`;
-      if (r.error) q.className = 'ln warn';
+      const notes = document.querySelectorAll('#static .route-bot');
+      if (r.error && notes.length) { q.remove(); r = null; }   // no routing: the page's own note still says why
+      else {
+        notes.forEach(n => n.remove());
+        q.textContent = r.error ? r.error : `routing: ok · ${Math.round(performance.now() - t0)} ms`;
+        if (r.error) q.className = 'ln warn';
+      }
     }
-    if (r && r.error && pre) line(r.error, 'warn');
     if (r && !r.error) {
       await renderRoute(r);
       const o = r.origins[0];
       if (o) document.title = routeTitle(d.cidr, r);
       return next(o && [`asn ${o.asn}`, `asn ${o.asn}`, 'the network that announces it'],
         [`whois ${d.network}`, `whois ${d.network}`, 'who this block is registered to'],
-        d.supernet && [`cidr ${d.supernet}`, `cidr ${d.supernet}`, 'the block twice this size'], live && ['share', 'share', 'copy a link to this prefix']);
+        d.supernet && cidrNext(d.supernet, 'the block twice this size'), live && ['share', 'share', 'copy a link to this prefix']);
     }
-    next(d.supernet && [`cidr ${d.supernet}`, `cidr ${d.supernet}`, 'the block twice this size'],
-      d.halves && d.halves[0] && [`cidr ${d.halves[0]}`, `cidr ${d.halves[0]}`, 'the first half of this block'],
+    next(d.supernet && cidrNext(d.supernet, 'the block twice this size'),
+      d.halves && d.halves[0] && cidrNext(d.halves[0], 'the first half of this block'),
       d.range === 'public' ? [`whois ${d.network}`, `whois ${d.network}`, 'who this block is registered to']
         : d.v === 4 && ['cheat sheet', null, 'subnet mask cheat sheet: /8 to /32', '/guides/subnet-cheat-sheet']);
   }
@@ -1638,7 +1654,7 @@
     head.append(el('span', 'hip', 'cidr ' + d.cidr), el('span', 'tag', 'IPv' + d.v), el('span', 'tag ' + (d.range === 'public' ? 'pub' : 'priv'), d.range), el('span', 'tag', 'calculated'));
     head.append(shareBar({ cmd: 'cidr ' + d.cidr, value: d.cidr, what: 'the range', path: '/cidr/' + d.cidr }));
     out.appendChild(head);
-    const link = c => cmdLink(c, 'cidr ' + c, '/cidr/' + c);
+    const link = c => { const a = cmdLink(c, 'cidr ' + c, '/cidr/' + c), rel = cidrRel(c); if (rel) a.rel = rel; return a; };
     const both = list => { const f = document.createDocumentFragment(); list.forEach((c, i) => { if (i) f.append('  ·  '); f.append(link(c)); }); return f; };
     const rows = [['network', d.cidr, 'big']];
     if (d.v === 4) {
@@ -2127,15 +2143,23 @@
     rows.push(['registry', cmdLink(`whois ${d.asn}`, `whois ${d.asn}`, `/whois/${d.asn}`)]);
 
     const show4 = v4.prefixes.slice(0, 12), show6 = v6.prefixes.slice(0, 6);
-    const list = arr => {
+    // Ten of the largest are ordinary links, up to four of them IPv6 (asnLinked() in worker.js links the same ones on
+    // its page); the rest are rel="nofollow", so a click still opens them but crawlers aren't sent to every prefix.
+    const k6 = Math.min(4, show6.length), k4 = 10 - k6;
+    const list = (arr, k) => {
       const f = document.createDocumentFragment();
-      arr.forEach((px, i) => { if (i) f.append(document.createTextNode('  ')); f.append(cmdLink(px, 'cidr ' + px, '/cidr/' + px)); });
+      arr.forEach((px, i) => {
+        if (i) f.append(document.createTextNode('  '));
+        const a = cmdLink(px, 'cidr ' + px, '/cidr/' + px);
+        if (i >= k) a.rel = 'nofollow';
+        f.append(a);
+      });
       return f;
     };
     if (show4.length || show6.length) {
       rows.push('sep');
-      if (show4.length) rows.push(['largest v4', list(show4)]);
-      if (show6.length) rows.push(['largest v6', list(show6)]);
+      if (show4.length) rows.push(['largest v4', list(show4, k4)]);
+      if (show6.length) rows.push(['largest v6', list(show6, k6)]);
     }
     await kv(rows);
     announce(`${d.asn} ${d.name || d.holder || ''}: ${fmt(n4)} IPv4 prefixes` + (v4.addresses != null ? `, ${fmt(v4.addresses)} addresses` : '') + `, ${fmt(n6)} IPv6 prefixes.`);

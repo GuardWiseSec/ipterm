@@ -1,8 +1,9 @@
-// Checks that bots never spend the IPinfo Core or proxycheck.io budgets (isBot() in src/worker.js), and the two page
-// rules that keep crawlers off a network's first address. No server and no network: the whole Worker runs in Node,
-// with IPINFO_PLAN = "core", an IPINFO_TOKEN and a PROXYCHECK_KEY set, its budget counter (env.BUDGET) stubbed to
-// throw when a bot asks it for a lookup, and fetch stubbed to answer as IPinfo, proxycheck.io, RDAP and DNS would and
-// to note every request. So it spends nothing, and runs the same anywhere.
+// Checks that bots never spend the IPinfo Core or proxycheck.io budgets (isBot() in src/worker.js), nor start a
+// RIPEstat routing lookup, and the page rules that keep crawlers off a network's first address and from one prefix's
+// page to the next. No server and no network: the whole Worker runs in Node, with IPINFO_PLAN = "core", an
+// IPINFO_TOKEN and a PROXYCHECK_KEY set, its budget counter (env.BUDGET) stubbed to throw when a bot asks it for a
+// lookup, and fetch stubbed to answer as IPinfo, proxycheck.io, RDAP, DNS and RIPEstat would and to note every
+// request. So it spends nothing, and runs the same anywhere.
 //
 // 1. Who is a bot: isBot() read out of src/worker.js, on user agents of crawlers, link previews, AI and SEO bots and
 //    headless browsers (bots), and of browsers, phones (a Cubot's included) and command-line tools (people).
@@ -17,6 +18,19 @@
 //    too, and so do addresses registered on their own (a /32 or /128 record), while an IPv6 /32 is a block. A
 //    network's first address (IPv4 x.x.x.0, IPv6 with the low 64 bits zero) has a noindex page that keeps its own
 //    canonical and leads with its registered block when the lookup has it, while other addresses are indexed.
+// 4. Routing (routeData): Googlebot, bingbot, GPTBot and an unnamed client asking for an uncached public /cidr page
+//    get the calculation and a note, with no RIPEstat request; once a browser navigation has looked it up, they get
+//    it from the cache. The terminal's /api/route, curl and a script still ask RIPEstat; a private /cidr page is the
+//    same for a bot and a person and asks nothing; /route/<public> for a bot asks nothing (a redirect, or a 403 for
+//    JSON); the public /cidr pages in SITEMAP_PATHS keep live routing for bots, and only those. On a page left
+//    without routing for a bot (bot: true), which a browser too old to send Sec-Fetch-* gets too, the terminal (cidr in
+//    public/app.js) asks /api/route once: that browser's request gets the routing and the page's own note (.route-bot)
+//    goes, so it never says "open the page in a browser" above routing; Googlebot's renderer gets a 403, or nothing at
+//    all when it obeys robots.txt, and the note stays, with no "network error" in its place.
+// 5. Links: the Worker's ASN page links ten of its largest prefixes (up to four IPv6) and lists the rest as text, its
+//    /cidr page has no links for "splits into" and "part of", and the terminal (public/app.js renderAsn, renderCidr,
+//    cidr and next, run against a stand-in DOM) makes the same ASN prefixes ordinary links and the rest nofollow, and
+//    its "splits into", "part of" and next: links nofollow when they open a public block, ordinary otherwise.
 //
 //   node tools/check_bots.mjs        (Node 22.15 or later: it loads the Worker through module.registerHooks)
 import { readFileSync } from 'node:fs';
@@ -95,6 +109,13 @@ const RECORDS = {                                        // RDAP records by addr
   '2603:2000::': ['2603:2000::', '2603:2000:fff:ffff:ffff:ffff:ffff:ffff', '2603:2000::', 20],
   '2600::': ['2600::', '2600:0:ffff:ffff:ffff:ffff:ffff:ffff', '2600::', 32],
 };
+// RIPEstat's announced-prefixes by network, smallest first, so the ASN page's largest-first order shows: AS64500 has
+// 15 IPv4 /24s, 15 IPv4 /16s and 12 IPv6 /32s; AS64501 25 IPv4 /16s and no IPv6.
+const seq = (n, f) => Array.from({ length: n }, (_, i) => f(i));
+const ANNOUNCED = {
+  AS64500: [...seq(15, i => `${100 + i}.1.2.0/24`), ...seq(15, i => `${20 + i}.0.0.0/16`), ...seq(12, i => `2001:${(0x1000 + i).toString(16)}::/32`)],
+  AS64501: seq(25, i => `${60 + i}.0.0.0/16`),
+};
 const reply = (body, status = 200) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 globalThis.fetch = async input => {
   const u = typeof input === 'string' ? input : input.url;
@@ -127,6 +148,21 @@ globalThis.fetch = async input => {
       events: [{ eventAction: 'registration', eventDate: '2004-06-01T00:00:00-04:00' }], entities: [] });
   }
   if (u.startsWith('https://check.torproject.org/')) { calls.push(['tor', u]); return new Response('', { status: 200 }); }
+  if ((m = /^https:\/\/stat\.ripe\.net\/data\/([a-z-]+)\/data\.json\?(.*)$/.exec(u))) {
+    calls.push(['ripestat', u]);
+    const q = new URLSearchParams(m[2]), res = q.get('resource') || '', holder = 'EXAMPLENET - Example Networks, Inc.';
+    switch (m[1]) {
+      case 'prefix-overview':                            // announced as asked, an address as its /24 (or /48)
+        return reply({ data: { resource: res.includes('/') ? res : globalThis.IPTERM_CIDR.calc(res + (res.includes(':') ? '/48' : '/24')).cidr,
+          announced: true, asns: [{ asn: 64500, holder }], block: { desc: 'RIPE NCC' }, related_prefixes: [] } });
+      case 'routing-status': return reply({ data: { visibility: { v4: { ris_peers_seeing: 300, total_ris_peers: 320 }, v6: { ris_peers_seeing: 300, total_ris_peers: 320 } } } });
+      case 'bgp-state': return reply({ data: { bgp_state: [{ target_prefix: res, path: [3333, 1299, 64500], source_id: '00-193.0.0.56' }] } });
+      case 'rpki-validation': return reply({ data: { status: 'valid', validating_roas: [{ origin: '64500', prefix: q.get('prefix'), max_length: 24 }] } });
+      case 'as-overview': return reply({ data: { holder, announced: true, block: { desc: 'Assigned by RIPE NCC' } } });
+      case 'announced-prefixes': return reply({ data: { prefixes: (ANNOUNCED[res] || []).map(prefix => ({ prefix })) } });
+      case 'asn-neighbours': return reply({ data: { neighbours: [], neighbour_counts: { left: 0 } } });
+    }
+  }
   calls.push(['other', u]);
   return new Response('not stubbed in tools/check_bots.mjs', { status: 404 });
 };
@@ -153,9 +189,9 @@ async function run(path, { ua, me = '81.2.69.142', ...headers }) {
   const body = await res.text();
   for (let n = 0; n < waits.length;) { const m = waits.length; await Promise.allSettled(waits.slice(n, m)); n = m; }   // cache writes land first
   const init = /<script type="application\/json" id="ipterm-initial">([\s\S]*?)<\/script>/.exec(body);
-  let data = null;
-  try { data = init ? JSON.parse(init[1]).data : JSON.parse(body); } catch {}
-  return { status: res.status, body, data, kinds: calls.map(c => c[0]), taken: [...taken] };
+  let data = null, initial = null;
+  try { initial = init ? JSON.parse(init[1]) : null; data = initial ? initial.data : JSON.parse(body); } catch {}
+  return { status: res.status, location: res.headers.get('location'), body, data, initial, kinds: calls.map(c => c[0]), taken: [...taken] };
 }
 const spent = r => r.taken.length > 0 || r.kinds.some(k => k === 'core' || k === 'proxycheck');
 
@@ -258,8 +294,190 @@ for (const ip of ['75.0.0.7', '2603:2000::1', '8.8.8.8']) {
     `/${ip}: indexed, canonical ${canonical(r.body)}`);
 }
 
+console.log('-- routing on /cidr and /route: a bot gets the cache or none, never a RIPEstat lookup (src/worker.js routeData)');
+const BING = 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)';
+const ripe = r => r.kinds.filter(k => k === 'ripestat').length;
+const article = body => (/<article class="static" id="static">[\s\S]*?<\/article>/.exec(body) || [''])[0];
+const skipped = r => /automated visitors/.test(String(((r.initial || {}).route || {}).error)) && article(r.body).includes('<p class="ln sys route-bot">Routing data skipped');
+const routed = r => article(r.body).includes('is announced in BGP by AS64500');
+mayTake = false;
+for (const [who, px, opts] of [
+  ['Googlebot', '87.121.119.0/24', { ua: GOOG }],
+  ['bingbot', '87.121.120.0/24', { ua: BING }],
+  ['GPTBot asking for the page', '87.121.121.0/24', { ua: GPT, accept: HTML }],
+  ['an unnamed client asking for the page without Sec-Fetch-*', '87.121.122.0/24', { ua: CHROME, accept: HTML }],
+  ['Googlebot on an IPv6 prefix', '2a0d:5600::/32', { ua: GOOG }],
+]) {
+  const r = await run('/cidr/' + px, opts), a = article(r.body);
+  ok(r.status === 200 && ripe(r) === 0 && !spent(r) && a.includes(`Subnet ${px}`) && /<dt>(netmask|addresses)<\/dt>/.test(a) && skipped(r) && !routed(r),
+    `${who}, uncached /cidr/${px}: ${r.status}, ${a.includes(`Subnet ${px}`) ? 'the calculation' : 'no calculation'}, ` +
+    `${skipped(r) ? 'the note' : routed(r) ? 'routing' : 'no note'}, ${ripe(r)} RIPEstat requests, requests ${JSON.stringify(r.kinds)}`);
+}
+const navR = await run('/cidr/87.121.119.0/24', { ua: CHROME, ...NAV });
+ok(navR.status === 200 && ripe(navR) >= 4 && routed(navR) && !skipped(navR),
+  `a browser navigation on /cidr/87.121.119.0/24 asks RIPEstat (${ripe(navR)} requests) and shows the routing`);
+for (const [who, opts] of [['Googlebot', { ua: GOOG }], ['bingbot', { ua: BING }], ['GPTBot', { ua: GPT, accept: HTML }], ['the unnamed client', { ua: CHROME, accept: HTML }]]) {
+  const r = await run('/cidr/87.121.119.0/24', opts);
+  ok(r.status === 200 && ripe(r) === 0 && routed(r) && !skipped(r), `then ${who} gets that routing from the cache: ${ripe(r)} RIPEstat requests`);
+}
+for (const [who, path, opts] of [
+  ["the terminal's own fetch, /api/route", '/api/route?q=87.121.130.0/24', { ua: CHROME, ...TERMINAL }],
+  ['curl, /route/<prefix>', '/route/87.121.131.0/24', { ua: CURL, accept: '*/*' }],
+  ['a script, /route/<ip>?format=text', '/route/87.121.132.7?format=text', { ua: 'python-requests/2.32.3', accept: '*/*' }],
+]) {
+  const r = await run(path, opts);
+  ok(r.status === 200 && ripe(r) >= 4 && /AS64500/.test(r.body), `${who}: ${r.status}, ${ripe(r)} RIPEstat requests`);
+}
+for (const [who, px] of [['RFC 1918', '10.0.0.0/22'], ['RFC 1918', '192.168.1.0/24'], ['CGNAT', '100.64.0.0/10'], ['IPv6 unique local', 'fd00::/8']]) {
+  const g = await run('/cidr/' + px, { ua: GOOG }), b = await run('/cidr/' + px, { ua: CHROME, ...NAV });
+  ok(g.status === 200 && b.status === 200 && ripe(g) + ripe(b) === 0 && article(g.body) === article(b.body) && article(g.body).includes(`Subnet ${px}`) &&
+    !g.body.includes('Routing data skipped') && !(g.initial || {}).route, `a private (${who}) /cidr/${px}: the same page for Googlebot and a browser, no RIPEstat, no note`);
+}
+const rIp = await run('/route/87.121.140.9', { ua: GOOG });
+ok(rIp.status === 302 && rIp.location === '/cidr/87.121.140.9/32' && ripe(rIp) === 0,
+  `Googlebot on /route/87.121.140.9 (uncached): ${rIp.status} to ${rIp.location}, ${ripe(rIp)} RIPEstat requests`);
+const rPx = await run('/route/87.121.141.0/24', { ua: GOOG });
+ok(rPx.status === 301 && rPx.location === '/cidr/87.121.141.0/24' && ripe(rPx) === 0, `Googlebot on /route/87.121.141.0/24: ${rPx.status} to ${rPx.location}, ${ripe(rPx)} RIPEstat requests`);
+for (const [who, path, opts] of [
+  ['GPTBot, /route/<prefix> as JSON', '/route/87.121.142.0/24', { ua: GPT, accept: '*/*' }],
+  ['ChatGPT-User, /api/route', '/api/route?q=87.121.143.7', { ua: 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; ChatGPT-User/1.0; +https://openai.com/bot', accept: '*/*' }],
+  ['ClaudeBot, /route/<ip>?format=text', '/route/87.121.144.7?format=text', { ua: CLAUDE, accept: '*/*' }],
+]) {
+  const r = await run(path, opts);
+  ok(r.status === 403 && ripe(r) === 0 && /automated visitors/.test(r.body), `${who} (uncached): ${r.status}, ${ripe(r)} RIPEstat requests, ${r.body.trim().slice(0, 80)}`);
+}
+await run('/route/87.121.145.9', { ua: CURL, accept: '*/*' });
+const rIpC = await run('/route/87.121.145.9', { ua: GOOG });
+ok(rIpC.status === 302 && rIpC.location === '/cidr/87.121.145.0/24' && ripe(rIpC) === 0,
+  `once curl has looked 87.121.145.9 up, Googlebot's /route redirect goes to its route from the cache: ${rIpC.location}, ${ripe(rIpC)} RIPEstat requests`);
+for (const px of ['1.1.1.0/24', '8.8.8.0/24', '9.9.9.0/24']) {
+  const r = await run('/cidr/' + px, { ua: GOOG });
+  ok(r.status === 200 && ripe(r) >= 4 && routed(r), `Googlebot on /cidr/${px}, listed in SITEMAP_PATHS, keeps live routing (${ripe(r)} RIPEstat requests)`);
+}
+const notListed = await run('/cidr/1.1.1.0/25', { ua: GOOG });
+ok(ripe(notListed) === 0 && skipped(notListed), `... and only those: /cidr/1.1.1.0/25 gets ${ripe(notListed)} RIPEstat requests and the note`);
+
+console.log("-- links: the Worker's ASN and /cidr pages (src/worker.js asnPage, asnLinked, cidrPage)");
+const cidrLinks = a => [...a.matchAll(/<li><a href="\/cidr\/([^"]+)">/g)].map(m => m[1]);
+const listed = a => [...a.matchAll(/<li>(?:<a href="\/cidr\/[^"]+">)?([0-9a-f.:]+\/\d+)/g)].map(m => m[1]);
+for (const [as, want4, want6] of [['AS64500', 6, 4], ['AS64501', 10, 0]]) {
+  const r = await run('/' + as, { ua: GOOG }), a = article(r.body), links = cidrLinks(a), all = listed(a);
+  const l4 = links.filter(p => !p.includes(':')), l6 = links.filter(p => p.includes(':'));
+  const a4 = all.filter(p => !p.includes(':')), a6 = all.filter(p => p.includes(':'));
+  ok(r.status === 200 && l4.length === want4 && l6.length === want6 && links.length <= 10 && l4.join() === a4.slice(0, want4).join() &&
+    l6.join() === a6.slice(0, want6).join() && l4.every(p => p.endsWith('/16')),
+    `${as}'s page links its ${links.length} largest prefixes (IPv4 ${l4.length}, IPv6 ${l6.length}): ${links.join(' ')}`);
+  ok(a4.length === 20 && a6.length === (want6 ? 10 : 0) && all.length - links.length === all.filter(p => !links.includes(p)).length,
+    `${as}'s page still lists ${all.length} prefixes, ${all.length - links.length} of them as text`);
+}
+const pub = article((await run('/cidr/87.121.150.0/24', { ua: GOOG })).body), priv = article((await run('/cidr/10.0.0.0/22', { ua: GOOG })).body);
+ok(/<dt>splits into<\/dt><dd>87\.121\.150\.0\/25 [^<]* 87\.121\.150\.128\/25<\/dd>/.test(pub) && pub.includes('<dt>part of</dt><dd>87.121.150.0/23</dd>') &&
+  !pub.includes('href="/cidr/') && priv.includes('<dt>part of</dt><dd>10.0.0.0/21</dd>') && !priv.includes('href="/cidr/'),
+  'the /cidr page lists "splits into" and "part of" as text, public or private (no links to follow)');
+
+console.log("-- links: the terminal's (public/app.js renderAsn, renderCidr, cidr, next), against a stand-in DOM");
+const node = (tag, text = '') => ({ tag, text, kids: [], append(...xs) { this.kids.push(...xs); }, appendChild(x) { this.kids.push(x); } });
+const anchors = x => (!x || typeof x !== 'object' ? [] : [...(x.tag === 'a' ? [x] : []), ...(x.kids || []).flatMap(anchors)]);
+const out = node('#out');
+let kvRows = [];
+// #static as the page left it: its notes for bots (.route-bot), which cidr() removes once it has asked /api/route.
+let staticBot = [];
+const botNotes = body => [...article(body).matchAll(/<p class="ln sys route-bot">([^<]*)<\/p>/g)]
+  .map(m => ({ text: m[1], remove() { staticBot = staticBot.filter(x => x !== this); } }));
+// live: the deployed site's mode (false: the preview); line and apiRoute: what cidr() prints and how it asks for routing.
+const terminal = (live, line, apiRoute) => Function('CIDRLIB', 'document', 'el', 'shareBar', 'out', 'kv', 'cmdLink', 'cmdButton', 'hrefFor', 'line', 'announce', 'fmt', 'scroll',
+  'setUrl', 'toolIntro', 'renderRoute', 'routeTitle', 'apiRoute', 'live', 'performance',
+  slice(app, '  const cidrRel =', '  async function cidr(') + slice(app, '  async function cidr(raw, pre) {', '  /* ---------- routing (route)') +
+  slice(app, '  function bitsFragment(', '  /* ---------- DNS') + slice(app, '  async function renderAsn(', '  /* ---------- help') +
+  slice(app, '  let nextItems = null;', '  // A data source hiccup') + 'return { renderAsn, renderCidr, cidr, flushNext };')(
+  globalThis.IPTERM_CIDR, { createDocumentFragment: () => node('#fragment'), createTextNode: s => node('#text', s),
+    querySelectorAll: sel => (sel === '#static .route-bot' ? [...staticBot] : []) }, (tag, cls, text) => node(tag, text),
+  () => null, out, r => { kvRows = r; }, (text, cmd, href) => Object.assign(node('a', text), { cmd, href }), (text, cmd) => Object.assign(node('button', text), { cmd }),
+  cmd => '/' + cmd.trim().split(/\s+/).join('/'), line, () => {}, n => String(n), () => {},
+  () => {}, () => {}, async () => {}, () => '', apiRoute, live, { now: () => 0 });
+const A = terminal(false, () => {}, async () => ({ error: 'not here' }));
+const rowLinks = key => anchors((kvRows.find(r => Array.isArray(r) && r[0] === key) || [])[1]);
+const rels = list => list.map(a => `${a.href}${a.rel ? ' (' + a.rel + ')' : ''}`).join(' ');
+for (const [as, want4, want6] of [['AS64500', 6, 4], ['AS64501', 10, 0]]) {
+  await A.renderAsn((await run(`/${as}?format=json`, { ua: CURL, accept: '*/*' })).data);   // the Worker's own data, largest first
+  const l4 = rowLinks('largest v4'), l6 = rowLinks('largest v6'), follow = [...l4, ...l6].filter(a => !a.rel);
+  ok(l4.length === 12 && l4.slice(0, want4).every(a => !a.rel) && l4.slice(want4).every(a => a.rel === 'nofollow') &&
+    l6.length === (want6 ? 6 : 0) && l6.slice(0, want6).every(a => !a.rel) && l6.slice(want6).every(a => a.rel === 'nofollow') && follow.length === 10,
+    `the terminal's asn ${as}: ${follow.length} ordinary links (IPv4 ${want4}, IPv6 ${want6}), the rest nofollow: ${rels([...l4, ...l6])}`);
+}
+for (const [px, part, splits] of [
+  ['87.121.150.0/24', 'nofollow', 'nofollow'], ['2a0d:5600::/32', 'nofollow', 'nofollow'],
+  ['10.0.0.0/22', '', ''], ['192.168.0.0/16', '', ''], ['fd00::/8', '', ''],
+  ['100.64.0.0/10', 'nofollow', ''],                    // its supernet, 100.0.0.0/9, is public address space
+]) {
+  await A.renderCidr(globalThis.IPTERM_CIDR.calc(px));
+  const p = rowLinks('part of'), s = rowLinks('splits into');
+  ok(p.length === 1 && s.length === 2 && p.every(a => (a.rel || '') === part) && s.every(a => (a.rel || '') === splits),
+    `the terminal's cidr ${px}: part of ${rels(p)}; splits into ${rels(s)}`);
+}
+const nextLine = () => out.kids[out.kids.length - 1];
+for (const [px, route, want] of [
+  ['87.121.150.0/24', { error: 'Routing data skipped' }, 'nofollow'],
+  ['87.121.150.0/24', { status: 'announced', prefix: '87.121.150.0/24', origins: [{ asn: 'AS64500' }] }, 'nofollow'],
+  ['10.0.0.0/22', null, ''],
+]) {
+  await A.cidr('', { data: globalThis.IPTERM_CIDR.calc(px), ...(route ? { route } : {}) });
+  A.flushNext();
+  const links = anchors(nextLine()), c = links.filter(a => a.cmd && a.cmd.startsWith('cidr ')), other = links.filter(a => !(a.cmd && a.cmd.startsWith('cidr ')));
+  ok(c.length >= 1 && c.every(a => (a.rel || '') === want) && other.every(a => !a.rel),
+    `the terminal's next: after cidr ${px}${route ? (route.error ? ' (no routing)' : ' (routed)') : ''}: ${rels(links)}`);
+}
+
+console.log("-- the terminal asks for routing a page left out for a bot (public/app.js cidr): a browser too old for Sec-Fetch-*");
+const SAFARI15 = 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6.6 Mobile/15E148 Safari/604.1';
+let printed = [], asked = [];
+const say = (text, cls) => { const n = { textContent: text, className: 'ln ' + cls, remove() { printed = printed.filter(x => x !== n); } }; printed.push(n); return n; };
+// apiRoute as that browser sends it to the Worker: getJson's Accept: application/json, its user agent, no Sec-Fetch-*.
+const viaWorker = ua => async q => {
+  const r = await run('/api/route?q=' + encodeURIComponent(q), { ua, accept: 'application/json' });
+  asked.push(`${r.status}, ${ripe(r)} RIPEstat requests`);
+  return r.status === 200 ? r.data : { error: r.data.error };
+};
+const shown = () => printed.map(n => n.textContent).join(' | ');
+for (const [who, ua, px, want] of [
+  ['Safari 15, no Sec-Fetch-*', SAFARI15, '87.121.160.0/24', 200],
+  ["Googlebot's renderer", GOOG_RENDER, '87.121.161.0/24', 403],
+]) {
+  printed = []; asked = [];
+  const page = await run('/cidr/' + px, { ua, accept: HTML }), pre = page.initial || {};
+  staticBot = botNotes(page.body);
+  const onPage = staticBot.length;
+  await terminal(true, say, viaWorker(ua)).cidr(pre.query, pre);
+  ok(ripe(page) === 0 && pre.route && pre.route.bot === true && asked.length === 1 && asked[0].startsWith(String(want)) &&
+    (want === 200 ? /routing: ok/.test(shown()) && /[1-9]\d* RIPEstat/.test(asked[0]) : printed.length === 0 && / 0 RIPEstat/.test(asked[0])),
+    `${who}: the page's routing is left out (bot: ${pre.route && pre.route.bot}), the terminal asks /api/route once: ${asked.join('; ')}; it prints ${shown() || 'nothing'}`);
+  ok(onPage === 1 && staticBot.length === (want === 200 ? 0 : 1),
+    `${who}: the page's note for bots (.route-bot) ${want === 200 ? 'goes once routing has loaded' : 'stays, since no routing came'}: ${staticBot.length} of ${onPage} left`);
+}
+// A crawler that obeys robots.txt can't fetch /api/ at all, and getJson answers a network error: that must not
+// replace the page's honest note in the page the crawler renders.
+printed = []; asked = [];
+staticBot = botNotes(`<article class="static" id="static"><p class="ln sys route-bot">Routing data skipped: RIPEstat isn't asked for automated visitors</p></article>`);
+await terminal(true, say, async () => ({ error: 'network error. Check your connection and try again.' }))
+  .cidr('', { data: globalThis.IPTERM_CIDR.calc('87.121.150.0/24'), route: { error: 'Routing data skipped', bot: true } });
+ok(staticBot.length === 1 && printed.length === 0,
+  `a crawler kept off /api/ by robots.txt: the page keeps its note for bots and nothing says "network error" (prints ${shown() || 'nothing'})`);
+for (const [what, route, live] of [
+  ['a rate-limit note', { error: 'Routing data skipped: too many lookups from your address. Wait a minute and reload.' }, true],
+  ['routing', { status: 'announced', prefix: '87.121.150.0/24', origins: [{ asn: 'AS64500' }], upstreams: [] }, true],
+  ["a bot's note, in the preview", { error: 'Routing data skipped', bot: true }, false],
+]) {
+  printed = []; asked = [];
+  staticBot = route.bot ? botNotes(`<article class="static" id="static"><p class="ln sys route-bot">${route.error}</p></article>`) : [];
+  const onPage = staticBot.length;
+  await terminal(live, say, viaWorker(CHROME)).cidr('', { data: globalThis.IPTERM_CIDR.calc('87.121.150.0/24'), route });
+  ok(asked.length === 0 && printed.length === (route.error ? 1 : 0) && staticBot.length === onPage,
+    `a page with ${what}: the terminal asks nothing more, prints ${printed.length} line(s) and leaves the page's ${onPage} note(s) for bots`);
+}
+
 const hb = read('docs/handbook.md');
 ok(hb.includes('isBot()') && hb.includes('tools/check_bots.mjs'), 'docs/handbook.md describes isBot() and this check');
+ok(hb.includes('routeData()') && hb.includes('asnLinked()') && hb.includes('nofollow'), 'docs/handbook.md describes the routing rule for bots and the links');
 ok(read('public/llms.txt').includes('AI assistants and crawlers get country and network only'), 'public/llms.txt tells AI assistants what a bot gets');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

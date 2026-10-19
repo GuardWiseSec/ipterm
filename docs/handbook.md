@@ -195,7 +195,40 @@ What a bot gets, on every route that looks an address up (`/<ip>` and its `/text
 So a bot sees country and network where a person sees a city, on the same page with the same title, links and
 wording, the way a visitor past their hourly share does: less detail, never different content. Everything else the
 site does (DNS, whois, `/cidr`, ASN pages, mail checks, report cards, one-value answers) never spends either budget
-for anyone. `node tools/check_bots.mjs` checks all of this with no server and no network (see "Local development").
+for anyone.
+
+**Routing follows the same rule.** RIPEstat has no budget, but it is free and asks for fair use, and in October 2026
+a crawler (Bingbot, by the look of it) opened about 155 public `/cidr/<prefix>` pages a minute, reached through the
+ASN pages' prefix links, each a routing lookup of up to five RIPEstat calls. Throttled, routing would break for
+people too. So a bot never starts a routing lookup (`routeData()`):
+
+- A public `/cidr/<prefix>` page shows a bot the subnet calculation, with the routing when someone else's lookup
+  cached it (six hours, per data center), and otherwise this line where the routing would be: "Routing data skipped:
+  RIPEstat isn't asked for automated visitors (crawlers, link previews, bots). Open the page in a browser to see it."
+  The title and description are then the calculation's.
+- `/route/<ip>` in a browser is sent to the `/cidr` page of the route the address is in; a bot is sent there only when
+  that address's routing is cached (someone's `/route/<ip>` or `route <ip>` in the last six hours: it is cached
+  under the address, not its prefix), and otherwise to the address's own `/32` (or `/128`) page. A bot asking
+  `/route/...` or `/api/route` for JSON or text gets a 403 saying so when the routing isn't cached (`openapi.json`
+  lists it).
+- The exception is the public prefixes in `SITEMAP_PATHS` (`1.1.1.0/24`, `8.8.8.0/24` and `9.9.9.0/24`,
+  `curatedRoutes()`): their pages are in the sitemap and their titles are their routing ("1.1.1.0/24: announced by
+  AS13335 ..."), so crawlers get the real page. That is five RIPEstat calls each at most every six hours per data
+  center, and no request can add to the list.
+- People keep live routing as before: a browser navigation, the terminal's `cidr` and `route` (its fetch asks for
+  JSON, so it is a person's unless the user agent says otherwise), curl and scripts. A browser too old to send
+  `Sec-Fetch-*` gets the bot's page, whose data marks the missing routing `bot: true`, so its terminal asks
+  `/api/route` itself and shows the routing (`cidr()` in `public/app.js`). The page's note is `.route-bot`, and
+  the terminal removes it once that request brings routing, so nobody reads "open the page in a browser" above
+  routing that loaded. A crawler that runs the page's script (Googlebot, Bingbot) can't fetch `/api/`, which
+  robots.txt disallows, or gets the 403 if it ignores that; either way no RIPEstat call, and the page keeps its note.
+
+ASN pages' own RIPEstat calls (holder, prefixes, upstreams) are unchanged: those are the pages the ASN sitemap asks
+crawlers to read, each cached six hours. What changed is how many public `/cidr` pages they invite crawlers to: only
+ten of the largest prefixes are links, and the terminal's links from one public block to the next are `nofollow`
+(see "Shareable pages and search").
+
+`node tools/check_bots.mjs` checks all of this with no server and no network (see "Local development").
 
 ### Budget status for the owner: /status (optional)
 
@@ -568,7 +601,8 @@ run to hundreds of kilobytes for a busy prefix, and parsing that would use up th
 Only public ranges between /8 and /32 (IPv6 /16 to /128) are looked up; anything else is refused without a call.
 A lookup never uses IPinfo or proxycheck.io, so it can't spend their budgets; it counts as one of the visitor's 30
 lookups a minute when it isn't cached, and the `/cidr` page shows the calculation with a note instead when a visitor
-is over that limit or RIPEstat doesn't answer.
+is over that limit or RIPEstat doesn't answer. A bot never starts a lookup: it gets the routing from the cache or
+not at all (`routeData()`; see "Bots never spend the budgets").
 
 **ASN pages** list the network's main upstreams: the five networks RIPEstat's `asn-neighbours` sees just before it
 in AS paths ("left" neighbours), by how many RIS peers see each, with their names (`as-overview`, in parallel).
@@ -1203,6 +1237,17 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   thin address pages. Links are not what keeps crawlers off the budgets, though: they reach address pages anyway,
   from whois, DNS and `/cidr` pages, and those cost nothing only because of `isBot()` (see "Bots never spend the
   budgets").
+- **Few links to public prefixes.** An ASN page links only ten of its largest prefixes, up to four of them IPv6
+  (`asnLinked()` in `src/worker.js`; the terminal's `renderAsn()` picks the same ten). The Worker's page lists the
+  rest as text, and the terminal shows them as `rel="nofollow"` links: a click opens them as ever, but crawlers aren't
+  invited to 30 public `/cidr` pages from each of the sitemap's 10,000 ASN pages (that is how one crawled about 155 a
+  minute). For the same reason the terminal's "splits into" and "part of" links on a `/cidr` result, and its `next:`
+  suggestions for the block twice the size and the first half, are `rel="nofollow"` when the block they open is
+  public (`cidrRel()` in `public/app.js`): otherwise each public block's page leads to the next without end. Links to
+  private and other non-public ranges (whatever `cidr.js` doesn't call public: `10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16`, `100.64.0.0/10`, `fc00::/7` and the rest) stay ordinary: those pages make no outside call, and
+  they rank. It goes by the block the link opens, so `100.64.0.0/10`'s "part of", `100.0.0.0/9`, is public and
+  `nofollow`. The Worker's own `/cidr` page lists "splits into" and "part of" as text, not links.
 - **One copy of the site, on https.** Plain `http://ipterm.net` stays open: `curl ipterm.net`, the README's first
   line, goes over http, and curl doesn't follow redirects. Until October 2026 the pages answered over http as well,
   each naming its http address as canonical, and over http robots.txt and the sitemaps listed http URLs, so Google
@@ -1404,8 +1449,10 @@ Object call, no rate-limiter call.
 **If you add a new static file** (an image, a script, like `cidr.js` was), add a `"!/<file>"` line to `run_worker_first`
 so it doesn't count against the limit. Watch usage under **Workers & Pages → ipterm → Metrics**.
 
-**What crawling the network pages costs.** The sitemap lists 10,000 ASN pages, each linking up to 30 prefixes to
-`/cidr` and up to 5 upstreams to other ASN pages. None of them ever reaches IPinfo or proxycheck.io. A public `/cidr`
+**What crawling the network pages costs.** The sitemap lists 10,000 ASN pages, each linking ten of its largest
+prefixes to `/cidr` (30 until October 2026) and up to 5 upstreams to other ASN pages. None of them ever reaches IPinfo
+or proxycheck.io, and a crawler's `/cidr` page makes no RIPEstat call: it reads the cache, unless the prefix is one of
+the three public ones in `SITEMAP_PATHS` (`routeData()`; see "Bots never spend the budgets"). A public `/cidr`
 page links its whois page, which links an address page (or, for a block's first address, the block's `/cidr` page):
 for a crawler, that address page is IPinfo Lite or the cache (`isBot()`), so it adds a request and no budget. Measured under
 `wrangler dev` (subrequests by wrapping `fetch` and the Cache API; CPU time by running the Worker's own code in Node
@@ -1413,7 +1460,7 @@ with RIPEstat's answers replayed, on a laptop, so treat it as an estimate):
 
 | Request | Subrequests (uncached / cached) | CPU time (uncached / cached) |
 | --- | --- | --- |
-| `/cidr/<public prefix>` page | 6 (4 RIPEstat, 2 cache) / 1 | about 1 ms (IPv6 about 2.4 ms) / 0.3 ms |
+| `/cidr/<public prefix>` page | 6 (4 RIPEstat, 2 cache) / 1; for a bot 1 (the cache), unless in `SITEMAP_PATHS` | about 1 ms (IPv6 about 2.4 ms) / 0.3 ms |
 | `/cidr/<private range>` page | 0 | under 0.5 ms |
 | `/AS<n>` page | 10 (3 RIPEstat, up to 5 names, 2 cache); 5 when the neighbour list is too large / 1 | 2 to 6 ms; 12 ms for AS13335, the largest prefix list (5,776 prefixes) / 0.3 ms; the private-holder check adds about 3 ms the first time in an isolate, then microseconds |
 | `/sitemap-asn-2.xml` (9,000 URLs, 486 KB) | 0 | about 7 ms the first time in an isolate, then kept |
@@ -1430,6 +1477,7 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | --- | --- | --- |
 | Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them | `[[ratelimits]]` in `wrangler.toml` | Edit `limit` (period must be 10 or 60 seconds) |
 | Bots never spend IPinfo Core or proxycheck.io: named crawlers and link previews, `BOT_UA`, and anything asking for HTML without a browser's `Sec-Fetch-*` get Core's answer only from the cache, otherwise IPinfo Lite, and a VPN check only from the cache; command-line tools and scripts asking for JSON keep full data | `isBot()`, `ipData()`, `privacyData()`, `blockData()` in `src/worker.js`; `tools/check_bots.mjs` | See "Bots never spend the budgets" |
+| Bots never start a RIPEstat routing lookup: a public `/cidr` page shows them the calculation, with the routing only when it is cached; `/route/<ip>` sends them to a cached route or the address's `/32`; JSON and text answer 403. The three public `/cidr` pages in `SITEMAP_PATHS` are the exception. People, the terminal, curl and scripts keep live routing | `routeData()`, `cidrRoute()`, `routeRoute()` in `src/worker.js`; `tools/check_bots.mjs` | `curatedRoutes()`; see "Bots never spend the budgets" |
 | A lookup's registry date (`block`): RDAP only, never IPinfo or proxycheck.io; never for the visitor's own address (`?block=0` from the terminal for their other IP version); bots (`isBot()`) only read the cache (shared with `whois <ip>`, a day); anyone else's registry request counts toward their rate limit, riding on the lookup's own count or sharing the VPN check's; 0.3 seconds at most once the rest of the answer is ready, then the answer goes without it and the request finishes in the background; lookups of one address share a request in flight; a registry that fails is left alone for a minute (ten after a 429) | `blockData()` in `src/worker.js`; `tools/check_block.mjs` | `BLOCK_RECENT_DAYS`, `BLOCK_GRACE`; see "Recently registered blocks" |
 | Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
 | DNS leak test: `/api/dnsleak` only from the ipterm page or a command-line tool, well-formed tokens only, rate limited; the VPS's API needs the `DNSLEAK_KEY` secret (compared in constant time), listens on 127.0.0.1 behind Caddy, hands each token's resolvers over once and forgets them; non-public resolver addresses never go to IPinfo | `dnsleakRoute()` in `src/worker.js`, `dnsleak-server/` | See "DNS leak test server" |
@@ -1524,19 +1572,31 @@ cache. That is one ordinary lookup, from IPinfo's free API under `wrangler dev` 
 `?block=0` (live, unless cached, that is one IPinfo Core lookup and one proxycheck.io query of their budgets), and
 checks that `/8.8.8.8/org` (IPinfo Lite, free) is still one bare line.
 
-`node tools/check_bots.mjs` (Node 22.15 or later) checks that bots never spend the budgets (see "Bots never spend the
-budgets"), with no server and no network: it runs the whole Worker in Node with `IPINFO_PLAN = "core"`, an `IPINFO_TOKEN` and a
+`node tools/check_bots.mjs` (Node 22.15 or later) checks that bots never spend the budgets nor start a routing lookup (see "Bots never
+spend the budgets"), with no server and no network: it runs the whole Worker in Node with `IPINFO_PLAN = "core"`, an `IPINFO_TOKEN` and a
 `PROXYCHECK_KEY`, a budget counter that throws when a bot reaches it, and `fetch` stubbed to answer as IPinfo,
-proxycheck.io, RDAP and DNS would and to note every request. First `isBot()` itself, on the user agents of crawlers,
+proxycheck.io, RDAP, DNS and RIPEstat would and to note every request. First `isBot()` itself, on the user agents of crawlers,
 link previews, AI and SEO bots and headless browsers, and of browsers (a Cubot phone's included) and command-line
 tools. Then Googlebot, a link preview, GPTBot and an unnamed client asking for an address's page without
 `Sec-Fetch-*`, GPTBot on `/api/lookup`, ClaudeBot on `/<ip>/json`, an HTML client on `?format=json` and Googlebot
 rendering leaktest (`/api/check`) must get IPinfo Lite with no VPN check or registry date, and never reach the budget
 counter, Core, proxycheck.io or a registry; a browser navigation, the terminal's own fetch, curl, a Cubot phone and
 leaktest in a browser must still get Core and proxycheck.io; then Googlebot gets the Core answer one of them cached,
-for free. Last, the pages: whois of a registry block's first address links the block's `/cidr` page (the Worker's
+for free. Then the pages: whois of a registry block's first address links the block's `/cidr` page (the Worker's
 page and the terminal's `renderWhois()`), other addresses and curated ones keep their lookup link, and a network's
-first address has a noindex page with its own canonical and, when the lookup has it, its registered block.
+first address has a noindex page with its own canonical and, when the lookup has it, its registered block. Then
+routing (`routeData()`; `fetch` answers as RIPEstat too): Googlebot, bingbot, GPTBot and an unnamed client asking for
+an uncached public `/cidr` page get the calculation and the "Routing data skipped" line with no RIPEstat request, and
+the routing from the cache once a browser navigation has looked it up; the terminal's `/api/route`, curl and a script
+still ask RIPEstat, and so does the terminal on the page a browser too old to send `Sec-Fetch-*` gets
+(`bot: true`) and then drops the page's `.route-bot` note, while Googlebot's renderer gets the 403 (or, obeying
+robots.txt, no answer) and the note stays, never a "network error" in its place; a private `/cidr` page is the same for a bot and a person
+and asks nothing; a bot's `/route` asks nothing (a redirect, or a 403 for JSON and text); and the three public
+`/cidr` pages in `SITEMAP_PATHS` keep live routing for bots, and only they. Last, the links: the Worker's ASN page links ten of its largest prefixes (up to four
+IPv6) and lists the rest as text, its `/cidr` page has no "splits into" or "part of" links, and the terminal's
+`renderAsn()`, `renderCidr()`, `cidr()` and `next:`, run against a stand-in DOM, make the same ten ASN prefixes
+ordinary links and the rest `nofollow`, and a block's "splits into", "part of" and `next:` links `nofollow` when the
+block they open is public.
 
 `node tools/check_https.mjs` (Node 22.15 or later) checks plain http (see "One copy of the site, on https"), also
 with no server and no network: the whole Worker in Node, its static files read from `public/`, and `fetch` stubbed. Over

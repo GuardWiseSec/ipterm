@@ -40,7 +40,8 @@
 //   GET /badge/<domain>.json  the grade as a shields.io endpoint badge ({ schemaVersion, label, message, color });
 //   GET /badge/<domain>.svg   the same badge drawn by ipterm. Both cached for an hour
 //   GET /cidr/<ip>/<prefix> subnet calculator page (also /api/cidr?q=). The calculation makes no outside calls; the
-//                           page for a public prefix adds how it is routed (RIPEstat, see "routing" below)
+//                           page for a public prefix adds how it is routed (RIPEstat, see "routing" below; a bot
+//                           sees it only when cached, routeData)
 //   GET /route/<prefix|ip>  routing as JSON: origin network, RPKI, RIS visibility, sample AS paths (RIPEstat only,
 //                           never IPinfo or proxycheck.io). Browsers are sent to the prefix's /cidr page
 //   GET /api/route?q=       the same, used by the terminal (`route`)
@@ -92,7 +93,8 @@
 //   - Upstream lookups are cached; cache misses are rate limited per visitor IP (LOOKUP_LIMITER).
 //   - Cross-site browser access (CORS) is off unless PUBLIC_API = "true".
 //   - Private and other non-public addresses never reach a provider.
-//   - Bots never spend the IPinfo Core or proxycheck.io budgets: they get the cache or IPinfo Lite (isBot).
+//   - Bots never spend the IPinfo Core or proxycheck.io budgets: they get the cache or IPinfo Lite (isBot). Nor do they
+//     start routing lookups (RIPEstat's fair use): /cidr and /route give them cached routing or none (routeData).
 //   - Redirects for router-address typos take their Location from SITEMAP_PATHS, never from the request.
 //   - Over plain http, pages (browsers, crawlers, link previews) get a 301 to https on the same host; curl and scripts
 //     are answered over http, and every link and cache key says https either way (route()).
@@ -133,8 +135,9 @@ const ASN_RE = /^as(\d{1,10})$/i;
 // Who may spend the IPinfo Core and proxycheck.io budgets: people, and the API. A bot (io.bot) gets Core's and
 // proxycheck.io's answers only from the cache, where someone else's lookup put them, and otherwise IPinfo Lite (free),
 // with no VPN check and no registry date (ipData, privacyData and blockData see to it, so no route can forget). It gets
-// country and network where a person gets a city: less detail on the same page, never different content. The test is
-// conservative about who is a person:
+// country and network where a person gets a city: less detail on the same page, never different content. Nor does it
+// start a RIPEstat routing lookup (routeData): a public /cidr page shows it the calculation, and the routing only when
+// it is cached. The test is conservative about who is a person:
 // - a named crawler or link preview, or anything in BOT_UA, is a bot whatever else it sends;
 // - a client that asks for HTML (Accept: text/html, even on a ?format= or /json copy) is a person only when the request
 //   looks like a browser's own: a navigation (Sec-Fetch-Mode: navigate or Sec-Fetch-Dest: document, which browsers set
@@ -662,7 +665,11 @@ async function ipRoute(io, q, html) {
 
 // The calculation answers JSON and text on its own (no outside call); the page for a public prefix adds its
 // routing, which /route/<prefix> also answers. A routing lookup that fails or is rate limited leaves the
-// page as it was, with a note, rather than failing it.
+// page as it was, with a note, rather than failing it, and so does a bot's when the routing isn't cached (routeData).
+// That note says bot: true, so the terminal asks /api/route itself (cidr() in public/app.js): a browser too old to send
+// Sec-Fetch-* gets this page too, but its JSON request is a person's. Its line is .route-bot, which the terminal
+// drops once that request brings routing: a person shouldn't read "open the page in a browser" above their routing.
+// A crawler running the script can't fetch /api/ (robots.txt) or gets a 403, and the line stays.
 async function cidrRoute(io, q, html) {
   const d = CIDR.calc(String(q || '').replace(/-(\d{1,3})$/, '/$1'));   // also accept 10.0.0.0-22
   if (d.error) return html ? cidrPage(io, { error: d.error, input: q }, 400) : reply(io, { error: d.error }, 400);
@@ -670,7 +677,7 @@ async function cidrRoute(io, q, html) {
   const t = d.range === 'public' ? routeTarget(d.cidr) : null;
   let route = null;
   if (t && !t.error) {
-    try { route = await routeData(io, t); } catch (e) {
+    try { route = (await routeData(io, t)) || { error: ROUTE_BOT + ' Open the page in a browser to see it.', bot: true }; } catch (e) {
       if (!(e instanceof RateLimited)) console.error('[ipterm] routing lookup failed:', String((e && e.message) || e));
       route = { error: e instanceof RateLimited ? 'Routing data skipped: too many lookups from your address. Wait a minute and reload.'
         : "Routing data didn't load: RIPEstat didn't answer. Try again in a moment." };
@@ -680,19 +687,22 @@ async function cidrRoute(io, q, html) {
 }
 
 // /route/<prefix or ip> and /api/route?q=: the routing on its own. Browsers get the prefix's /cidr page, where
-// the same data sits under the subnet calculation (an address goes to the prefix it is routed in).
+// the same data sits under the subnet calculation (an address goes to the prefix it is routed in; a bot's, only when
+// that address's own routing is cached, under the address, and otherwise to its /32 or /128). A bot asking for JSON or
+// text gets a 403 when the routing isn't cached (routeData).
 async function routeRoute(io, raw, html) {
   const t = routeTarget(raw);
   if (html) {
     if (t.error) return redirect('/cidr');
     if (!t.ip) return redirect(encodePath('/cidr/' + t.query), 301);
     let to = `${t.query}/${t.p.v === 4 ? 32 : 128}`;
-    try { const d = await routeData(io, t); if (d.prefix) to = d.prefix; } catch {}
+    try { const d = await routeData(io, t); if (d && d.prefix) to = d.prefix; } catch {}
     return redirect(encodePath('/cidr/' + to));
   }
   if (t.error) return reply(io, { error: t.error }, 400);
-  return guard(() => routeData(io, t), d => reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, routeText),
-    (msg, status) => reply(io, { error: msg }, status));
+  return guard(() => routeData(io, t), d => (d ? reply(io, d, 200, { 'cache-control': 'public, max-age=300' }, routeText)
+    : reply(io, { error: ROUTE_BOT + ' Ask from a browser or with curl.' }, 403)),
+  (msg, status) => reply(io, { error: msg }, status));
 }
 
 // Adds proxycheck.io's VPN / proxy opinion, unless IPinfo already flagged the address (then a
@@ -2092,7 +2102,16 @@ function routeTarget(raw) {
   if (d.prefix < (d.v === 4 ? 8 : 16)) return { error: `${d.cidr} is larger than any route: give a /${d.v === 4 ? 8 : 16} or smaller.` };
   return { query: d.cidr, ip: false, p: parseIp(d.network), len: d.prefix };
 }
-const routeData = (io, t) => cached(io, 'route/' + t.query, 21600, () => routeLookup(t));
+// A bot (isBot) gets routing only from the cache, where someone else's lookup put it, and otherwise null: RIPEstat is
+// free but asks for fair use, and a crawler following ASN pages' prefix links opened about 155 /cidr pages a minute,
+// several calls each. The exception is the public prefixes in SITEMAP_PATHS (curatedRoutes): three pages whose titles
+// are their routing, five calls each at most every six hours per data center, and a list no request can add to.
+let curatedR = null;
+const curatedRoutes = () => curatedR || (curatedR = new Set(SITEMAP_PATHS.filter(p => p.startsWith('/cidr/')).map(p => p.slice(6))));
+const routeData = (io, t) => (io.bot && !curatedRoutes().has(t.query) ? fromCache(io, 'route/' + t.query)
+  : cached(io, 'route/' + t.query, 21600, () => routeLookup(t)));
+// What a bot is told in place of routing nobody has looked up lately (routeData).
+const ROUTE_BOT = "Routing data skipped: RIPEstat isn't asked for automated visitors (crawlers, link previews, bots).";
 
 // A prefix from upstream data, in canonical form, or null.
 function canonPrefix(s) {
@@ -4055,7 +4074,7 @@ function cidrPage(io, d, status, route = null) {
     links = (nets.length ? `<p class="ln sys">Networks: ${nets.map(asLink).join(' · ')}</p>` : '') +
       (r.prefix && r.prefix !== d.cidr ? `<p class="ln sys">Route: <a href="/cidr/${esc(r.prefix)}">${esc(r.prefix)}</a></p>` : '') +
       `<p class="ln sys">Routing data from <a href="https://stat.ripe.net/" rel="noopener">RIPEstat</a> (RIS collectors ${esc(r.collectors.map(c => c.split(' ')[0]).join(', '))}). From a command line: <code>curl ${esc(io.url.host)}/route/${esc(d.cidr)}</code></p>` + links;
-  } else if (route && route.error) links = `<p class="ln sys">${esc(route.error)}</p>` + links;
+  } else if (route && route.error) links = `<p class="ln sys${route.bot ? ' route-bot' : ''}">${esc(route.error)}</p>` + links;   // .route-bot: cidrRoute
   // The routing section names the origin networks' holders: noindex, follow when one may be a private person, as
   // on the origin's own ASN page (prefix-overview gives the holder as as-overview does).
   const personal = Boolean(r) && r.origins.some(o => personHeld(o.holder));
@@ -4228,6 +4247,12 @@ function gradePage(io, d, status) {
     initial: { ...initial, data: d }, body: staticBlock(`Report card: ${name}`, ['grade', `grade ${d.grade}`], rows, summary, links) });
 }
 
+// How many of an ASN page's largest prefixes are links to their /cidr pages, [IPv4, IPv6]: ten in all, up to four of
+// them IPv6. The sitemap lists 10,000 ASN pages, and a crawler following 30 prefix links on each opened about 155
+// public /cidr pages a minute. renderAsn() in public/app.js links the same ones and makes the rest rel="nofollow".
+const ASN_LINKS = 10, ASN_LINKS_V6 = 4;
+const asnLinked = n6 => { const k6 = Math.min(ASN_LINKS_V6, n6); return [ASN_LINKS - k6, k6]; };
+
 function asnPage(io, d, status) {
   const path = '/' + d.asn;
   if (d.error || !d.found) {
@@ -4258,11 +4283,13 @@ function asnPage(io, d, status) {
     ['IPv6 prefixes', d.v6.count.toLocaleString('en-US')], ['upstreams', upstreamText(d.upstreams)],
   ];
   // Prefixes link to the subnet calculator, whose routing section asks RIPEstat only, never IPinfo, and
-  // upstreams to their ASN pages (RIPEstat too): crawlers following 30 links per ASN page land on pages that
-  // answer the search (a block, not one address in it) and cost no IPinfo Lite lookups or rate-limit counts.
-  // Keep it that way: no IP lookup links here. The budgets themselves are isBot()'s (ipData, privacyData, blockData).
-  const list = [...d.v4.prefixes.slice(0, 20), ...d.v6.prefixes.slice(0, 10)]
-    .map(px => `<li><a href="/cidr/${esc(px)}">${esc(px)}</a></li>`).join('');
+  // upstreams to their ASN pages (RIPEstat too): crawlers following them land on pages that answer the search (a
+  // block, not one address in it) and cost no IPinfo Lite lookups or rate-limit counts. Keep it that way: no IP
+  // lookup links here. The budgets themselves are isBot()'s (ipData, privacyData, blockData). Only the largest ten
+  // or so are links (asnLinked); the rest are listed as text, still the page's content.
+  const [k4, k6] = asnLinked(d.v6.prefixes.length);
+  const item = k => (px, i) => `<li>${i < k ? `<a href="/cidr/${esc(px)}">${esc(px)}</a>` : esc(px)}</li>`;
+  const list = [...d.v4.prefixes.slice(0, 20).map(item(k4)), ...d.v6.prefixes.slice(0, 10).map(item(k6))].join('');
   const upList = ups.map(u => `<li><a href="/${esc(u.asn)}">${esc(u.asn)}${u.name ? ' ' + esc(u.name) : ''}</a></li>`).join('');
   const links = (upList ? `<p class="ln sys">Main upstream networks (seen just before ${esc(d.asn)} in AS paths):</p><ul class="static-list">${upList}</ul>` : '') +
     (list ? `<p class="ln sys">Largest announced prefixes:</p><ul class="static-list">${list}</ul>` : '') +

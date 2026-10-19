@@ -89,9 +89,12 @@ robots /whois/AS15169 0
 robots /whois/AS3356 0
 robots /whois/1.1.1.1 0
 robots /whois/8.8.8.8 0
-# Each network's largest prefix (the first in its JSON), whose routing section names the network's holder.
+# Each network's largest prefix (the first in its JSON), whose routing section names the network's holder. A bot
+# (Googlebot here) gets the routing only from the cache (routeData), so a browser navigation looks it up first.
+CHROME='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 for a in AS35100:1 AS50053:1 AS13335:0 AS15169:0 AS3356:0; do
   px=$(curl -s -A curl/8 "$B/${a%:*}?format=json" | grep -o '"[0-9.]*/[0-9]*"' | head -1 | tr -d '"')
+  [ -n "$px" ] && curl -s -o /dev/null -A "$CHROME" -H 'Accept: text/html' -H 'Sec-Fetch-Mode: navigate' "$B/cidr/$px"
   if [ -n "$px" ]; then robots "/cidr/$px" "${a#*:}"; else no "${a%:*}: no prefix in its JSON"; fi
 done
 robots /cidr/1.1.1.0/24 0
