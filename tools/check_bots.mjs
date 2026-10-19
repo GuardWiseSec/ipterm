@@ -11,7 +11,8 @@
 //    Sec-Fetch-* headers, GPTBot on /api/lookup, ClaudeBot on /<ip>/json, an HTML client on ?format=json and Googlebot
 //    rendering leaktest (/api/check) get IPinfo Lite, no VPN check and no registry date, and never reach the budget
 //    counter, IPinfo Core, proxycheck.io or a registry. A browser navigation (Sec-Fetch-Mode: navigate), the terminal's
-//    own fetch (Sec-Fetch-Site: same-origin), curl and leaktest in a browser still get Core and proxycheck.io. Then
+//    own fetch (Sec-Fetch-Site: same-origin), curl and leaktest in a browser still get Core and proxycheck.io, but not
+//    leaktest's lookup of the other IP version (?lite=1): IPinfo Lite only, its network all leaktest compares. Then
 //    Googlebot gets the Core answer someone else's lookup cached, with its VPN check and registry date, for free.
 // 3. The pages: whois of a registry block's first address links the block's /cidr page, not the address (the Worker's
 //    page and the terminal's renderWhois() in public/app.js), and other addresses keep their lookup link, curated ones
@@ -233,6 +234,15 @@ const leak = await run('/api/check', { ua: CHROME, me: '74.4.5.6', ...TERMINAL }
 const lp = (leak.data || {}).network || {};
 ok(leak.status === 200 && lp.source === 'ipinfo-core' && lp.privacy && leak.taken.includes('ipinfo-core') && leak.taken.includes('proxycheck'),
   `leaktest in a browser, /api/check: source ${lp.source}, ${lp.privacy ? 'a VPN check' : 'no VPN check'}`);
+// Its lookup of the other IP version (public/app.js: api(other, true)) asks for the network only: ?lite=1.
+const lite = await run('/api/lookup?ip=74.5.6.7&block=0&lite=1', { ua: CHROME, ...TERMINAL }), lt = lite.data || {};
+ok(lite.status === 200 && lt.source === 'ipinfo-lite' && lt.asn === 'AS7922' && lt.org && !lt.privacy && !lt.block && !spent(lite) && !lite.kinds.includes('rdap'),
+  `leaktest's other IP version in a browser, /api/lookup?ip=...&block=0&lite=1: source ${lt.source}, ${lt.asn} ${lt.org}, ${lt.privacy ? 'a VPN check' : 'no VPN check'}; ` +
+  `budget counter ${JSON.stringify(lite.taken)}, requests ${JSON.stringify(lite.kinds)}`);
+const full = await run('/api/lookup?ip=74.5.6.8&block=0&lite=0', { ua: CHROME, ...TERMINAL }), fd = full.data || {};
+ok(fd.source === 'ipinfo-core' && fd.privacy && full.taken.includes('ipinfo-core'), `... while lite=0 is an ordinary lookup: source ${fd.source}, ${fd.privacy ? 'a VPN check' : 'no VPN check'}`);
+ok(/const otherInfo = other \? await api\(other, true\) : null;/.test(app) && app.includes("(lite ? '&lite=1' : '')"),
+  'public/app.js: leaktest looks up the other IP version with lite=1');
 
 mayTake = false;
 const later = await run('/74.0.0.1', { ua: GOOG }), ld = later.data || {};

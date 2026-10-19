@@ -222,8 +222,16 @@ Settings (`/etc/dnsleak/dnsleak.env`; `setup.sh` writes the first six):
 - **DNS rate limit:** 50 answers a second per asking network (/24 for IPv4, /56 for IPv6), bursts of 100.
   Its answers are at most about twice the size of the queries, so it is a poor tool for flooding anyone with forged queries.
 - **TCP:** at most 200 connections, 10 seconds idle, queries up to 4 KB.
-- **API:** GET only, the key compared in constant time, 1 to 10 tokens per request, 20 requests a second
-  in all (bursts of 40). It listens on 127.0.0.1 only; Caddy serves just `/v1/resolvers` and `/healthz`.
+- **API:** GET only, the key compared in constant time, 1 to 10 tokens per request. It listens on 127.0.0.1
+  only; Caddy serves just `/v1/resolvers` and `/healthz`. The key is checked before the rate limits, which
+  are two separate allowances, so calls without the key can't turn the leak test off for everyone:
+  - `/v1/resolvers` with the key (only the Worker has it): 200 requests a second in all, bursts of 400.
+  - Everything else (`/healthz`, a missing or wrong key, other paths and methods): 5 a second per calling
+    network (/24 for IPv4, /56 for IPv6), bursts of 10, then 429. The caller is the address Caddy puts in
+    `X-Forwarded-For` (Caddy 2.5 and later, as Debian and Ubuntu ship, replace whatever the caller sent
+    there, since this Caddyfile trusts no proxies), so a flood from one place leaves `/healthz` answering
+    for an uptime monitor elsewhere. Like the DNS limit, it holds only the network, for the seconds it
+    takes to refill; visitors never call the API, the Worker does.
 - **The service** runs as a throwaway user (`DynamicUser`) allowed to open port 53 and nothing else, with
   a read-only view of the system and 256 MB of memory at most (`dnsleak.service`).
 
@@ -255,7 +263,8 @@ npm test
 
 runs the tests (`node --test`, nothing to install): the DNS answers (every case above, 0x20 mixed case,
 EDNS and Client Subnet, malformed and oversized queries), the store's two-minute expiry and memory caps,
-and the running server over UDP, TCP and the API.
+and the running server over UDP, TCP and the API, including that a flood of calls without the key leaves
+the Worker's whole allowance untouched.
 
 To try it by hand on a high port:
 

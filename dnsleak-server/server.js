@@ -56,11 +56,23 @@ function prefixKey(ip) {
   try { return v6bytes(ip).slice(0, 7).join(','); } catch { return ip; }
 }
 
+// Who called the API, for its open rate limit. It listens on loopback behind Caddy, which sets
+// X-Forwarded-For to the address that connected to it (without trusted_proxies it ignores whatever the
+// caller sent there; the last entry is Caddy's either way). A caller not on loopback is its own address.
+function caller(req) {
+  const peer = plainIp(req.socket.remoteAddress || '');
+  if (!/^(127\.|::1$)/.test(peer)) return peer;
+  const fwd = plainIp(String(req.headers['x-forwarded-for'] || '').split(',').pop().trim());
+  return net.isIP(fwd) ? fwd : peer;
+}
+
 const sha = s => createHash('sha256').update(String(s)).digest();
 
-export async function start(cfg, { store = new TokenStore() } = {}) {
-  const rrl = new Buckets({ rate: 50, burst: 100 });    // answers a second per asking network, so this can't be used to flood anyone
-  const apiLimit = new Buckets({ rate: 20, burst: 40 }); // the whole API: only one Worker calls it
+// `now` is the rate limits' clock (tests stop it).
+export async function start(cfg, { store = new TokenStore(), now } = {}) {
+  const rrl = new Buckets({ rate: 50, burst: 100, now });      // answers a second per asking network, so this can't be used to flood anyone
+  const keyed = new Buckets({ rate: 200, burst: 400, now });   // calls with the key: only the Worker has it, so one bucket for them all
+  const open = new Buckets({ rate: 5, burst: 10, now });       // everything else, per calling network: it never touches the Worker's
   const keyHash = sha(cfg.key);
 
   function handle(msg, from, overTcp) {
@@ -123,14 +135,20 @@ export async function start(cfg, { store = new TokenStore() } = {}) {
       res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra });
       res.end(JSON.stringify(body) + '\n');
     };
-    if (!apiLimit.take('all')) return send(429, { error: 'Too many requests.' }, { 'retry-after': '1' });
-    if (req.method !== 'GET') return send(405, { error: 'Use GET.' }, { allow: 'GET' });
     let url;
-    try { url = new URL(req.url, 'http://localhost'); } catch { return send(400, { error: 'Bad request.' }); }
+    try { url = new URL(req.url, 'http://localhost'); } catch { url = null; }
+    // The key first, so that calls without it (anyone can reach /healthz) can't spend the Worker's allowance.
+    const got = req.headers['x-dnsleak-key'];
+    const worker = req.method === 'GET' && url?.pathname === '/v1/resolvers'
+      && typeof got === 'string' && timingSafeEqual(sha(got), keyHash);
+    if (!(worker ? keyed.take('worker') : open.take(prefixKey(caller(req))))) {
+      return send(429, { error: 'Too many requests.' }, { 'retry-after': '1' });
+    }
+    if (req.method !== 'GET') return send(405, { error: 'Use GET.' }, { allow: 'GET' });
+    if (!url) return send(400, { error: 'Bad request.' });
     if (url.pathname === '/healthz') return send(200, { ok: true });   // says nothing, so it needs no key
     if (url.pathname !== '/v1/resolvers') return send(404, { error: 'Not found.' });
-    const got = req.headers['x-dnsleak-key'];
-    if (typeof got !== 'string' || !timingSafeEqual(sha(got), keyHash)) return send(401, { error: 'Wrong or missing key.' });
+    if (!worker) return send(401, { error: 'Wrong or missing key.' });
     const tokens = String(url.searchParams.get('t') || '').toLowerCase().split(',').filter(Boolean);
     if (!tokens.length || tokens.length > MAX_TOKENS_PER_ASK || !tokens.every(t => TOKEN_RE.test(t))) {
       return send(400, { error: `Give 1 to ${MAX_TOKENS_PER_ASK} tokens (20 hex characters each) as t=<token>,<token>.` });
@@ -140,7 +158,7 @@ export async function start(cfg, { store = new TokenStore() } = {}) {
   api.headersTimeout = 5000; api.requestTimeout = 5000; api.keepAliveTimeout = 5000;
   await listen(api, s => s.listen(cfg.apiPort, cfg.apiBind));
 
-  const timer = setInterval(() => { store.sweep(); rrl.sweep(); apiLimit.sweep(); }, 5000);
+  const timer = setInterval(() => { store.sweep(); rrl.sweep(); keyed.sweep(); open.sweep(); }, 5000);
   timer.unref();
 
   return {

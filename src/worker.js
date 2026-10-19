@@ -653,9 +653,12 @@ async function ipRoute(io, q, html) {
   // puts it on its links and address bar, for the caller's other addresses (the other IP version, WebRTC's), which
   // look like anyone's here.
   const block = !own && onOff(io.url.searchParams.get('block')) !== false;
+  // ?lite=1: the network and country only (IPinfo Lite) and no VPN check, so neither paid budget is spent. leaktest
+  // asks this way for the caller's other IP version, whose network is all it compares.
+  const lite = onOff(io.url.searchParams.get('lite')) === true, vpnCheck = d => (lite ? d : withPrivacy(io, ip, d));
   // A bot (isBot) gets what the cache holds or IPinfo Lite: ipData, privacyData and blockData spend nothing for it.
   return guard(
-    () => block ? withBlock(io, ip, p, ipData(io, ip, p), d => withPrivacy(io, ip, d)) : withPrivacy(io, ip, ipData(io, ip, p)),
+    () => block ? withBlock(io, ip, p, ipData(io, ip, p, { lite }), vpnCheck) : vpnCheck(ipData(io, ip, p, { lite })),
     // Browsers may reuse an answer for 5 minutes; the Worker's own cache (6 hours) keeps repeats cheap.
     // ...except one that went out before its registry date arrived (blockLate): the next lookup should get the date.
     d => html ? ipPage(io, d, 200) : reply(io, d, 200, { 'cache-control': d.blockLate ? 'no-store' : 'public, max-age=300' }, ipText),
@@ -2368,6 +2371,8 @@ async function dnsData(io, name, types, forIp) {
     }
   });
   if (d.records.MX) d.records.MX.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+  // A resolver failure (SERVFAIL while a zone turns DNSSEC on, say) is kept a minute, not the usual five, like mail's.
+  if (d.status !== 'NOERROR' && d.status !== 'NXDOMAIN') d._ttl = 60;
   const first = (d.records.A || [])[0] || (d.records.AAAA || [])[0];
   const fp = first && parseIp(first.value);
   if (fp && !nonPublicReason(fp)) {                         // who hosts it: reuse the cached IP lookup
@@ -2931,7 +2936,7 @@ function mailResult(base, probe, sel) {
      redirects followed only within the domain (and only over https) to hosts whose addresses are public, a
      capped number of headers read, and nothing else. A 403, a bot challenge (even one sent with a 2xx), a
      timeout or an error is "couldn't check" (INFO), never a FAIL. Certificates can't be checked: a Worker
-     never sees them.
+     never sees them. The Worker's own host (grade ipterm.net) is asked in-process instead (webCheck).
    It never touches IPinfo or proxycheck.io, and a fresh card is one of the visitor's lookups. The whole card is
    cached for five minutes (one minute when a part couldn't be checked and a recheck might fill it). Budgets:
    GRADE_DNS_BUDGET queries (and GRADE_CAA_PARENTS + 2 for CAA at parent names), at most WEB_MAX_FETCH +
@@ -3028,9 +3033,13 @@ async function gradeDns(name) {
 }
 
 // One request to the site, redirects not followed, only the headers we use kept (each one capped), the body
-// never read. A HEAD has no body; a GET after a refused HEAD has its body cancelled at once.
-async function webFetch(url, method, signal, ua) {
-  const r = await fetch(url, { method, redirect: 'manual', signal, headers: { 'user-agent': ua, accept: 'text/html,application/xhtml+xml,*/*;q=0.8' } });
+// never read. A HEAD has no body; a GET after a refused HEAD has its body cancelled at once. self: the request this
+// card came in on, when the site is the Worker's own host (webCheck): its "/" is answered in-process.
+async function webFetch(url, method, signal, ua, self = null) {
+  const init = { method, redirect: 'manual', signal, headers: { 'user-agent': ua, accept: 'text/html,application/xhtml+xml,*/*;q=0.8' } };
+  const u = self ? new URL(url) : null;
+  const r = u && u.hostname === self.url.hostname && u.pathname === '/' && !u.search
+    ? secure(await route(new Request(url, init), self.env, self.ctx), self.env) : await fetch(url, init);
   const h = {};
   let n = 0;
   for (const [k, v] of r.headers) { if (++n > WEB_MAX_HEADERS) break; if (WEB_KEEP.has(k) && !h[k]) h[k] = short(v, 4000); }
@@ -3065,14 +3074,14 @@ const inTime = (p, signal) => Promise.race([p, new Promise((_, no) => (signal.ab
 
 // https://<name>/: follows up to two redirects within the domain, then reads the page's headers. A challenge
 // page is the WAF's, not the site's, so its headers say nothing about the site.
-async function httpsCheck(name, ua, n, noFollow) {
+async function httpsCheck(name, ua, n, noFollow, self) {
   const base = siteBase(name), signal = AbortSignal.timeout(WEB_TIMEOUT), start = `https://${name}/`;
   let url = start, k = 0;
   const hops = [];
   try {
     while (k < WEB_MAX_FETCH) {
-      let r = await webFetch(url, 'HEAD', signal, ua), refusal = null; k++;
-      if ((r.status === 405 || r.status === 501) && k < WEB_MAX_FETCH) { refusal = r; r = await webFetch(url, 'GET', signal, ua); k++; }
+      let r = await webFetch(url, 'HEAD', signal, ua, self), refusal = null; k++;
+      if ((r.status === 405 || r.status === 501) && k < WEB_MAX_FETCH) { refusal = r; r = await webFetch(url, 'GET', signal, ua, self); k++; }
       hops.push({ url, status: r.status });
       if (r.status >= 300 && r.status < 400 && r.status !== 304) {
         const t = r.h.location ? redirectTarget(url, r.h.location) : null;
@@ -3099,12 +3108,12 @@ async function httpsCheck(name, ua, n, noFollow) {
   } finally { n.used += k; }
 }
 // http://<name>/: does it send visitors to HTTPS? One more redirect is followed if it stays on plain http within the domain.
-async function httpCheck(name, ua, n, noFollow) {
+async function httpCheck(name, ua, n, noFollow, self) {
   const base = siteBase(name), signal = AbortSignal.timeout(WEB_HTTP_TIMEOUT);
   let url = `http://${name}/`, k = 0;
   try {
     while (k < WEB_HTTP_FETCH) {
-      const r = await webFetch(url, 'HEAD', signal, ua); k++;
+      const r = await webFetch(url, 'HEAD', signal, ua, self); k++;
       if (r.status >= 300 && r.status < 400 && r.status !== 304) {
         const t = r.h.location ? redirectTarget(url, r.h.location) : null;
         if (!t) return { error: "redirects to an address ipterm doesn't follow" };
@@ -3130,7 +3139,12 @@ async function httpCheck(name, ua, n, noFollow) {
 // (WEB_DNS_BUDGET queries, shared by both checks, within each chain's time limit). fetch() resolves names again
 // and may get another answer (DNS rebinding), which a Worker can't prevent: the real control is the platform's,
 // since Workers can't reach private networks. This is defence in depth. The two checks run side by side.
-async function webCheck(name, dns, origin) {
+// The Worker's own host is the exception: a Worker's fetch() to the hostname it runs on never reaches it (Cloudflare
+// answers HTTP 522), so there "/" is answered in-process: the same request through the same route() and secure() that
+// every visitor gets, with no network hop and no visitor's address in it. Only "/" on that host, whose answers are the
+// homepage and the 301 to https, so it can never reach a card again. (Not under wrangler dev: its host is an address.)
+async function webCheck(name, dns, io) {
+  const origin = io.url.origin, self = !localHost(io.url) && name === io.url.hostname ? io : null;
   // With one record unread, the site is still checked on the other's addresses (an unread AAAA is on the IPv6 line).
   if (!dns.all.length && (dns.unread.A || dns.unread.AAAA)) return { reason: 'unread', type: dns.unread.A ? 'A' : 'AAAA' };
   if (!dns.all.length) return { reason: 'noaddr' };
@@ -3151,7 +3165,7 @@ async function webCheck(name, dns, origin) {
     return seen.get(h);
   };
   const ua = `Mozilla/5.0 (compatible; ipterm-grade/1.0; +${origin}/grade)`, n = { used: 0 };
-  const [https, http] = await Promise.all([httpsCheck(name, ua, n, noFollow), httpCheck(name, ua, n, noFollow)]);
+  const [https, http] = await Promise.all([httpsCheck(name, ua, n, noFollow, self), httpCheck(name, ua, n, noFollow, self)]);
   return { https, http, subrequests: n.used + b.used };
 }
 
@@ -3343,7 +3357,7 @@ async function gradeData(io, name) {
   const [mail, registration, web] = await Promise.all([
     dns.broken ? null : part(mailCheck(io, name, null)),
     part(cached(io, 'whois/' + name, 21600, () => domainLookup(name, io.url.origin))),
-    dns.broken ? null : webCheck(name, dns, io.url.origin),
+    dns.broken ? null : webCheck(name, dns, io),
   ]);
   const g = { domain: name, dns, mail, registration, web };
   const checks = gradeChecks(g), n = s => checks.filter(c => c.status === s).length;

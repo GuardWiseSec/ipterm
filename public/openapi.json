@@ -104,7 +104,7 @@
     "/{ip}": {
       "get": {
         "tags": ["lookup"], "operationId": "lookupIp", "summary": "Owner, network and location of any IPv4 or IPv6 address",
-        "parameters": [{ "$ref": "#/components/parameters/ip" }, { "$ref": "#/components/parameters/format" }, { "$ref": "#/components/parameters/color" }, { "$ref": "#/components/parameters/block" }],
+        "parameters": [{ "$ref": "#/components/parameters/ip" }, { "$ref": "#/components/parameters/format" }, { "$ref": "#/components/parameters/color" }, { "$ref": "#/components/parameters/block" }, { "$ref": "#/components/parameters/lite" }],
         "responses": {
           "200": { "description": "The address's details. Your own address returns the same as /json: Cloudflare's edge data, with no block.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IpInfo" } }, "text/plain": { "schema": { "type": "string" } } } },
           "400": { "$ref": "#/components/responses/BadRequest" },
@@ -135,7 +135,7 @@
       "get": {
         "tags": ["lookup"], "operationId": "lookupIpText", "summary": "Any address as aligned text lines: /{ip}?format=text without the ? (nothing to quote in zsh)",
         "description": "The same lookup, budgets, rate limit and caching as /{ip}, for any client. The word is text, not txt (/{ip}/txt is a 404 that points here).",
-        "parameters": [{ "$ref": "#/components/parameters/ip" }, { "$ref": "#/components/parameters/color" }, { "$ref": "#/components/parameters/block" }],
+        "parameters": [{ "$ref": "#/components/parameters/ip" }, { "$ref": "#/components/parameters/color" }, { "$ref": "#/components/parameters/block" }, { "$ref": "#/components/parameters/lite" }],
         "responses": {
           "200": { "description": "The address's details as aligned key/value lines. Your own address returns the same as /json?format=text: Cloudflare's edge data, with no block line.", "headers": { "X-Robots-Tag": { "$ref": "#/components/headers/Noindex" } }, "content": { "text/plain": { "schema": { "type": "string" } } } },
           "400": { "$ref": "#/components/responses/BadRequest" },
@@ -148,7 +148,7 @@
       "get": {
         "tags": ["lookup"], "operationId": "lookupIpJson", "summary": "Any address as JSON, for any client: /{ip}?format=json without the ?",
         "description": "The same lookup, budgets, rate limit and caching as /{ip}.",
-        "parameters": [{ "$ref": "#/components/parameters/ip" }, { "$ref": "#/components/parameters/block" }],
+        "parameters": [{ "$ref": "#/components/parameters/ip" }, { "$ref": "#/components/parameters/block" }, { "$ref": "#/components/parameters/lite" }],
         "responses": {
           "200": { "description": "The address's details. Your own address returns the same as /json: Cloudflare's edge data, with no block.", "headers": { "X-Robots-Tag": { "$ref": "#/components/headers/Noindex" } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IpInfo" } } } },
           "400": { "$ref": "#/components/responses/BadRequest" },
@@ -348,7 +348,7 @@
     "/api/lookup": {
       "get": {
         "tags": ["lookup"], "operationId": "apiLookup", "summary": "IP details as JSON, always (no ip: yourself)",
-        "parameters": [{ "name": "ip", "in": "query", "schema": { "type": "string" } }, { "$ref": "#/components/parameters/format" }, { "$ref": "#/components/parameters/color" }, { "$ref": "#/components/parameters/block" }],
+        "parameters": [{ "name": "ip", "in": "query", "schema": { "type": "string" } }, { "$ref": "#/components/parameters/format" }, { "$ref": "#/components/parameters/color" }, { "$ref": "#/components/parameters/block" }, { "$ref": "#/components/parameters/lite" }],
         "responses": { "200": { "description": "As /{ip}.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IpInfo" } } } } }
       }
     },
@@ -396,6 +396,7 @@
       "formatText": { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["text"] }, "description": "text: your details as aligned key/value lines instead of the bare address." },
       "color": { "name": "color", "in": "query", "schema": { "type": "string", "enum": ["1", "0"] }, "description": "1: ANSI colors in a text answer (format=text or a /text path), on the key column and the verdict that starts the vpn / proxy line, for reading in a terminal. 0 or absent: none, the default, so pipes into grep, awk or jq never see escape codes. JSON is never colored." },
       "block": { "name": "block", "in": "query", "schema": { "type": "string", "enum": ["0"] }, "description": "0: no block in the answer, and no request to the address's registry for it. Your own address never gets one either way." },
+      "lite": { "name": "lite", "in": "query", "schema": { "type": "string", "enum": ["1"] }, "description": "1: the network and country only (IPinfo Lite, as /{ip}/{field} uses), with no VPN / proxy check (no flags or privacy), so the lookup spends neither the IPinfo Core nor the proxycheck.io budget. The terminal's leak test looks up your other IP version this way: it compares only that address's network. Your own address is answered from the edge either way." },
       "ip": { "name": "ip", "in": "path", "required": true, "schema": { "type": "string" }, "description": "IPv4 or IPv6 address", "examples": { "v4": { "value": "8.8.8.8" }, "v6": { "value": "2606:4700:4700::1111" } } },
       "mailDomain": { "name": "domain", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Domain name (international names are converted to punycode)", "example": "gmail.com" },
       "gradeDomain": { "name": "domain", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Domain name (international names are converted to punycode); a subdomain is graded as itself, with its registered domain's registration. A DNS record name, with a label starting with _ (_dmarc.gmail.com), is not a domain: 400", "example": "github.com" },
@@ -468,7 +469,7 @@
           "timezone": { "type": ["string", "null"] },
           "colo": { "type": ["string", "null"], "description": "Your own address only: the Cloudflare data center" },
           "flags": { "type": "object", "description": "IPinfo Core only", "properties": { "mobile": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "anycast": { "type": "boolean" }, "satellite": { "type": "boolean" } } },
-          "privacy": { "type": "object", "description": "proxycheck.io's VPN / proxy / Tor opinion, when configured", "properties": { "vpn": { "type": "boolean" }, "proxy": { "type": "boolean" }, "tor": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "operator": { "type": ["string", "null"] }, "risk": { "type": ["integer", "null"] } } },
+          "privacy": { "type": "object", "description": "proxycheck.io's VPN / proxy / Tor opinion, when configured (never with lite=1)", "properties": { "vpn": { "type": "boolean" }, "proxy": { "type": "boolean" }, "tor": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "operator": { "type": ["string", "null"] }, "risk": { "type": ["integer", "null"] } } },
           "block": { "type": "object", "description": "When the registry record of the most specific network the address is in was created (RDAP, the record whois shows). Lookups of a public address only (/{ip}, /{ip}/json, /api/lookup?ip=; /{ip}/text gets the line below instead), not /json, the one-value routes, block=0 or the caller's own address (it is never sent to a registry, asked for by number or not). Left out when the registry has no date, hadn't answered within about 0.3 seconds of the rest of the answer (its record is then cached for the next lookup: try again a moment later), failed in the last minute (ten after a 429), or the caller is past the rate limit; crawlers and link previews get it only once someone else's lookup or whois has cached the record. recent: within the last 180 days. Location databases often take months to catch up with new or reassigned blocks, so for a recent block sites may disagree about where the address is; the text answer adds a block line saying so.",
             "properties": {
               "network": { "type": ["string", "null"], "example": "8.8.8.0/24", "description": "The network's CIDR blocks (comma-separated), or its first and last address" },

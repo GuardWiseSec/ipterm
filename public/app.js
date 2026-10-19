@@ -45,6 +45,9 @@
     const s = screen.getBoundingClientRect(), r = node.getBoundingClientRect();
     if (r.top < s.top || r.bottom > s.bottom) screen.scrollTop += r.top - s.top - 16;
   };
+  // The start of a result (its command, then the headline: a grade, a verdict), when it is out of view: mark is the
+  // line before the command.
+  const revealFrom = mark => { const first = mark ? mark.nextSibling : out.firstChild; if (first && first.isConnected) reveal(first); };
   const line = (text, cls = '') => {
     const d = el('div', 'ln ' + cls, text); out.appendChild(d); scroll();
     if (/\b(err|warn)\b/.test(cls)) announce(text);   // problems are always spoken
@@ -489,7 +492,8 @@
   // new tab or a reload does too.
   const ownIps = new Set();
   const own = ip => { const c = canonIp(ip); if (c) ownIps.add(c); return ip; };
-  const api = ip => getJson('/api/lookup' + (ip ? '?ip=' + encodeURIComponent(ip) + (ownIps.has(canonIp(ip)) ? '&block=0' : '') : ''));
+  // lite: the network and country only (IPinfo Lite, no VPN check), so the lookup spends neither paid budget.
+  const api = (ip, lite) => getJson('/api/lookup' + (ip ? '?ip=' + encodeURIComponent(ip) + (ownIps.has(canonIp(ip)) ? '&block=0' : '') + (lite ? '&lite=1' : '') : ''));
   const ipPath = ip => '/' + ip + (ownIps.has(canonIp(ip)) ? '?block=0' : '');
   const apiDns = (name, type) => getJson('/api/dns?name=' + encodeURIComponent(name) + (type ? '&type=' + encodeURIComponent(type) : ''));
   const apiWhois = q => getJson('/api/whois?q=' + encodeURIComponent(q));
@@ -788,9 +792,9 @@
      One labeled line after some results, filled from sponsors.json (edit it and redeploy).
      Plain text and a link: no ad scripts, no tracking, nothing about the visitor is sent anywhere.
      Sponsors are picked (by weight) among those whose `on` list matches the result type: whoami,
-     check (the leaktest verdict when no VPN is on), ip or asn. Only results that have a matching
-     sponsor count: the line shows after the 1st of them, then every `every`. The check verdict
-     always gets its line. */
+     check (the leaktest verdict when its VPN detection ran and found none), ip or asn. Only results
+     that have a matching sponsor count: the line shows after the 1st of them, then every `every`.
+     The check verdict always gets its line. */
   let SPONSORS = [], SPONSOR_EVERY = 3, sinceShown = -1;   // -1: none shown yet
   async function loadSponsors() {
     if (document.querySelector('[data-copy]')) return;  // a self-hosted copy (SELF_HOSTED in wrangler.toml) shows none
@@ -961,7 +965,9 @@
     [d.ip, ...rtc.ips].forEach(own);             // yours, like the other IP version: their lookups skip the registry
     const dnsPending = dnsLookups(d.dnsleak);    // runs alongside the other IP version's lookup
     const other = await otherFamily(p.v);
-    const otherInfo = other ? await api(other) : null;   // with block=0 (otherFamily marked it yours)
+    // Only its network counts below (the IPv6 / IPv4 line, the DNS line's "your ISP"): VPN detection is about the
+    // address sites see. So Lite, which has the same AS number and name, and block=0 (otherFamily marked it yours).
+    const otherInfo = other ? await api(other, true) : null;
     const dns = await dnsPending;
     ql.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
 
@@ -1177,9 +1183,12 @@
       ips: known, asns: new Set([d.asn, otherInfo && !otherInfo.error ? otherInfo.asn : null].filter(Boolean).map(up)), dnsAsns: new Set(dnsAsns) };
     if (lastLeak) await compareLeaks(lastLeak, run);
     lastLeak = run;
-    // The VPN offer follows a no-VPN verdict only, and not even that once this tab has seen a VPN on: someone
-    // who turned theirs off to compare already has one. (Memory only, like the compare: a reload forgets it.)
-    const offer = !vpn && !vpnSeen;
+    // The VPN offer follows a no-VPN verdict only: VPN detection ran (IPinfo Core or proxycheck.io answered) and
+    // found none. When it couldn't run (both budgets spent for the hour, say), the visitor may well be on a VPN
+    // already. proxycheck.io's catch-all flag alone still counts as found none (see flagged). And not even then once
+    // this tab has seen a VPN on: someone who turned theirs off to compare already has one. (Memory only, like the
+    // compare: a reload forgets it.)
+    const offer = vpnKnown && !vpn && !vpnSeen;
     vpnSeen = vpnSeen || vpn;
 
     if (offer) await sponsor('check');
@@ -2625,7 +2634,7 @@
 
   async function privacy() {
     await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
-      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) and to their regional internet registry, for the date their network was registered (never your own address: only whois sends that to one); networks and routes go to RIPEstat, domain names go to Cloudflare\'s DNS resolver, a mail check also fetches the domain\'s own MTA-STS policy file, and a report card (grade) asks the domain\'s own website for its headers (from ipterm\'s server, never from your browser). Your own IP is only sent to them if you run leaktest (to IPinfo and proxycheck.io, with your other IP version), which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. Its share link holds only the grade and which checks passed, never your IP or location. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.',
+      'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) and to their regional internet registry, for the date their network was registered (never your own address: only whois sends that to one); networks and routes go to RIPEstat, domain names go to Cloudflare\'s DNS resolver, a mail check also fetches the domain\'s own MTA-STS policy file, and a report card (grade) asks the domain\'s own website for its headers (from ipterm\'s server, never from your browser). Your own IP is only sent to them if you run leaktest (to IPinfo and proxycheck.io, and your other IP version to IPinfo alone, for its network), which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. Its share link holds only the grade and which checks passed, never your IP or location. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.',
       'The commands you type are saved in your own browser (the newest 200, never their results) and never leave it: history clear deletes them, history off stops saving.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
     const d = el('div', 'ln sys'); const a = el('a', 'cmd', 'read the full privacy policy ↗'); a.href = '/privacy';
@@ -2815,8 +2824,7 @@
       if (!nextItems && failedUpstream(mark)) next(['retry', running, 'run the same command again']);
       flushNext(); scroll();
       // On phones a result rarely fits on screen: start at its top (the command) rather than its last line.
-      const first = mark ? mark.nextSibling : out.firstChild;
-      if (!hasMouse() && first && first.isConnected) reveal(first);
+      if (!hasMouse()) revealFrom(mark);
       runQueued();
     }
   }
@@ -3009,15 +3017,18 @@
     await lines(['ipterm 0.2 · IP address lookup', 'type help for commands, or enter any IP address, domain or ASN'], 'sys');
 
     if (init && init.kind === 'notfound') { setLive(true); notFound(init); return focusInput(); }
+    // A page opened from a link (a shared /grade/github.com, /leaktest, /AS13335) ends at the start of its result
+    // (revealFrom), on any screen, when the result is taller than the terminal: it opens on the command and the
+    // headline (the grade, the verdict), not on the last lines. Commands typed afterwards follow the output (exec).
     // Someone else's leak test result (/leaktest/r/<code>): drawn from the code, with a "run yours" link.
     // It never runs the test on load: that would test this visitor's browser without asking.
     if (init && init.kind === 'leakshare') {
       setLive(true);
-      const cmd = running = 'leaktest --result ' + init.code;
+      const cmd = running = 'leaktest --result ' + init.code, mark = out.lastChild;
       echo(cmd); addHist(cmd);
       navPush = false;
       try { await leakResult(init.code); } finally { navPush = true; }
-      flushNext();
+      flushNext(); revealFrom(mark);
       return focusInput();
     }
     if (init && init.kind === 'tool' && (TOOL_INTRO[init.tool] || ['leaktest', 'port', 'api'].includes(init.tool))) {
@@ -3027,19 +3038,19 @@
       navPush = false;
       try { await run(cmd, false); } finally { navPush = true; }
       if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
-      flushNext();
+      flushNext(); revealFrom(mark);
       return focusInput();
     }
     // A port's page explains it and offers a button: it never checks on load (crawlers, prefetches, Back).
     if (init && init.kind === 'port') {
       setLive(true);
       const n = PORTSLIB ? PORTSLIB.parse(init.query) : null;
-      const cmd = running = n && !init.error ? `port ${n} --info` : `port ${init.query}`;
+      const cmd = running = n && !init.error ? `port ${n} --info` : `port ${init.query}`, mark = out.lastChild;
       echo(cmd); addHist(cmd);
       navPush = false;
       try { if (n && !init.error) await portAbout(n); else line(init.error || 'Not a port number. Ports run from 1 to 65535: port 22', 'err'); }
       finally { navPush = true; }
-      flushNext();
+      flushNext(); revealFrom(mark);
       return focusInput();
     }
     if (init && ['ip', 'asn', 'whois', 'dns', 'mail', 'grade', 'cidr'].includes(init.kind) && init.query) {
@@ -3050,8 +3061,8 @@
       // Opened from one of your own addresses' links (ipPath): it stays yours, so Back and Forward ask without the date too.
       if (init.kind === 'ip' && new URLSearchParams(location.search).get('block') === '0') own(init.query);
       running = cmd;
-      echo(cmd); addHist(cmd);
       const mark = out.lastChild;
+      echo(cmd); addHist(cmd);
       navPush = false;
       try {
         await (init.kind === 'asn' ? asn(init.query, init) : init.kind === 'whois' ? whois(init.query, init) : init.kind === 'dns' ? dns(init.query, init.qtype, init)
@@ -3060,7 +3071,7 @@
       }
       finally { navPush = true; }
       if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
-      flushNext();
+      flushNext(); revealFrom(mark);
       return focusInput();
     }
 

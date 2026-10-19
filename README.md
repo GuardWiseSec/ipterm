@@ -81,8 +81,8 @@ searches your history, and `ipterm.net/go?q=<anything>` works as a browser searc
   only other hosts it may fetch from are ipify (to show your other IP version) and ipterm's own DNS leak test zone.
   `leaktest` also asks Cloudflare's STUN server which addresses WebRTC reveals.
 - Your own address goes to a data provider (IPinfo, proxycheck.io) only when you run `leaktest`.
-- One labeled affiliate line (Proton VPN) appears after a leak test that finds no VPN. It's a plain link, and never
-  appears in `curl` output.
+- One labeled affiliate line (Proton VPN) appears after a leak test whose VPN check ran and found no VPN. It's a plain
+  link, and never appears in `curl` output.
 
 The full [privacy policy](https://ipterm.net/privacy) says what each part sees. Every page's footer links to this
 repository, and names the exact commit that's running when the site is deployed with `npm run deploy`.

@@ -3,8 +3,12 @@
 // prints the address, and /expect's 412 still reaches `curl -fs ... || pkill`, where a 301 would exit 0); every
 // address an answer builds (robots.txt, the sitemaps, a guide's %ORIGIN%, a page's canonical, og:url, og:image and
 // JSON-LD) and every cache key says https whichever way the request came; and wrangler dev's hosts (127.0.0.1,
-// localhost, [::1]) stay on plain http. No server and no network: the whole Worker runs in Node with its static files
-// read from public/, and fetch stubbed (an IPinfo Lite answer and an empty reverse DNS; anything else is a 404).
+// localhost, [::1]) stay on plain http. Last, the report card of the Worker's own host: grade ipterm.net on
+// ipterm.net is answered in-process (webCheck), with its security headers and the 301, and no request to
+// ipterm.net; on another host, and for example.com, the site is fetched as before. No server and no network: the
+// whole Worker runs in Node with its static files read from public/, and fetch stubbed (an IPinfo Lite answer, an
+// empty answer to every other DNS query, reverse DNS among them, and A/AAAA plus a site answer for ipterm.net
+// (HTTP 522, as live) and example.com; anything else is a 404).
 //
 //   node tools/check_https.mjs        (Node 22.15 or later: it loads the Worker through module.registerHooks)
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -32,12 +36,19 @@ globalThis.caches = { default: {
 
 const other = [];                                        // outside requests this check doesn't expect
 const reply = body => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+// The sites the report card grades below: one public address each. Over the network, ipterm.net answers what a
+// Worker's own fetch to it gets live (HTTP 522), and example.com a plain page with no security headers.
+const SITES = { 'ipterm.net': { A: '104.21.48.1', AAAA: '2606:4700:3030::6815:3001', status: 522 }, 'example.com': { A: '93.184.215.14', AAAA: '2606:2800:21f:cb07:6820:80da:af6b:8b2c', status: 200 } };
 globalThis.fetch = async input => {
   const u = typeof input === 'string' ? input : input.url;
   const m = /^https:\/\/api\.ipinfo\.io\/lite\/([^?]+)/.exec(u);
   if (m) return reply({ ip: m[1], asn: 'AS15169', as_name: 'Google LLC', as_domain: 'google.com', country_code: 'US', country: 'United States', continent: 'North America' });
+  const q = /^https:\/\/cloudflare-dns\.com\/dns-query\?name=([^&]+)&type=(A|AAAA)$/.exec(u);
+  if (q && Object.hasOwn(SITES, q[1])) return reply({ Status: 0, Answer: [{ name: q[1], type: q[2] === 'A' ? 1 : 28, TTL: 300, data: SITES[q[1]][q[2]] }] });
   if (u.startsWith('https://cloudflare-dns.com/')) return reply({ Status: 3, Answer: [] });
   other.push(u);
+  const site = /^https?:\/\/([^/]+)\//.exec(u);
+  if (site && Object.hasOwn(SITES, site[1])) return new Response(null, { status: SITES[site[1]].status });
   return new Response('not stubbed in tools/check_https.mjs', { status: 404 });
 };
 
@@ -151,6 +162,29 @@ const leak = api => ({ DNSLEAK_ZONE: 'dl.example.test', DNSLEAK_KEY: 'k'.repeat(
 const csp = async api => (await run('https://ipterm.net/robots.txt', { ua: 'curl/8.7.1', envPlus: leak(api) })).headers.get('content-security-policy') || '';
 ok((await csp('http://127.0.0.1:9053')).includes('https://*.dl.example.test') && (await csp('https://dlapi.example.test')).includes('https://*.dl.example.test') &&
   !(await csp('http://dlapi.example.test')).includes('dl.example.test'), 'DNSLEAK_API: https, or plain http on 127.0.0.1 only');
+
+console.log("-- grade of the Worker's own host: its homepage answered in-process (webCheck), so its headers and the 301 show");
+const card = async (base, domain) => {
+  const r = await run(`${base}/api/grade?domain=${domain}`, { ua: 'curl/8.7.1', accept: '*/*' });
+  let d = {}; try { d = JSON.parse(r.body); } catch {}
+  const line = c => (d.checks || []).find(x => x.section === 'web' && x.check === c) || {};
+  return { ...r, d, line, web: (d.web && d.web.https) || {}, sites: r.other.filter(u => /^https?:\/\/[^/]+\/$/.test(u)) };
+};
+const self = await card('https://ipterm.net', 'ipterm.net'), sh = self.web.headers || {};
+ok(self.status === 200 && self.line('HTTPS').status === 'ok' && self.web.status === 200 && self.web.final === 'https://ipterm.net/' && self.sites.length === 0,
+  `grade ipterm.net on ipterm.net: HTTPS ${self.line('HTTPS').status} (${self.line('HTTPS').text}), with no request to ipterm.net over the network (${JSON.stringify(self.sites)})`);
+ok(/default-src 'none'/.test(sh['content-security-policy'] || '') && /max-age=31536000; includeSubDomains/.test(sh['strict-transport-security'] || '') &&
+  sh['x-content-type-options'] === 'nosniff' && sh['referrer-policy'] === 'no-referrer' &&
+  ['HSTS', 'CSP', 'nosniff', 'frames', 'referrer'].every(c => self.line(c).status === 'ok') && !(self.d.notChecked || []).includes('security headers'),
+  `... and its own security headers, every header line OK: ${['HSTS', 'CSP', 'nosniff', 'frames', 'referrer'].map(c => c + ' ' + self.line(c).status).join(', ')}`);
+ok(self.line('HTTP').status === 'ok' && self.d.web.http && self.d.web.http.upgrades === true && self.d.web.http.to === 'https://ipterm.net/' && !(self.d.notChecked || []).includes('HTTP redirect'),
+  `... and http://ipterm.net/ redirects to HTTPS (the 301 for browsers): HTTP ${self.line('HTTP').status}, ${JSON.stringify(self.d.web.http)}`);
+const away = await card('https://ipterm.example.workers.dev', 'ipterm.net');
+ok(away.line('HTTPS').status === 'info' && /HTTP 522/.test(away.line('HTTPS').text || '') && away.sites.includes('https://ipterm.net/') && away.sites.includes('http://ipterm.net/'),
+  `grade ipterm.net on another host: over the network as before (${JSON.stringify(away.sites)}), HTTPS ${away.line('HTTPS').status}: ${away.line('HTTPS').text}`);
+const ex = await card('https://ipterm.net', 'example.com');
+ok(ex.line('HTTPS').status === 'ok' && ex.line('HTTP').status === 'warn' && ex.line('HSTS').status === 'warn' && ex.sites.includes('https://example.com/') && ex.sites.includes('http://example.com/'),
+  `grade example.com on ipterm.net: over the network (${JSON.stringify(ex.sites)}), HTTPS ${ex.line('HTTPS').status}, HTTP ${ex.line('HTTP').status}, HSTS ${ex.line('HSTS').status}`);
 
 const hb = readFileSync(new URL('docs/handbook.md', root), 'utf8');
 ok(hb.includes('tools/check_https.mjs') && hb.includes('Always Use HTTPS'), 'docs/handbook.md describes http and this check');

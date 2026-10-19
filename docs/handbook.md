@@ -112,7 +112,8 @@ raise the number to about your monthly allowance divided by 31.
 Only fresh lookups count: lookups of other addresses, and `leaktest`'s check of the visitor's own address, by people
 (bots never spend it: see "Bots never spend the budgets" below). Cached results (six hours), `whoami` (your visitors'
 own location comes from Cloudflare), DNS, mail checks, report cards and their badges, whois, the subnet calculator and the command line's one-value
-endpoints (`/asn`, `/8.8.8.8/org` and the rest, which use IPinfo Lite) never use the quota. If
+endpoints (`/asn`, `/8.8.8.8/org` and the rest, which use IPinfo Lite) never use the quota, and neither does a lookup asked
+for with `?lite=1`, as `leaktest` asks for the visitor's other IP version (IPinfo Lite, no VPN check). If
 the monthly quota runs out anyway, or the token is refused, or the counter can't be reached,
 lookups fall back to IPinfo Lite rather than failing.
 
@@ -127,9 +128,9 @@ npx wrangler secret put PROXYCHECK_KEY
 ```
 
 - **When it's asked:** every `leaktest` (your own address), and lookups of other addresses that
-  IPinfo hasn't already flagged. Not for whoami, DNS, whois, the "hosted by" lines or the one-value
-  endpoints (`/8.8.8.8/org`), and never for a bot, which gets a cached answer or none (see "Bots never spend the
-  budgets" below).
+  IPinfo hasn't already flagged. Not for whoami, DNS, whois, the "hosted by" lines, the one-value
+  endpoints (`/8.8.8.8/org`) or a `?lite=1` lookup (`leaktest`'s of your other IP version), and never
+  for a bot, which gets a cached answer or none (see "Bots never spend the budgets" below).
 - **Budget:** `PROXYCHECK_DAILY_BUDGET` (default 900) queries a day, paced to
   `PROXYCHECK_HOURLY_BUDGET` an hour (default twice an even share, 75) and
   `PROXYCHECK_VISITOR_HOURLY` per visitor (default 10), counted by the same `LookupBudget` Durable
@@ -791,6 +792,14 @@ include `DENY`, `SAMEORIGIN` or `ALLOWALL` refuse all framing, so that is OK). C
   the other). The refusal's headers are never graded in the page's place.
 - The requests say who they are: `User-Agent: Mozilla/5.0 (compatible; ipterm-grade/1.0; +https://ipterm.net/grade)`.
   They come from Cloudflare's network, never from the visitor's browser, and carry nothing about the visitor.
+- The Worker's own host (`grade ipterm.net` on ipterm.net, or a copy's on its own domain) is the exception: a Worker's
+  `fetch()` to the hostname it runs on never reaches it (Cloudflare answers HTTP 522, so the card used to say the
+  headers weren't checked). There `/` is answered in-process: the same request, with the user agent and `Accept`
+  above, through the Worker's own `route()` and `secure()`, which is what every visitor gets, with no network hop and no
+  visitor's address in it. The https check then reads the site's headers, and the http check gets the 301 to https
+  (the request asks for HTML). Only `/` on that host, whose answers are the homepage and that 301, so the card can
+  never start another card; other domains, and ipterm.net graded from any other host, are fetched as before. A header
+  a Cloudflare rule would add or change on the way out isn't seen there; ipterm sets all of its own in `secure()`.
 
 What it gave in October 2026 (checked by hand against the rubric): github.com B (no DNSSEC, no AAAA record, mail B for
 1024-bit DKIM keys; every header passes); cloudflare.com C (mail C, since its MTA-STS policy host has no address, and a
@@ -964,7 +973,7 @@ address, and grades the leaks A to F. Each line is marked OK, LEAK or INFO:
   alone (see the table above) doesn't count as a VPN: on a hosting network the address counts as
   one anyway, as any hosting address does; elsewhere the tag says "vpn unclear" and the check
   treats it like an address it couldn't classify (mismatches marked LEAK, with the "if you use a
-  VPN" caveat), and the sponsored line shows, since no VPN was detected.
+  VPN" caveat), and the sponsored line shows, since detection ran and found no VPN.
 - **DNS:** which resolvers look up names for the visitor. The page looks up six random, single-use names
   under the test zone (`<token>.dl.ipterm.net`, 20 hex characters from `crypto.getRandomValues`) with a
   `no-cors` fetch and a 3-second abort. Each fails within milliseconds, since the zone's server answers
@@ -997,9 +1006,15 @@ on, with the "if you use a VPN" caveat. DNS doesn't: without a VPN's network the
 the resolvers with.) Nothing is stored. The visitor's own IP is sent to IPinfo only when they run the
 check (it uses the Core daily budget), and the privacy policy says so. Neither it nor their other IP
 version goes to a registry: `/api/check` asks for no registration date, and the other version's lookup
-asks with `block=0` (see "Recently registered blocks"). When no VPN is detected, the verdict is always
-followed by the sponsored line (any sponsor with `"check"` in its `on` list in `sponsors.json`,
-currently Proton VPN). A run that detects a VPN never shows it, and neither does any later run in the
+asks with `block=0` (see "Recently registered blocks"). That lookup also asks with `lite=1`: IPinfo Lite and no
+VPN check, so it spends neither paid budget and the other address never goes to proxycheck.io. Only its network
+is compared (the IPv6 / IPv4 line, and "your ISP" on the DNS line), and Lite names the same AS number and network as
+Core; VPN detection is about the address sites see, from `/api/check`, so the grade and the verdict come out the same.
+When VPN detection ran (IPinfo Core or proxycheck.io answered for the visitor's address) and found no VPN, the
+verdict is always followed by the sponsored line (any sponsor with `"check"` in its `on` list in `sponsors.json`,
+currently Proton VPN). When it couldn't run (both services' budgets spent for the hour, say, which on a busy day is
+most runs), the VPN line says "unavailable" and no sponsored line follows: the visitor may well be on a VPN
+already. A run that detects a VPN never shows it, and neither does any later run in the
 same tab: someone who turns their VPN off to compare already has one. (That's kept in memory with the
 last result, so a reload forgets it.) A DNS LEAK only happens on a VPN, so it never brings the line.
 
@@ -1082,6 +1097,11 @@ the three Cloudflare records, `setup.sh`, the secret and the checks), its settin
   `/api/dnsleak?t=<tokens>`; the Worker asks `https://dlapi.ipterm.net/v1/resolvers` (Caddy with a Let's
   Encrypt certificate in front of the VPS's API, since Workers can't fetch a bare IP address), sending the
   `DNSLEAK_KEY` secret in an `x-dnsleak-key` header, with a 3-second limit, and gets the addresses once.
+- **Rate limits on the VPS's API:** it checks the key before any limit. The Worker's `/v1/resolvers` calls
+  share 200 requests a second (bursts of 400); everything else (`/healthz`, a missing or wrong key, other
+  paths or methods) gets its own 5 a second per calling network (bursts of 10, then 429), so no flood of
+  requests to `dlapi.ipterm.net` without the key can switch the leak test off for everyone. A change to
+  `dnsleak-server/` takes effect only after `sh setup.sh <vps-ip>` is run again.
 - **Why NXDOMAIN, not an address:** in Chrome a fetch to an NXDOMAIN name fails within milliseconds,
   while one to an address such as TEST-NET 192.0.2.1 hangs until the page gives up (and home routers with
   rebinding protection drop such answers). The test is in dnsleak-server/README.md.
@@ -1228,6 +1248,12 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   the address looks like an IP, ASN or domain. A domain typed straight after the slash
   (`/github.com`) redirects to its DNS page. Invalid lookups (`/whois/not-a-domain!`) show the error
   in the terminal instead of raw JSON. None of these pages are indexed by search engines.
+- A page opened from a link (a result such as `/grade/github.com`, `/8.8.8.8`, `/AS13335` or `/mail/gmail.com`, a
+  tool page such as `/leaktest`, a port page, a shared leak test result) opens on the start of its result, the command
+  and the headline (the grade, the verdict), whenever the result is taller than the terminal, on phones and desktops
+  alike, not on its last lines (`revealFrom()` in `public/app.js`). On a phone `/leaktest` used to open on the
+  sponsored line, with the grade out of view. Commands typed afterwards follow the output as a terminal does (on a
+  phone, each result starts at its command too), and typing brings the prompt back into view.
 - Inside the terminal, every lookup updates the address bar, Back/Forward replay results, ASNs and
   prefixes are clickable, and each result's `[share] [copy] [md]` buttons (and the `share` command) share its
   link (see "Share, copy and copy md"; after `leaktest`, the link is to the grade: see "Shared results"). Prefixes on ASN pages
@@ -1390,14 +1416,15 @@ Edit `public/sponsors.json` and run `npx wrangler deploy` to change it:
 | `every` | Show after the 1st result that has a matching sponsor, then every Nth such result (default 3). Results with no matching sponsor don't count. `check` ignores this and always shows |
 | `text` | Up to 160 characters, shown as plain text |
 | `url` | Optional `https://` link, opened in a new tab with `rel="sponsored"`. Anything else is ignored |
-| `on` | Which results it can appear after: `whoami` (visitor's own IP), `check` (the leaktest verdict when no VPN is detected), `ip`, `asn`. Leave out for all |
+| `on` | Which results it can appear after: `whoami` (visitor's own IP), `check` (the leaktest verdict when its VPN detection ran and found none), `ip`, `asn`. Leave out for all |
 | `weight` | Relative chance when several sponsors match (default 1) |
 | `label` | Optional tag text instead of `sponsored`, e.g. `affiliate` |
 
 Nothing the visitor copies or shares (`copy`, `copy md`, `share`) carries the sponsored line.
 Targeting by result type works without tracking: a VPN offer fits `check`, a hosting offer fits `asn`.
 `whoami` has no VPN signal, so a VPN offer on `whoami` is also shown to visitors who are already on a VPN;
-`check` only appears when leaktest finds no VPN, and not after an earlier run in the same tab found one.
+`check` only appears when leaktest's VPN detection ran and found no VPN, and not after an earlier run in the same
+tab found one.
 Affiliate programs (VPNs, hosting, dev tools) and direct sponsors both work: put the referral link in `url`.
 In the US, the FTC requires affiliate and sponsored links to be disclosed; the `sponsored` tag does that.
 
@@ -1441,7 +1468,8 @@ address, so the terminal doesn't call the API) and each further lookup or page 1
 requests a day covers up to about 100,000 visits. Every curl call (`/help`, `/asn`, `/8.8.8.8/org`, a
 `?format=text` lookup) is one request too; `/openapi.json`, `/llms.txt` and `/opensearch.xml` are not. A search
 through `/go` is one request for the redirect plus the page it lands on (the redirect itself makes no outside call). A `leaktest` costs two (`/api/check`
-and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one; its `/cdn-cgi/trace` read and a shared result page's images are free. A shared result page (`/leaktest/r/<code>`) is one request. A report card (`/grade/<domain>`) is one request, with 33 to 41 subrequests when it isn't cached (see "Domain report card"); each badge fetch is one request, and shields.io and GitHub's image proxy keep the image for as long as ipterm's copy has left (an hour at most; at least five minutes through shields.io, whose minimum that is, and a minute for the `.svg`). `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
+and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one
+(IPinfo Lite: no Core or proxycheck.io budget); its `/cdn-cgi/trace` read and a shared result page's images are free. A shared result page (`/leaktest/r/<code>`) is one request. A report card (`/grade/<domain>`) is one request, with 33 to 41 subrequests when it isn't cached (see "Domain report card"); each badge fetch is one request, and shields.io and GitHub's image proxy keep the image for as long as ipterm's copy has left (an hour at most; at least five minutes through shields.io, whose minimum that is, and a minute for the `.svg`). `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
 which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
 requests. `/me`, `/line` and `/expect/...` are one request each, with no other cost: no subrequest, no Durable
 Object call, no rate-limiter call.
@@ -1581,8 +1609,9 @@ tools. Then Googlebot, a link preview, GPTBot and an unnamed client asking for a
 `Sec-Fetch-*`, GPTBot on `/api/lookup`, ClaudeBot on `/<ip>/json`, an HTML client on `?format=json` and Googlebot
 rendering leaktest (`/api/check`) must get IPinfo Lite with no VPN check or registry date, and never reach the budget
 counter, Core, proxycheck.io or a registry; a browser navigation, the terminal's own fetch, curl, a Cubot phone and
-leaktest in a browser must still get Core and proxycheck.io; then Googlebot gets the Core answer one of them cached,
-for free. Then the pages: whois of a registry block's first address links the block's `/cidr` page (the Worker's
+leaktest in a browser must still get Core and proxycheck.io, but leaktest's lookup of the other IP version
+(`?block=0&lite=1`, which `public/app.js` must send) gets IPinfo Lite only, with no budget counter; then Googlebot
+gets the Core answer one of them cached, for free. Then the pages: whois of a registry block's first address links the block's `/cidr` page (the Worker's
 page and the terminal's `renderWhois()`), other addresses and curated ones keep their lookup link, and a network's
 first address has a noindex page with its own canonical and, when the lookup has it, its registered block. Then
 routing (`routeData()`; `fetch` answers as RIPEstat too): Googlebot, bingbot, GPTBot and an unnamed client asking for
@@ -1606,9 +1635,13 @@ gets the bare address, `/expect` its 200 or 412, and a script or `?format=json` 
 names https: robots.txt's `Sitemap:` line, every sitemap `<loc>` and a guide's `%ORIGIN%`; a lookup over http writes
 an `https://` cache key, which the same lookup over https then reads; and the homepage a script gets over http (one
 that doesn't ask for HTML still gets it at `/`), like a page after the redirect, has an https canonical, `og:url`,
-`og:image` and JSON-LD. Last, 127.0.0.1, localhost and `[::1]` stay on http, and `DNSLEAK_API` may still be plain
-http there only. (Under `wrangler dev`, a request sent with `Host: ipterm.net` does get the 301, but wrangler's proxy
-rewrites its Location to `http://`, so test the redirect here or on the live site.)
+`og:image` and JSON-LD. Then 127.0.0.1, localhost and `[::1]` stay on http, and `DNSLEAK_API` may still be plain
+http there only. Last, the report card of the Worker's own host (`fetch` answers its DNS, and HTTP 522 for the site as
+live): `grade ipterm.net` asked on ipterm.net shows HTTPS OK with every header line OK (CSP `default-src 'none'`, HSTS,
+nosniff, frames, referrer) and HTTP OK, the 301 to https, with no request to ipterm.net over the network; asked on
+another host it is fetched over the network as before (and so says HTTP 522), and so is example.com. (Under
+`wrangler dev`, a request sent with `Host: ipterm.net` does get the 301, but wrangler's proxy rewrites its Location
+to `http://`, so test the redirect here or on the live site.)
 
 ## License
 
