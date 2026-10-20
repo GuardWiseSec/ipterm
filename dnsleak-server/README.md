@@ -222,7 +222,8 @@ Settings (`/etc/dnsleak/dnsleak.env`; `setup.sh` writes the first six):
 - **DNS rate limit:** 50 answers a second per asking network (/24 for IPv4, /56 for IPv6), bursts of 100.
   Its answers are at most about twice the size of the queries, so it is a poor tool for flooding anyone with forged queries.
 - **TCP:** at most 200 connections, 10 seconds idle, queries up to 4 KB.
-- **API:** GET only, the key compared in constant time, 1 to 10 tokens per request. It listens on 127.0.0.1
+- **API:** GET only (and HEAD, for uptime monitors that check `/healthz` with it; HEAD never reads
+  `/v1/resolvers`), the key compared in constant time, 1 to 10 tokens per request. It listens on 127.0.0.1
   only; Caddy serves just `/v1/resolvers` and `/healthz`. The key is checked before the rate limits, which
   are two separate allowances, so calls without the key can't turn the leak test off for everyone:
   - `/v1/resolvers` with the key (only the Worker has it): 200 requests a second in all, bursts of 400.

@@ -144,7 +144,9 @@ export async function start(cfg, { store = new TokenStore(), now } = {}) {
     if (!(worker ? keyed.take('worker') : open.take(prefixKey(caller(req))))) {
       return send(429, { error: 'Too many requests.' }, { 'retry-after': '1' });
     }
-    if (req.method !== 'GET') return send(405, { error: 'Use GET.' }, { allow: 'GET' });
+    // HEAD is GET without the body (Node leaves it out), for uptime monitors that check with HEAD. It can't read
+    // /v1/resolvers: only the Worker's GET does (above), since reading forgets the tokens.
+    if (req.method !== 'GET' && req.method !== 'HEAD') return send(405, { error: 'Use GET.' }, { allow: 'GET, HEAD' });
     if (!url) return send(400, { error: 'Bad request.' });
     if (url.pathname === '/healthz') return send(200, { ok: true });   // says nothing, so it needs no key
     if (url.pathname !== '/v1/resolvers') return send(404, { error: 'Not found.' });

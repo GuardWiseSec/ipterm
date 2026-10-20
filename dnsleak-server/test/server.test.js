@@ -73,6 +73,12 @@ test('DNS over UDP and TCP, then the API: once, with the key', async t => {
   assert.equal(s.store.size, 2);
 
   assert.deepEqual(await get(s.apiPort, '/healthz'), { status: 200, body: { ok: true } });
+  const head = await fetch(`http://127.0.0.1:${s.apiPort}/healthz`, { method: 'HEAD' });   // as uptime monitors ask
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), '');
+  const peek = await fetch(`http://127.0.0.1:${s.apiPort}/v1/resolvers?t=${TOKEN}`, { method: 'HEAD', headers: { 'x-dnsleak-key': KEY } });
+  assert.equal(peek.status, 401);                                // HEAD never reads the tokens, so never forgets them
+  assert.equal(s.store.size, 2);
   assert.equal((await get(s.apiPort, `/v1/resolvers?t=${TOKEN}`)).status, 401);
   assert.equal((await get(s.apiPort, `/v1/resolvers?t=${TOKEN}`, KEY + 'x')).status, 401);
   assert.equal((await get(s.apiPort, '/v1/resolvers?t=test', KEY)).status, 400);
@@ -88,6 +94,7 @@ test('DNS over UDP and TCP, then the API: once, with the key', async t => {
 
   const post = await fetch(`http://127.0.0.1:${s.apiPort}/v1/resolvers?t=${TOKEN}`, { method: 'POST', headers: { 'x-dnsleak-key': KEY } });
   assert.equal(post.status, 405);
+  assert.equal(post.headers.get('allow'), 'GET, HEAD');
 });
 
 test('the API: calls without the key have a small allowance per network and never use up the Worker\'s', async t => {
