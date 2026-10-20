@@ -1281,10 +1281,11 @@ function kvText(rows, footer = [], o = {}) {
 
 const SOURCE_NAMES = { edge: "Cloudflare's edge", 'ipinfo-lite': 'IPinfo Lite', 'ipinfo-core': 'IPinfo Core', ipinfo: 'IPinfo' };
 // ?color=1: the verdict that starts vpnText's line, in its color: a known VPN, proxy or Tor address bold yellow,
-// a proxycheck.io flag yellow, "not on known VPN or proxy lists" green, "not checked" dim. The rest stays plain.
-const VPN_TONES = { yes: '1;33', flagged: '33', 'not on': '32', 'not checked': ANSI.dim };
+// a proxycheck.io flag yellow (its catch-all alone too, PC_CATCHALL), "not on known VPN or proxy lists" green,
+// "not checked" dim. The rest stays plain.
+const VPN_TONES = { yes: '1;33', flagged: '33', 'not a known VPN, proxy or Tor service': '33', 'not on': '32', 'not checked': ANSI.dim };
 function vpnTone(s) {
-  const m = /^(yes|flagged|not on|not checked)\b[^:,(]*?(?=:|,| \(|$)/.exec(s);
+  const m = /^(yes|flagged|not a known VPN, proxy or Tor service|not on|not checked)\b[^:,(]*?(?=:|,| \(|$)/.exec(s);
   return m ? ansi(true, VPN_TONES[m[1]], m[0]) + s.slice(m[0].length) : s;
 }
 function ipText(d, o) {
@@ -1544,8 +1545,11 @@ function helpBody(h, env = {}) {
     block('NOTES', [
       ['One-value answers are one line. A missing value is an empty line with'],
       [`HTTP 404, so  curl -fs ${h}/city  exits non-zero.`],
-      ['30 uncached lookups a minute per address, then HTTP 429.'],
-      [`No cookies or tracking, and nothing about you is stored: ${h}/privacy`],
+      ['30 uncached lookups a minute per address, then HTTP 429. Past it, /json'],
+      ['and /text still answer, only without the hostname.'],
+      ["No cookies or tracking. ipterm's code stores and logs nothing about you;"],
+      ['Cloudflare, which hosts it, keeps its own request analytics and security'],
+      [`events: ${h}/privacy`],
       [`OpenAPI: ${h}/openapi.json   For AI tools: ${h}/llms.txt`],
       [`Browsers: ${h} is a terminal; this reference is at ${h}/api`],
       [`Address bar: ${h}/go?q=<IP, domain, ASN, range, email or port n>`],
@@ -1680,7 +1684,7 @@ async function torExitList(io) {
 // Privacy check (leaktest): your own details from Cloudflare plus IPinfo's classification of your
 // address (VPN/proxy/Tor, hosting, mobile) and whether it's a Tor exit. Only runs when a visitor asks.
 async function checkData(io) {
-  const self = await selfInfo(io);
+  const self = await selfInfo(io, { strict: true });
   const p = parseIp(io.me);
   let network = null;
   if (p && !nonPublicReason(p)) {
@@ -1701,9 +1705,15 @@ async function checkData(io) {
   return { ...self, network, ...(dns ? { dnsleak: dns.zone } : {}) };
 }
 
-async function selfInfo(io, quick = false) {
-  await limit(io);
-  const hostname = await ptr(io.me, quick);
+// The caller's own details. The edge has all of them but the hostname, so the rate limit guards only the reverse DNS:
+// past it the answer goes out without a hostname (null, as with no PTR record), never as "Too many lookups". People
+// behind one busy address (an office, a campus, carrier NAT) share its 30 a minute, and the homepage, whoami, /json
+// and /text should still show them their address. strict (leaktest's check, which goes on to IPinfo and
+// proxycheck.io): past the limit, RateLimited, as for every other lookup. quick: the homepage's short reverse DNS (ptr).
+async function selfInfo(io, { quick = false, strict = false } = {}) {
+  let limited = false;
+  try { await limit(io); } catch (e) { if (strict || !(e instanceof RateLimited)) throw e; limited = true; }
+  const hostname = limited ? null : await ptr(io.me, quick);
   const { ip, version, source, ...rest } = edgeInfo(io);
   return {
     ip, version, source,
@@ -1909,6 +1919,9 @@ async function provider(ip, env, opts = {}) {
     lat: Number.isFinite(lat) ? lat : null,
     lon: Number.isFinite(lon) ? lon : null,
     timezone: d.timezone || null,
+    // The free API marks anycast too (as on 8.8.8.8), and nothing else of Core's flags: enough for the connection
+    // line and for the map not to draw a radius. vpnText reads only Core's flags, so the VPN verdict is unchanged.
+    ...(d.anycast === true ? { flags: { anycast: true } } : {}),
     bogon: d.bogon || undefined,
   };
 }
@@ -3900,8 +3913,9 @@ async function shell(io, { status = 200, title, desc, path = '/', body = '', ini
 
 // The homepage answers "what is my IP" in its HTML: the number is there on first paint (and without
 // JavaScript), and the terminal draws the same data without asking the API again. The page is
-// personal, so no shared cache may keep it. If the lookup fails (rate limited, say), the plain shell
-// goes out and the terminal asks for itself, as before. So does a prefetch or prerender: it may come
+// personal, so no shared cache may keep it. Past the rate limit it still carries the address, only
+// without the hostname (selfInfo). If it fails anyway, the plain shell goes out and the terminal
+// asks for itself. So does a prefetch or prerender: it may come
 // through a proxy (Chrome's private prefetch proxy, from search results) or be shown minutes later,
 // and either way the address it would carry might not be the visitor's.
 async function homePage(io) {
@@ -3909,7 +3923,7 @@ async function homePage(io) {
   const purpose = io.request.headers.get('sec-purpose') || io.request.headers.get('purpose') || '';
   if (io.request.method === 'HEAD' || /prefetch|prerender/i.test(purpose)) return shell(io, { status: 200, cache });
   let d = null;
-  try { d = await selfInfo(io, true); } catch {}
+  try { d = await selfInfo(io, { quick: true }); } catch {}
   const p = d && parseIp(d.ip);
   if (!p) return shell(io, { status: 200, cache });
   return shell(io, { status: 200, cache, initial: { kind: 'self', data: d }, body: homeStatic(d, p) });
@@ -3976,7 +3990,7 @@ function breadcrumbJsonLd(origin, path) {
   return `<script type="application/ld+json">${safeJson(ld)}</script>`;
 }
 
-// Plain-language summary of IPinfo Core's flags (only present on the Core plan).
+// Plain-language summary of IPinfo Core's flags (and the free API's anycast).
 function connectionText(d) {
   const f = d.flags || {}, out = [];
   if (f.hosting || d.asType === 'hosting') out.push('hosting or data center');
@@ -3993,11 +4007,12 @@ function connectionText(d) {
 // "yes" needs Core's flag or a specific proxycheck.io finding: VPN, proxy, Tor or a named service.
 // proxycheck.io's own "anonymous" is a catch-all ("any kind of anonymising service (proxy, VPN,
 // TOR, etc.)" in its API reference) that is also set on addresses that are none of those, such as
-// Google Public DNS (8.8.8.8). Alone, it gets a hedged line, and so does "compromised" (seen
-// performing attacks, which doesn't by itself mean the address relays anyone's traffic).
+// Google Public DNS (8.8.8.8). Alone, it is reported as what it is (PC_CATCHALL), never as
+// "anonymizing", and "compromised" (seen performing attacks, which doesn't by itself mean the
+// address relays anyone's traffic) gets a hedged line.
 const pcKnown = pc => !!(pc && pc.anonymous && (pc.vpn || pc.proxy || pc.tor || pc.operator));
-const pcFlag = pc => (pc.compromised ? 'flagged by proxycheck.io as compromised (seen performing attacks)' : 'flagged as anonymizing by proxycheck.io') +
-  ', but not as a known VPN, proxy or Tor service';
+const PC_CATCHALL = 'not a known VPN, proxy or Tor service (proxycheck.io sets its catch-all "anonymous" flag, which it also gives public DNS and CDN addresses)';
+const pcFlag = pc => (pc.compromised ? 'flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service' : PC_CATCHALL);
 const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
 function vpnText(d) {
   const core = d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = d.privacy || null;

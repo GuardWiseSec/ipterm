@@ -4,7 +4,7 @@
     "title": "ipterm",
     "version": "1.0.0",
     "summary": "IP address, network (ASN), DNS, email security (SPF, DMARC, DKIM), domain report card, registry (whois) and subnet lookups for curl and scripts.",
-    "description": "No key and no sign-up. Command-line clients (curl, wget, HTTPie, PowerShell...) and scripts get JSON; browsers get an HTML page at the same address, so send `?format=json` from a browser-like client to be sure of JSON. Add `?format=text` to any lookup for aligned key/value lines instead of JSON (quote the URL in a shell), or `/text` after an address or AS number (`/8.8.8.8/text`, `/AS13335/text`: nothing to quote; `/json` for JSON). `?color=1` adds ANSI colors to a text answer; they are never on by default. One-value endpoints answer with a single line of plain text; a missing value is an empty line with HTTP 404. Uncached lookups are limited to 30 a minute per address (IPv6: per /64), after which the answer is HTTP 429 with a Retry-After header. No cookies, no tracking, and nothing about callers is stored (https://ipterm.net/privacy). Plain-text reference: `curl ipterm.net/help`.\n\nIP address data powered by IPinfo (https://ipinfo.io), used under CC BY-SA 4.0. Networks: RIPEstat. Registry records: RDAP from the regional internet registries and domain registries. DNS and mail checks: Cloudflare's public resolver (1.1.1.1), plus each domain's own MTA-STS policy file.",
+    "description": "No key and no sign-up. Command-line clients (curl, wget, HTTPie, PowerShell...) and scripts get JSON; browsers get an HTML page at the same address, so send `?format=json` from a browser-like client to be sure of JSON. Add `?format=text` to any lookup for aligned key/value lines instead of JSON (quote the URL in a shell), or `/text` after an address or AS number (`/8.8.8.8/text`, `/AS13335/text`: nothing to quote; `/json` for JSON). `?color=1` adds ANSI colors to a text answer; they are never on by default. One-value endpoints answer with a single line of plain text; a missing value is an empty line with HTTP 404. Uncached lookups are limited to 30 a minute per address (IPv6: per /64), after which the answer is HTTP 429 with a Retry-After header; your own `/json` and `/text` still answer past it, without the hostname. No cookies or tracking, and ipterm's code stores and logs nothing about callers; Cloudflare, which hosts it, keeps its own request analytics and security events (https://ipterm.net/privacy). Plain-text reference: `curl ipterm.net/help`.\n\nIP address data powered by IPinfo (https://ipinfo.io), used under CC BY-SA 4.0. Networks: RIPEstat. Registry records: RDAP from the regional internet registries and domain registries. DNS and mail checks: Cloudflare's public resolver (1.1.1.1), plus each domain's own MTA-STS policy file.",
     "contact": { "email": "contact@ipterm.net", "url": "https://ipterm.net/api" }
   },
   "servers": [{ "url": "https://ipterm.net" }],
@@ -34,20 +34,20 @@
     "/json": {
       "get": {
         "tags": ["you"], "operationId": "myDetails", "summary": "Your IP, network, location and reverse DNS name",
+        "description": "From Cloudflare's edge, except the reverse DNS name, which is the only part that counts toward the rate limit: past it, the answer comes without it (hostname null), never as a 429.",
         "parameters": [{ "$ref": "#/components/parameters/format" }, { "$ref": "#/components/parameters/color" }],
         "responses": {
-          "200": { "description": "Your details.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IpInfo" } }, "text/plain": { "schema": { "type": "string" } } } },
-          "429": { "$ref": "#/components/responses/RateLimited" }
+          "200": { "description": "Your details.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IpInfo" } }, "text/plain": { "schema": { "type": "string" } } } }
         }
       }
     },
     "/text": {
       "get": {
         "tags": ["you"], "operationId": "myDetailsText", "summary": "Your details as aligned key/value lines: /json?format=text without a ? for the shell to expand",
+        "description": "As /json: past the rate limit, without the hostname line, never a 429.",
         "parameters": [{ "$ref": "#/components/parameters/color" }],
         "responses": {
-          "200": { "description": "Your details.", "content": { "text/plain": { "schema": { "type": "string" } } } },
-          "429": { "$ref": "#/components/responses/RateLimited" }
+          "200": { "description": "Your details.", "content": { "text/plain": { "schema": { "type": "string" } } } }
         }
       }
     },
@@ -468,7 +468,7 @@
           "lon": { "type": ["number", "null"] },
           "timezone": { "type": ["string", "null"] },
           "colo": { "type": ["string", "null"], "description": "Your own address only: the Cloudflare data center" },
-          "flags": { "type": "object", "description": "IPinfo Core only", "properties": { "mobile": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "anycast": { "type": "boolean" }, "satellite": { "type": "boolean" } } },
+          "flags": { "type": "object", "description": "IPinfo Core (without a token, IPinfo's free API gives anycast only)", "properties": { "mobile": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "anycast": { "type": "boolean" }, "satellite": { "type": "boolean" } } },
           "privacy": { "type": "object", "description": "proxycheck.io's VPN / proxy / Tor opinion, when configured (never with lite=1)", "properties": { "vpn": { "type": "boolean" }, "proxy": { "type": "boolean" }, "tor": { "type": "boolean" }, "hosting": { "type": "boolean" }, "anonymous": { "type": "boolean" }, "operator": { "type": ["string", "null"] }, "risk": { "type": ["integer", "null"] } } },
           "block": { "type": "object", "description": "When the registry record of the most specific network the address is in was created (RDAP, the record whois shows). Lookups of a public address only (/{ip}, /{ip}/json, /api/lookup?ip=; /{ip}/text gets the line below instead), not /json, the one-value routes, block=0 or the caller's own address (it is never sent to a registry, asked for by number or not). Left out when the registry has no date, hadn't answered within about 0.3 seconds of the rest of the answer (its record is then cached for the next lookup: try again a moment later), failed in the last minute (ten after a 429), or the caller is past the rate limit; crawlers and link previews get it only once someone else's lookup or whois has cached the record. recent: within the last 180 days. Location databases often take months to catch up with new or reassigned blocks, so for a recent block sites may disagree about where the address is; the text answer adds a block line saying so.",
             "properties": {

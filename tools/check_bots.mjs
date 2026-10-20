@@ -32,6 +32,16 @@
 //    /cidr page has no links for "splits into" and "part of", and the terminal (public/app.js renderAsn, renderCidr,
 //    cidr and next, run against a stand-in DOM) makes the same ASN prefixes ordinary links and the rest nofollow, and
 //    its "splits into", "part of" and next: links nofollow when they open a public block, ordinary otherwise.
+// 6. A busy shared address (selfInfo): with a LOOKUP_LIMITER that refuses everything, the homepage still carries the
+//    visitor's IP (in the page and in the data whoami is drawn from), and /json, /text, /?format=text, the terminal's
+//    /api/lookup and the visitor's own address by number answer 200 with hostname null and no reverse DNS asked, never
+//    "Too many lookups"; lookups of other addresses, /hostname and leaktest's /api/check still get the 429.
+// 7. proxycheck.io's catch-all "anonymous" flag alone, on an anycast address answered as Google Public DNS is
+//    (8.8.4.4 here): the JSON keeps the flags, and the text answer, the IP page and the terminal (vpnText in
+//    public/app.js) say "not a known VPN, proxy or Tor service" and name the catch-all flag, never "anonymizing"; the
+//    terminal's map (locate, geoNote) gives an anycast address no radius, and an ordinary one keeps its 50 km. Without
+//    IPINFO_TOKEN and PROXYCHECK_KEY (IPinfo's free API, as under wrangler dev), the address still carries the anycast
+//    flag, so the map and the connection line say the same.
 //
 //   node tools/check_bots.mjs        (Node 22.15 or later: it loads the Worker through module.registerHooks)
 import { readFileSync } from 'node:fs';
@@ -117,10 +127,28 @@ const ANNOUNCED = {
   AS64500: [...seq(15, i => `${100 + i}.1.2.0/24`), ...seq(15, i => `${20 + i}.0.0.0/16`), ...seq(12, i => `2001:${(0x1000 + i).toString(16)}::/32`)],
   AS64501: seq(25, i => `${60 + i}.0.0.0/16`),
 };
+// Answered as IPinfo Core, IPinfo's free API and proxycheck.io answer for Google Public DNS: anycast and hosting, and
+// proxycheck.io's catch-all "anonymous" flag with no VPN, proxy or Tor finding.
+const ANYCAST = new Set(['8.8.4.4']);
 const reply = (body, status = 200) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 globalThis.fetch = async input => {
   const u = typeof input === 'string' ? input : input.url;
   let m;
+  if ((m = /^https:\/\/api\.ipinfo\.io\/lookup\/([^?]+)/.exec(u)) && ANYCAST.has(m[1])) {
+    calls.push(['core', u]);
+    return reply({ ip: m[1], hostname: 'dns.google', geo: { city: 'Mountain View', region: 'California', country: 'United States', country_code: 'US',
+      continent: 'North America', latitude: 38.00881, longitude: -122.11746, timezone: 'America/Los_Angeles', postal_code: '94043' },
+    as: { asn: 'AS15169', name: 'Google LLC', domain: 'google.com', type: 'hosting' }, is_anycast: true, is_hosting: true });
+  }
+  if ((m = /^https:\/\/ipinfo\.io\/([^/?]+)\/json$/.exec(u)) && ANYCAST.has(m[1])) {
+    calls.push(['ipinfo', u]);
+    return reply({ ip: m[1], hostname: 'dns.google', city: 'Mountain View', region: 'California', country: 'US', loc: '38.0088,-122.1175',
+      org: 'AS15169 Google LLC', postal: '94043', timezone: 'America/Los_Angeles', anycast: true });
+  }
+  if ((m = /^https:\/\/proxycheck\.io\/v3\/([^?]+)/.exec(u)) && ANYCAST.has(m[1])) {
+    calls.push(['proxycheck', u]);
+    return reply({ status: 'ok', [m[1]]: { network: { type: 'business' }, detections: { proxy: false, vpn: false, tor: false, hosting: false, anonymous: true, risk: 100 } } });
+  }
   if ((m = /^https:\/\/api\.ipinfo\.io\/lookup\/([^?]+)/.exec(u))) {
     calls.push(['core', u]);
     return reply({ ip: m[1], geo: { city: 'Coral Springs', region: 'Florida', country: 'United States', country_code: 'US', continent: 'North America',
@@ -484,6 +512,87 @@ for (const [what, route, live] of [
   ok(asked.length === 0 && printed.length === (route.error ? 1 : 0) && staticBot.length === onPage,
     `a page with ${what}: the terminal asks nothing more, prints ${printed.length} line(s) and leaves the page's ${onPage} note(s) for bots`);
 }
+
+console.log('-- a busy shared address: your own details still come, without the hostname (src/worker.js selfInfo)');
+// LOOKUP_LIMITER refuses every request here, as it does for an office, campus or carrier NAT address past 30 a minute.
+const ME = '81.2.69.142';
+let refused = 0;
+env.LOOKUP_LIMITER = { async limit() { refused++; return { success: false }; } };
+mayTake = true;
+const tooMany = r => /Too many lookups/.test(r.body);
+const home = await run('/', { ua: CHROME, ...NAV, me: ME }), hd = home.data || {};
+ok(home.status === 200 && (home.initial || {}).kind === 'self' && hd.ip === ME && hd.hostname === null && !hd.ptrTimedOut &&
+  home.body.includes(`<dd class="big">${ME}</dd>`) && !home.body.includes('<dt>hostname</dt>') && !home.kinds.includes('dns') && !tooMany(home),
+  `the homepage: ${home.status}, your IP in the page and in the data the terminal draws whoami from, hostname ${hd.hostname}, no reverse DNS asked (requests ${JSON.stringify(home.kinds)})`);
+for (const [what, path, opts] of [
+  ['curl /json', '/json', { ua: CURL, accept: '*/*' }],
+  ["whoami in the terminal, /api/lookup", '/api/lookup', { ua: CHROME, ...TERMINAL }],
+  ['your address by number, /api/lookup?ip=', `/api/lookup?ip=${ME}&block=0`, { ua: CHROME, ...TERMINAL }],
+  ['your address by number, /<ip>/json', `/${ME}/json`, { ua: CURL, accept: '*/*' }],
+]) {
+  const r = await run(path, { ...opts, me: ME }), d = r.data || {};
+  ok(r.status === 200 && d.ip === ME && d.source === 'edge' && d.hostname === null && !r.kinds.includes('dns') && !tooMany(r),
+    `${what}: ${r.status}, ip ${d.ip}, source ${d.source}, hostname ${d.hostname}, requests ${JSON.stringify(r.kinds)}`);
+}
+for (const [what, path] of [['curl /text', '/text'], ['curl /?format=text', '/?format=text']]) {
+  const r = await run(path, { ua: CURL, accept: '*/*', me: ME });
+  ok(r.status === 200 && new RegExp(`^your ip +${ME.replace(/\./g, '\\.')}$`, 'm').test(r.body) && !/^hostname/m.test(r.body) && !tooMany(r),
+    `${what}: ${r.status}, ${JSON.stringify(r.body.split('\n')[0])}, no hostname line`);
+}
+ok(refused >= 7, `... and each of them asked the rate limiter, which said no (${refused} times)`);
+for (const [what, path, opts] of [
+  ['a lookup of another address, /api/lookup?ip=', '/api/lookup?ip=74.20.0.1', { ua: CHROME, ...TERMINAL }],
+  ['a lookup of another address, /<ip>/text', '/74.20.0.2/text', { ua: CURL, accept: '*/*' }],
+  ['/hostname, which asks for the reverse DNS itself', '/hostname', { ua: CURL, accept: '*/*' }],
+  ["leaktest's /api/check", '/api/check', { ua: CHROME, ...TERMINAL }],
+]) {
+  const r = await run(path, { ...opts, me: ME });
+  ok(r.status === 429 && tooMany(r) && !spent(r), `${what} keeps the limit: ${r.status}, ${r.body.replace(/\s+/g, ' ').trim().slice(0, 80)}`);
+}
+env.LOOKUP_LIMITER = { async limit() { return { success: true }; } };
+const allowed = await run('/json', { ua: CURL, accept: '*/*', me: ME });
+ok(allowed.status === 200 && allowed.kinds.includes('dns'), `within the limit, /json asks for the reverse DNS as before (requests ${JSON.stringify(allowed.kinds)})`);
+delete env.LOOKUP_LIMITER;
+
+console.log("-- proxycheck.io's catch-all flag and anycast addresses (vpnText in src/worker.js and public/app.js, geoNote in app.js)");
+const CATCHALL = 'not a known VPN, proxy or Tor service (proxycheck.io sets its catch-all "anonymous" flag, which it also gives public DNS and CDN addresses)';
+mayTake = true;
+const gj = await run('/8.8.4.4/json', { ua: CURL, accept: '*/*' }), g = gj.data || {};
+ok(gj.status === 200 && g.flags && g.flags.anycast === true && g.privacy && g.privacy.anonymous === true && !g.privacy.vpn,
+  `curl /8.8.4.4/json keeps the raw flags: anycast ${g.flags && g.flags.anycast}, privacy.anonymous ${g.privacy && g.privacy.anonymous}`);
+const gt = await run('/8.8.4.4/text', { ua: CURL, accept: '*/*' });
+ok(gt.body.includes('\nvpn / proxy  ' + CATCHALL + '\n') && !/anonymizing/i.test(gt.body), `curl /8.8.4.4/text: ${JSON.stringify((/^vpn \/ proxy.*$/m.exec(gt.body) || [''])[0])}`);
+const gc = await run('/8.8.4.4/text?color=1', { ua: CURL, accept: '*/*' });
+ok(gc.body.includes('\x1b[33mnot a known VPN, proxy or Tor service\x1b[0m (proxycheck.io sets'), '... and with ?color=1 its verdict is yellow, as a proxycheck.io flag was');
+const gp = await run('/8.8.4.4', { ua: CHROME, ...NAV });
+ok(article(gp.body).includes(`<dt>vpn / proxy</dt><dd>${CATCHALL.replace(/"/g, '&quot;')}</dd>`) && !/anonymizing|\u00b1/i.test(gp.body),
+  "the IP page's own text says the same, with no \"anonymizing\" and no radius anywhere on the page");
+const V = Function('const CITY_KM = 50, GEO = null;' + slice(app, '  const pcKnown =', "  // A lookup's block") +
+  slice(app, '  function locate(', '  const worldView') + slice(app, '  function geoNote(', '  function geoBlock(') +
+  'return { vpnText, pcFlag, pcWhy, locate, geoNote };')();
+ok(V.vpnText(g) === CATCHALL && !/anonymizing/i.test(V.pcFlag({ anonymous: true })) && V.pcFlag({ anonymous: true, compromised: true }).startsWith('flagged by proxycheck.io as compromised'),
+  `the terminal's vpn / proxy line for 8.8.4.4 is the same: ${JSON.stringify(V.vpnText(g))}`);
+const city = { lat: 38, lon: -122, km: 50, level: 'city' };
+const anyNote = V.geoNote(g, city, 'Mountain View, California, United States'), cityNote = V.geoNote({ flags: {} }, city, 'Coral Springs, Florida, United States');
+ok(anyNote === 'anycast \u00b7 served from many locations' && !anyNote.includes('\u00b1') && cityNote === 'approximate area \u00b7 \u00b150 km' &&
+  V.geoNote({}, { km: 1200, level: 'country' }, 'United States') === 'country-level only \u00b7 United States \u00b7 \u00b11,200 km',
+  `the terminal's map caption: anycast ${JSON.stringify(anyNote)}; an ordinary address ${JSON.stringify(cityNote)}`);
+ok(app.includes("const flagged = !anon && !!(pc && pc.anonymous);") && app.includes("`your IP ${pcWhy(pc)}, so this check can't tell whether you use a VPN.") &&
+  V.pcWhy({ anonymous: true }).startsWith('has proxycheck.io\'s catch-all "anonymous" flag') &&
+  app.includes("{ sum: 'unclear' }"), "leaktest still counts the catch-all flag alone as unclear, in the same words as a lookup");
+const plain = { lat: 26.27, lon: -80.27 };
+ok(V.locate(g).km === 0 && V.locate(plain).km === 50,
+  `... and the map lights no area around the point: locate() gives 8.8.4.4 ${V.locate(g).km} km, an ordinary address ${V.locate(plain).km} km`);
+// A copy with no IPINFO_TOKEN or PROXYCHECK_KEY (wrangler dev without .dev.vars) asks IPinfo's free API, which marks anycast too.
+const keys = { IPINFO_TOKEN: env.IPINFO_TOKEN, PROXYCHECK_KEY: env.PROXYCHECK_KEY };
+delete env.IPINFO_TOKEN; delete env.PROXYCHECK_KEY;
+const fj = await run('/8.8.4.4/json', { ua: CURL, accept: '*/*' }), fr = fj.data || {};
+const ft = await run('/8.8.4.4/text', { ua: CURL, accept: '*/*' });
+Object.assign(env, keys);
+ok(fj.status === 200 && fr.source === 'ipinfo' && JSON.stringify(fr.flags) === '{"anycast":true}' && fr.lat != null && V.locate(fr).km === 0 &&
+  V.geoNote(fr, V.locate(fr), '').startsWith('anycast') && V.vpnText(fr).startsWith('not checked') && /^connection +anycast \(served from many locations\)$/m.test(ft.body),
+  `without a token, IPinfo's free API: source ${fr.source}, flags ${JSON.stringify(fr.flags)}, no radius, VPN line ${JSON.stringify(V.vpnText(fr).split(' (')[0])}, ` +
+  `text ${JSON.stringify((/^connection.*$/m.exec(ft.body) || [''])[0])}`);
 
 const hb = read('docs/handbook.md');
 ok(hb.includes('isBot()') && hb.includes('tools/check_bots.mjs'), 'docs/handbook.md describes isBot() and this check');

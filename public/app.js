@@ -131,7 +131,8 @@
 
   function locate(d) {
     if (!d) return null;
-    if (d.lat != null && d.lon != null) return { lat: d.lat, lon: d.lon, km: CITY_KM, level: 'city' };
+    // An anycast address gets no radius: the point is one listed location of many, not an approximate area.
+    if (d.lat != null && d.lon != null) return { lat: d.lat, lon: d.lon, km: d.flags && d.flags.anycast ? 0 : CITY_KM, level: 'city' };
     const c = GEO && d.countryCode && GEO.countries[String(d.countryCode).toUpperCase()];
     return c ? { lat: c[0], lon: c[1], km: c[2], level: 'country' } : null;
   }
@@ -350,15 +351,22 @@
   const redrawMaps = () => { maps.forEach(m => { m.dirty = true; }); kick(); };
   document.addEventListener('visibilitychange', () => { if (!document.hidden) kick(); });
 
+  // The map's caption. An anycast address is answered from many places, so the one point listed for it gets no radius.
+  function geoNote(d, loc, where) {
+    const km = loc.km >= 1000 ? loc.km.toLocaleString('en-US') : loc.km;
+    if (d.flags && d.flags.anycast) return 'anycast · served from many locations';
+    return loc.level === 'city' ? `approximate area · ±${km} km` : `country-level only · ${where} · ±${km} km`;
+  }
+
   function geoBlock(d) {
     const loc = locate(d);
     if (!loc || !landPath()) return null;
     const where = loc.level === 'city' ? [d.city, d.region, d.country || d.countryCode].filter(Boolean).join(', ') : (d.country || d.countryCode);
     const fig = el('figure', 'geo'), cv = el('canvas'), cap = el('figcaption', 'geo-cap');
     cv.setAttribute('role', 'img');
-    cv.setAttribute('aria-label', `Dot map marking the approximate location: ${where || 'unknown place'}`);
-    const km = loc.km >= 1000 ? loc.km.toLocaleString('en-US') : loc.km;
-    const note = el('span', '', loc.level === 'city' ? `approximate area · ±${km} km` : `country-level only · ${where} · ±${km} km`);
+    cv.setAttribute('aria-label', `Dot map marking ${d.flags && d.flags.anycast ? 'one listed location of an anycast address'
+      : 'the approximate location'}: ${where || 'unknown place'}`);
+    const note = el('span', '', geoNote(d, loc, where));
     const btn = el('button', 'geo-btn'); btn.type = 'button';
     cap.append(note, btn); fig.append(cv, cap);
 
@@ -456,13 +464,14 @@
       city: 'Portland', region: 'Oregon', countryCode: 'US', country: 'United States', lat: 45.5152, lon: -122.6784,
       timezone: 'America/Los_Angeles', colo: 'PDX', source: 'demo' },
     '8.8.8.8': { hostname: 'dns.google', asn: 'AS15169', org: 'Google LLC', city: 'Mountain View', region: 'California',
-      countryCode: 'US', country: 'United States', lat: 37.4056, lon: -122.0775, timezone: 'America/Los_Angeles',
+      countryCode: 'US', country: 'United States', lat: 37.4056, lon: -122.0775, timezone: 'America/Los_Angeles', flags: { anycast: true },
       note: 'anycast: you reach the nearest Google site, wherever it is' },
     '8.8.4.4': { hostname: 'dns.google', asn: 'AS15169', org: 'Google LLC', countryCode: 'US', country: 'United States', note: 'anycast DNS resolver' },
     '1.1.1.1': { hostname: 'one.one.one.one', asn: 'AS13335', org: 'Cloudflare, Inc.', note: "anycast: announced from Cloudflare's data centers worldwide" },
     '1.0.0.1': { hostname: 'one.one.one.one', asn: 'AS13335', org: 'Cloudflare, Inc.', note: 'anycast DNS resolver' },
     '9.9.9.9': { hostname: 'dns9.quad9.net', asn: 'AS19281', org: 'Quad9', city: 'Berkeley', region: 'California',
-      countryCode: 'US', country: 'United States', lat: 37.8716, lon: -122.2727, timezone: 'America/Los_Angeles', note: 'anycast DNS resolver' },
+      countryCode: 'US', country: 'United States', lat: 37.8716, lon: -122.2727, timezone: 'America/Los_Angeles', flags: { anycast: true },
+      note: 'anycast DNS resolver' },
     '2001:4860:4860::8888': { hostname: 'dns.google', asn: 'AS15169', org: 'Google LLC', countryCode: 'US', country: 'United States', note: 'anycast DNS resolver' },
   };
   // Sample networks for the preview: a handful of real prefixes, no totals.
@@ -667,7 +676,7 @@
     } catch { return null; } finally { clearTimeout(t); }
   }
 
-  // IPinfo Core's flags in plain words: what kind of connection the address belongs to.
+  // IPinfo Core's flags (and the free API's anycast) in plain words: what kind of connection the address belongs to.
   function connection(d) {
     const f = (d && d.flags) || {}, out = [];
     if (f.hosting || (d && d.asType === 'hosting')) out.push('hosting or data center');
@@ -682,11 +691,15 @@
   // not proof: VPN providers keep adding fresh addresses that no list knows yet. Matches worker.js.
   // "yes" needs Core's flag or a specific proxycheck.io finding (VPN, proxy, Tor or a named service).
   // proxycheck.io's own "anonymous" is a catch-all, also set on addresses that are none of those
-  // (Google Public DNS, 8.8.8.8), and "compromised" means seen performing attacks: alone, each gets
-  // a hedged line, and leaktest doesn't count them as a VPN.
+  // (Google Public DNS, 8.8.8.8), so alone it is reported as what it is (PC_CATCHALL), never as
+  // "anonymizing"; "compromised" means seen performing attacks and gets a hedged line. leaktest
+  // doesn't count either as a VPN.
   const pcKnown = pc => !!(pc && pc.anonymous && (pc.vpn || pc.proxy || pc.tor || pc.operator));
-  const pcFlag = pc => (pc.compromised ? 'flagged by proxycheck.io as compromised (seen performing attacks)' : 'flagged as anonymizing by proxycheck.io') +
-    ', but not as a known VPN, proxy or Tor service';
+  const PC_CATCHALL = 'not a known VPN, proxy or Tor service (proxycheck.io sets its catch-all "anonymous" flag, which it also gives public DNS and CDN addresses)';
+  const pcFlag = pc => (pc.compromised ? 'flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service' : PC_CATCHALL);
+  // leaktest's reason it can't tell: the catch-all flag comes first there, because it is the reason.
+  const pcWhy = pc => (pc.compromised ? `is ${pcFlag(pc)}`
+    : 'has proxycheck.io\'s catch-all "anonymous" flag (which it also gives public DNS and CDN addresses) but is not a known VPN, proxy or Tor service');
   const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
   function vpnText(d) {
     const core = d && d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = (d && d.privacy) || null;
@@ -763,7 +776,7 @@
         // look like an exact address.
         a.href = `https://www.google.com/maps/@${Number(d.lat).toFixed(4)},${Number(d.lon).toFixed(4)},11z`;
         a.target = '_blank'; a.rel = 'noopener';
-        a.setAttribute('aria-label', 'Open the approximate area in Google Maps (new tab)');
+        a.setAttribute('aria-label', `Open ${d.flags && d.flags.anycast ? 'one listed location of this anycast address' : 'the approximate area'} in Google Maps (new tab)`);
         f.append(a); rows.push(['coords', f]);
       }
       if (d.timezone) rows.push(['local time', localTime(d.timezone)]);
@@ -1023,8 +1036,8 @@
     else if (!vpnKnown) add('vpn', 'info', 'VPN detection', "unavailable for this check, so the lines below can't tell whether you use a VPN", { sum: 'unavailable' });
     else if (anon) add('vpn', 'ok', 'VPN detection', `your IP is a known ${vpnKind(pc)} address${pc && pc.operator ? ' (' + pc.operator + ')' : ''}: sites see that, not your provider`,
       { sum: vpnKind(pc) + (pc && pc.operator ? ' (' + pc.operator + ')' : '') });
-    else if (vpn) add('vpn', 'ok', 'VPN detection', 'your IP belongs to a hosting network, as VPN servers usually do' + (flagged ? ` (${pcFlag(pc)})` : ''), { sum: 'hosting network' });
-    else if (flagged) add('vpn', 'info', 'VPN detection', `your IP is ${pcFlag(pc)}, so this check can't tell whether you use a VPN. Without one, sites see your provider${d.org ? ' (' + d.org + ')' : ''} and rough location`, { sum: 'unclear' });
+    else if (vpn) add('vpn', 'ok', 'VPN detection', 'your IP belongs to a hosting network, as VPN servers usually do' + (flagged ? `; it is ${pcFlag(pc)}` : ''), { sum: 'hosting network' });
+    else if (flagged) add('vpn', 'info', 'VPN detection', `your IP ${pcWhy(pc)}, so this check can't tell whether you use a VPN. Without one, sites see your provider${d.org ? ' (' + d.org + ')' : ''} and rough location`, { sum: 'unclear' });
     else if (homeNet) add('vpn', 'info', 'VPN detection', `no VPN service: your IP belongs to ${d.org || 'your internet provider'}, a home or mobile internet provider, so sites see your provider and rough location`, { sum: 'no VPN' });
     else add('vpn', 'info', 'VPN detection', `not on known VPN lists. Without a VPN, sites see your provider${d.org ? ' (' + d.org + ')' : ''} and rough location. If you are using one, it's a newer or unlisted server, and sites may not spot it either`, { sum: 'not on VPN lists' });
 
@@ -2633,7 +2646,7 @@
   }
 
   async function privacy() {
-    await lines(['No accounts, no cookies, no analytics. Your IP is shown back to you and used for about a minute to stop abuse.',
+    await lines(["No accounts, no cookies, no analytics, and ipterm's code stores and logs nothing about you. Your IP is shown back to you and used for about a minute to stop abuse. Cloudflare, which hosts ipterm, keeps its own request analytics and security events: the policy says what they show.",
       'Addresses you look up are sent to IPinfo (and proxycheck.io, to check for VPNs) and to their regional internet registry, for the date their network was registered (never your own address: only whois sends that to one); networks and routes go to RIPEstat, domain names go to Cloudflare\'s DNS resolver, a mail check also fetches the domain\'s own MTA-STS policy file, and a report card (grade) asks the domain\'s own website for its headers (from ipterm\'s server, never from your browser). Your own IP is only sent to them if you run leaktest (to IPinfo and proxycheck.io, and your other IP version to IPinfo alone, for its network), which also asks a STUN server run by Cloudflare which address your browser reveals, and looks up a few random names under ipterm\'s own DNS server, which sees the address of your DNS resolver and forgets it within two minutes. Its share link holds only the grade and which checks passed, never your IP or location. port <number> makes the ipterm server connect to your own address on that one port, and nothing about it is kept. To show your other address (IPv4 or IPv6), your browser asks ipify, which says it logs nothing. Sponsored lines are plain labeled links.',
       'The commands you type are saved in your own browser (the newest 200, never their results) and never leave it: history clear deletes them, history off stops saving.'], 'sys');
     if (!live) return line('The full privacy policy is at /privacy on the deployed site.', 'sys');
@@ -2773,7 +2786,7 @@
       case 'cd': return line('cd: there is only one directory here. Type help to see what you can do.', 'sys');
       case 'pwd': return line('/home/guest', 'sys');
       case 'sudo': return line('guest is not in the sudoers file. (Nothing is reported: ipterm logs nothing about visitors.)', 'sys');
-      case 'exit': return line('There is no session to end: no account, no cookies and nothing kept on the server, so you can just close the tab.', 'sys');
+      case 'exit': return line('There is no session to end: no account and no cookies, so you can just close the tab.', 'sys');
       case 'date': return line(new Date().toUTCString(), 'sys');
       case 'echo': return line(args.join(' '));
       case 'uname': return line('ipterm 0.2 (Cloudflare Workers)', 'sys');

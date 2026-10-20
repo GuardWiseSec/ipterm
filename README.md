@@ -76,7 +76,10 @@ searches your history, and `ipterm.net/go?q=<anything>` works as a browser searc
 
 ## Privacy
 
-- No accounts, no cookies, no analytics, no ad scripts. Nothing about visitors is stored.
+- No accounts, no cookies, no analytics, no ad scripts. ipterm's code stores and logs nothing about visitors.
+- Cloudflare, which hosts it, keeps its own records of the traffic: the site's owner sees it mostly in aggregate
+  (countries, paths, user agents), plus a sample of individual requests with their IP, from up to the last 31 days.
+  Browsers may also send Cloudflare network error reports (NEL).
 - The page's Content-Security-Policy is `default-src 'none'`: scripts and styles come only from ipterm itself, and the
   only other hosts it may fetch from are ipify (to show your other IP version) and ipterm's own DNS leak test zone.
   `leaktest` also asks Cloudflare's STUN server which addresses WebRTC reveals.

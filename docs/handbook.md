@@ -152,13 +152,14 @@ The verdict on the **vpn / proxy** line combines both sources (`vpnText()` in `s
 | What the sources say | The line says |
 | --- | --- |
 | Core flags it, or proxycheck.io finds a VPN, proxy or Tor exit, or names the service | `yes: a known VPN address (Proton VPN)` (or proxy, Tor, or "VPN, proxy or Tor" when it isn't specific) |
-| proxycheck.io's `anonymous` flag alone, with no VPN, proxy, Tor or service name | `flagged as anonymizing by proxycheck.io, but not as a known VPN, proxy or Tor service` |
+| proxycheck.io's `anonymous` flag alone, with no VPN, proxy, Tor or service name | `not a known VPN, proxy or Tor service (proxycheck.io sets its catch-all "anonymous" flag, which it also gives public DNS and CDN addresses)` |
 | proxycheck.io's `compromised` flag alone (seen performing attacks) | `flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service` |
 | Neither flags it | `not on known VPN or proxy lists`, plus the hosting-network note or the "not a guarantee" note |
 
 proxycheck.io's API reference defines `anonymous` as "any kind of anonymising service (proxy, VPN,
 TOR, etc.)", and it's also set on addresses that are none of those: Google Public DNS (8.8.8.8) has
-it, with only `hosting` besides. So on its own it isn't reported as a VPN, here or in `leaktest`.
+it, with only `hosting` besides. So on its own it isn't reported as a VPN, or as "anonymizing", here or in `leaktest`.
+The JSON still carries the flag (`"anonymous": true` under `privacy`).
 
 ### Bots never spend the budgets
 
@@ -322,6 +323,10 @@ It marks the reported point and draws a ring for the uncertainty:
 - City-level results (your own IP, or other IPs without a token) get a 50 km "approximate area" ring.
   IP location usually points at the ISP's hub, so treat the ring as a hint, not a boundary.
 - Country-level results (IPinfo Lite) get a ring sized to the country, centered on its main landmass.
+- Anycast addresses (the `anycast` flag, from IPinfo Core or, without a token, IPinfo's free API, as on 8.8.8.8) are
+  answered from many places, so the point is only the one their data lists: no ring, only the dot under it lights up,
+  and the caption says "anycast · served from many locations" instead of a radius (`locate()` and `geoNote()` in
+  `public/app.js`).
 
 Change the 50 km default with `CITY_KM` near the top of the map section in `public/app.js`.
 
@@ -441,7 +446,11 @@ cross-site access still follows `PUBLIC_API` (off by default).
 
 The homepage itself carries the visitor's address: the Worker writes their IP, network and location into the
 HTML (`homePage()` in `src/worker.js`), so the number is there on first paint and without JavaScript, and the
-terminal draws it without a second request. Because it's personal, it's sent `private, no-store`, and it's
+terminal draws it without a second request. Everything but the hostname comes from Cloudflare's edge, so the rate
+limit guards only the reverse DNS: past it, the homepage, `whoami`, `/json`, `/text` and the visitor's own address
+asked for by number (as JSON or text) still answer, just without the hostname (`selfInfo()`), and people behind one
+busy shared address (an office, a campus, carrier NAT) never see "Too many lookups" there. `/hostname`, `leaktest`'s
+`/api/check` and lookups of other addresses keep the limit. Because it's personal, it's sent `private, no-store`, and it's
 kept out of search snippets (`data-nosnippet`), since a crawler would see its own address. Prefetches and
 prerenders (Chrome's prefetch proxy, from search results) get the plain page instead, because the address
 they'd carry may not be the visitor's; the terminal then asks the API as before.
@@ -1503,7 +1512,7 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 
 | Protection | Where | How to change it |
 | --- | --- | --- |
-| Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them | `[[ratelimits]]` in `wrangler.toml` | Edit `limit` (period must be 10 or 60 seconds) |
+| Rate limit: 30 uncached lookups per minute per visitor IP (per /64 network for IPv6, so rotating addresses doesn't help), then HTTP 429. Cached pages are never limited, so search crawlers can read them. The visitor's own details (the homepage, `whoami`, `/json`, `/text`) are never refused: past the limit they come without the hostname, the only part that asks anybody | `[[ratelimits]]` in `wrangler.toml`; `selfInfo()` in `src/worker.js`; `tools/check_bots.mjs` | Edit `limit` (period must be 10 or 60 seconds) |
 | Bots never spend IPinfo Core or proxycheck.io: named crawlers and link previews, `BOT_UA`, and anything asking for HTML without a browser's `Sec-Fetch-*` get Core's answer only from the cache, otherwise IPinfo Lite, and a VPN check only from the cache; command-line tools and scripts asking for JSON keep full data | `isBot()`, `ipData()`, `privacyData()`, `blockData()` in `src/worker.js`; `tools/check_bots.mjs` | See "Bots never spend the budgets" |
 | Bots never start a RIPEstat routing lookup: a public `/cidr` page shows them the calculation, with the routing only when it is cached; `/route/<ip>` sends them to a cached route or the address's `/32`; JSON and text answer 403. The three public `/cidr` pages in `SITEMAP_PATHS` are the exception. People, the terminal, curl and scripts keep live routing | `routeData()`, `cidrRoute()`, `routeRoute()` in `src/worker.js`; `tools/check_bots.mjs` | `curatedRoutes()`; see "Bots never spend the budgets" |
 | A lookup's registry date (`block`): RDAP only, never IPinfo or proxycheck.io; never for the visitor's own address (`?block=0` from the terminal for their other IP version); bots (`isBot()`) only read the cache (shared with `whois <ip>`, a day); anyone else's registry request counts toward their rate limit, riding on the lookup's own count or sharing the VPN check's; 0.3 seconds at most once the rest of the answer is ready, then the answer goes without it and the request finishes in the background; lookups of one address share a request in flight; a registry that fails is left alone for a minute (ten after a 429) | `blockData()` in `src/worker.js`; `tools/check_block.mjs` | `BLOCK_RECENT_DAYS`, `BLOCK_GRACE`; see "Recently registered blocks" |
@@ -1537,8 +1546,14 @@ Notes:
   counters, so change either one if your account already uses it.
 - The CSP blocks every third-party host. Ad networks and analytics need their domains added to
   `script-src`, `connect-src`, `img-src` and possibly `frame-src`.
-- The Worker stores and logs nothing about visitors. If you turn on Workers Logs or add analytics or ads,
-  publish a privacy policy: IP addresses count as personal data under GDPR.
+- The Worker stores and logs nothing about visitors. Cloudflare still keeps its own records of the zone's traffic, and
+  its dashboard shows up to the last 31 days of them: its analytics, mostly in aggregate (countries, paths, user
+  agents), plus a sample of individual requests with their IP, country, path and user agent, whether or not a firewall
+  or bot rule acted on them (Security Analytics, on every plan, Free included). Browsers may also send Cloudflare
+  Network Error Logging reports, which the owner never sees.
+  `public/privacy.html` says so, and the README, `/help`, `public/llms.txt` and `public/openapi.json` say "ipterm's
+  code stores and logs nothing" rather than "nothing is stored". If you turn on Workers Logs or add analytics or ads,
+  update the privacy policy first: IP addresses count as personal data under GDPR.
 
 ## When something fails
 
@@ -1621,11 +1636,16 @@ still ask RIPEstat, and so does the terminal on the page a browser too old to se
 (`bot: true`) and then drops the page's `.route-bot` note, while Googlebot's renderer gets the 403 (or, obeying
 robots.txt, no answer) and the note stays, never a "network error" in its place; a private `/cidr` page is the same for a bot and a person
 and asks nothing; a bot's `/route` asks nothing (a redirect, or a 403 for JSON and text); and the three public
-`/cidr` pages in `SITEMAP_PATHS` keep live routing for bots, and only they. Last, the links: the Worker's ASN page links ten of its largest prefixes (up to four
+`/cidr` pages in `SITEMAP_PATHS` keep live routing for bots, and only they. Then the links: the Worker's ASN page links ten of its largest prefixes (up to four
 IPv6) and lists the rest as text, its `/cidr` page has no "splits into" or "part of" links, and the terminal's
 `renderAsn()`, `renderCidr()`, `cidr()` and `next:`, run against a stand-in DOM, make the same ten ASN prefixes
 ordinary links and the rest `nofollow`, and a block's "splits into", "part of" and `next:` links `nofollow` when the
-block they open is public.
+block they open is public. Then a busy shared address (`selfInfo()`): with a rate limiter that refuses everything, the
+homepage still carries the visitor's IP, and `/json`, `/text`, `/?format=text`, the terminal's `/api/lookup` and their
+own address by number answer 200 with `hostname: null`, while lookups of other addresses, `/hostname` and `/api/check`
+still get the 429. Last, proxycheck.io's catch-all `anonymous` flag on an anycast address: the JSON keeps the flags,
+the text answer, the IP page and the terminal say "not a known VPN, proxy or Tor service" and name the flag, and the
+terminal's map caption (`geoNote()`) gives the anycast address no radius.
 
 `node tools/check_https.mjs` (Node 22.15 or later) checks plain http (see "One copy of the site, on https"), also
 with no server and no network: the whole Worker in Node, its static files read from `public/`, and `fetch` stubbed. Over
