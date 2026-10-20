@@ -63,22 +63,27 @@ IPINFO_PLAN = "core"
 
 # Core only: at most this many fresh Core lookups per day (UTC), so one scraper can't use up the
 # month. 4500 a day is about 140,000 a month, inside Core's 150,000. Past it, lookups use Lite.
-IPINFO_DAILY_BUDGET = "4500"
+# LAUNCH WEEK (Show HN, from 2026-10-20): raised from 4500 / 375 / 30 to take a front-page day; 144.7K of
+# the 150K were left until the plan renews on 2026-11-12. Put back 4500 / 375 / 30 (and drop
+# PROXYCHECK_VISITOR_HOURLY) about a week after the post.
+IPINFO_DAILY_BUDGET = "15000"
 
 # Core only: at most this many fresh Core lookups per hour, so a burst only uses up that hour and
 # city-level results return the next hour. 375 is about twice an even share of the daily budget,
 # leaving room for busy hours. Leave it out to use that default; "0" turns hourly pacing off.
-IPINFO_HOURLY_BUDGET = "375"
+IPINFO_HOURLY_BUDGET = "2500"
 
 # Core only: at most this many fresh Core lookups per visitor (IP, or IPv6 /64) per hour, so one
 # visitor can't use up the hourly budget for everyone. Past it, that visitor gets Lite. "0" = no cap.
-IPINFO_VISITOR_HOURLY = "30"
+IPINFO_VISITOR_HOURLY = "10"
 
 # proxycheck.io (optional second opinion on VPN / proxy / Tor; turns on once the PROXYCHECK_KEY
 # secret is set): at most this many queries a day (UTC). The free plan allows 1,000; 900 leaves a
 # margin. Hourly pacing defaults to twice an even share (75) and each visitor to 10 an hour; set
 # PROXYCHECK_HOURLY_BUDGET / PROXYCHECK_VISITOR_HOURLY to change them. "0" turns proxycheck.io off.
 PROXYCHECK_DAILY_BUDGET = "900"
+# Launch week: 3 a visitor an hour (default 10), so the free plan's 900 a day reaches more people.
+PROXYCHECK_VISITOR_HOURLY = "3"
 
 # DNS leak test (leaktest's DNS line): the zone the page's test lookups go to, and the HTTPS API of the
 # small server that answers for that zone (dnsleak-server/ in this repo, on a VPS outside Cloudflare).
