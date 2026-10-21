@@ -174,7 +174,7 @@ change from day to day):
 | Provider | List | Addresses | What the addresses are | Terms |
 | --- | --- | --- | --- | --- |
 | Mullvad | `api.mullvad.net/public/relays/wireguard/v2/`, from the documented "Mullvad Public API" | about 1,100: 553 WireGuard servers, IPv4 and IPv6 | Entries. Mullvad's app shows a server's entry (in) and exit (out) addresses apart, its blog says each server has several exit addresses, and an independent mapping of nine servers found none of their exits in the list | Silent: they cover customers. `api.mullvad.net/robots.txt` disallows all crawlers; ipterm reads one documented endpoint four times a day |
-| Private Internet Access | `serverlist.piaservers.net/vpninfo/servers/v6`, the list PIA's apps and its `manual-connections` scripts read | about 1,170 IPv4 | Entries. PIA's own app code says the listed address is not necessarily the exit, and asks PIA's API for the real one after connecting. The `meta` addresses (API proxies) are skipped | Silent |
+| Private Internet Access | `serverlist.piaservers.net/vpninfo/servers/v6`, the list PIA's apps and its `manual-connections` scripts read | about 1,170 IPv4 per download, and more each day: the list names a different part of PIA's servers every few minutes (half of them changed within 45 minutes on 2026-10-21) | Entries. PIA's own app code says the listed address is not necessarily the exit, and asks PIA's API for the real one after connecting. The `meta` addresses (API proxies) are skipped | Silent |
 | IVPN | `api.ivpn.net/v5/servers/stats`, offered on IVPN's status page ("Live server list as JSON") | about 180 IPv4: WireGuard and OpenVPN | Entries. No field or document says which address traffic leaves from, and IVPN keeps a small pool of addresses per server | Silent; the feed is offered publicly |
 | AirVPN | `airvpn.org/api/status/`, a documented free API (at most 600 requests per 10 minutes) | about 2,000: 250 servers, four entry addresses each, IPv4 and IPv6 | Entries. Each server sends traffic out from a separate exit address, which AirVPN's own app reads apart from the entries | Allowed: a documented free API |
 
@@ -209,8 +209,8 @@ nobody says, for PIA and IVPN). So:
   on no list says nothing either way.
 
 The JSON carries it as `vpnServer`, only when a list names the address, beside the other fields, which are unchanged:
-`{ "provider": "Mullvad", "role": "entry", "listUpdated": "2026-10-21T06:17:02.000Z" }` (`role`: `entry` or `exit`;
-`listUpdated`: when that provider's list was last downloaded). Lookups (`/<ip>` and its `/text` and `/json` forms,
+`{ "provider": "Mullvad", "role": "entry", "lastSeen": "2026-10-21T06:17:02.000Z" }` (`role`: `entry` or `exit`;
+`lastSeen`: when ipterm last found the address on that provider's list). Lookups (`/<ip>` and its `/text` and `/json` forms,
 `/api/lookup`) have it at the top level, and leaktest's `/api/check` under `network`. The text answer's `source` line
 adds `+ Mullvad's server list`.
 
@@ -219,13 +219,17 @@ fires (`[triggers]` in `wrangler.toml`: every 6 hours, at minute 17), and once b
 lookup finds it empty (an alarm, at most once an hour). Its own small budget: one request per list and run, no
 retries (the next run is the retry), 20 seconds and a size cap (1 or 2 MB) per list, and a few tens of milliseconds
 of CPU to read all four (about 150, 180, 70 and 210 KB). `src/vpn-lists.js` reads each list field by field: only
-public IPv4 and global IPv6 addresses count, so a placeholder such as `2001:db8::1` is skipped. A list that
-fails to download, isn't JSON, has fewer addresses than the provider's minimum, or comes back with less than half of
-the last good one leaves the last good list in place, and the last try's error shows on `/status`. A list that keeps
-coming back halved is taken on the second run in a row (a provider that really shrank). A provider whose list hasn't
-been refreshed for 3 days (`VPN_MAX_AGE`) drops out, so an address it gave up doesn't stay "known".
+public IPv4 and global IPv6 addresses count, so a placeholder such as `2001:db8::1` is skipped.
 
-All the lists are packed into one blob of sorted addresses, about 40 KB (`packIndex()`). Each data center caches it
+What is kept is every address seen on a provider's list in the last 3 days (`VPN_MAX_AGE`; `mergeRecord()`), each
+with when it was last there. So a download that fails, isn't JSON or has fewer addresses than the provider's minimum
+changes nothing (the last good list stays, and the try's error shows on `/status`); a list that comes back short
+removes nothing seen lately; PIA's list, which names a different part of its servers every few minutes, adds up to
+far more of them than any one download; and an address a provider stops listing, or a provider that stops answering,
+drops out 3 days later, so an address given up doesn't stay "known" for long.
+
+All the lists are packed into one blob of sorted addresses with when each was last listed (`packIndex()`): 9 bytes per
+IPv4 address and 21 per IPv6, about 70 KB in October 2026, well under a Durable Object's 2 MB per value. Each data center caches it
 for 30 minutes and each Worker keeps it in memory for 10, so a lookup is a binary search in memory: no outside
 request, no budget, no rate-limit count, and nothing about the lookup or the visitor leaves the Worker. That is why
 bots get the listing like anyone else: the bot rule is about the paid budgets, and this spends none. On a cold Worker
@@ -344,9 +348,10 @@ Object requests; it never touches IPinfo or proxycheck.io.
 | `pastDays` | The same per finished day, newest first: `used`, `hoursRunOut`, `ranOutAt`. A day with no lookups has no entry |
 
 `vpnServers` lists the VPN providers' own server lists (see "Known VPN servers"), one entry per provider: `addresses`
-(`ipv4`, `ipv6`) in its last good list, `updated` (when that list was downloaded), `tried` (the last try), `error`
-(why the last try's list wasn't taken, or null) and `stale` (older than 3 days, so no longer used). The text form has
-one line per provider: `mullvad  1106 addresses, updated 2026-10-21 06:17 UTC`, plus the last try's failure if any.
+(`ipv4`, `ipv6`) seen on its list in the last 3 days, `latestList` (how many its last good download had), `updated`
+(when that was), `tried` (the last try), `error` (why the last try's list wasn't taken, or null) and `stale` (no good
+download for 3 days, so none of its addresses is used). The text form has one line per provider:
+`pia  1724 addresses (1157 on the latest list), updated 2026-10-21 06:17 UTC`, plus the last try's failure if any.
 
 Not counted: lookups that fell back because one visitor used up their own hourly share, or because Core
 errored or refused the token (those are logged; watch with `npx wrangler tail`).
@@ -1746,12 +1751,13 @@ terminal's map caption (`geoNote()`) gives the anycast address no radius.
 server and no network. First the parsers, on a few real entries of each provider's list saved in
 `tools/fixtures/vpn-lists/` (2026-10-21) plus odd ones: every address an entry, and what isn't a VPN entry skipped
 (Mullvad's in-tunnel gateways, PIA's API proxies and signature lines, private, documentation and malformed
-addresses). Then the packed index: exact addresses only, IPv6 in any spelling, an exit before an entry, a list older
-than 3 days passed over, a damaged blob refused. Then the refresh, on a stand-in for the Durable Object's storage:
-one request per provider with ipterm's user agent; a download that fails, an HTML page, a list under the minimum or
-over the size cap each keep the last good list and say why; a halved list is held back once and taken when the next
-run agrees; lists that keep failing for 3 days drop out; an empty object sets one alarm an hour; two refreshes at
-once share one set of requests; the cron trigger runs one. Last, the whole Worker in Node: a listed address's JSON,
+addresses). Then what is kept and found: a provider's lists add up, each address with when it was last listed, a
+failed download only lets addresses expire, exact addresses only, IPv6 in any spelling, an exit before an entry, an
+address listed more than 3 days ago passed over, a damaged blob refused. Then the refresh, on a stand-in for the
+Durable Object's storage: one request per provider with ipterm's user agent; a download that fails, an HTML page, a
+list under the minimum or over the size cap each change nothing and say why; PIA's changing lists add up; a short
+list removes nothing; an address drops out 3 days after it was last listed, and the blob once none is left; an empty
+object sets one alarm an hour; two refreshes at once share one set of requests; the cron trigger runs one. Last, the whole Worker in Node: a listed address's JSON,
 text answer (with `?color=1`), IP page and terminal lookup (IPv4 and IPv6), a neighbour and an unlisted address
 unchanged, Googlebot getting the listing without spending a budget, leaktest's `/api/check` from a listed address
 skipping proxycheck.io, a made-up provider's exit skipping it in a lookup too, `/status`, the Worker without the

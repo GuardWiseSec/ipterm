@@ -112,7 +112,7 @@ import '../public/leakgrade.js';                  // the leak test's grade and s
 import { meCard, ME_WIDTH, ANSI, ansi } from './me.js';   // the /me card and its world map, and its colors
 import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
 import { holderOf, personReason } from './holder-heuristic.js';     // whether a network's holder may be a private person
-import { VPN_PROVIDERS, VPN_MAX_AGE, VPN_FETCH_TIMEOUT, toRecord, packIndex, unpackIndex, findServer } from './vpn-lists.js';   // VPN providers' own server lists
+import { VPN_PROVIDERS, VPN_MAX_AGE, VPN_FETCH_TIMEOUT, toRecord, mergeRecord, packIndex, unpackIndex, findServer } from './vpn-lists.js';   // VPN providers' own server lists
 // Pages that name a network holder who may be a private person are "noindex, follow" (GDPR caution; the rules are
 // in src/holder-heuristic.js). personHeld takes an AS name as RIPEstat gives it, with its handle ("JDOE-AS Jane Doe",
 // "CLOUDFLARENET - Cloudflare, Inc."); personName takes a name on its own ("Jane Doe").
@@ -2049,10 +2049,11 @@ async function privacyData(io, ip) {
    src/vpn-lists.js reads each provider's published server list; this part keeps them. One Durable Object (VpnServers,
    named "lists") downloads every list on the cron trigger (wrangler.toml [triggers], every 6 hours): one request per
    provider, no retries, a time limit and a size cap on each, and a few tens of milliseconds of CPU for all of them. It
-   keeps each provider's last good list when a download fails or comes back broken, and stores them all packed into one
-   blob of sorted addresses (about 80 KB; packIndex). Each data center caches that blob for 30 minutes and each Worker
-   keeps it in memory for 10, so finding an address is a binary search in memory: no outside request and no budget, the
-   same for bots and people. A Durable Object rather than KV or D1: the deployment creates it (no namespace or database
+   keeps every address seen on a provider's list in the last 3 days (mergeRecord), so a download that fails or comes
+   back broken changes nothing, and stores them all packed into one blob of sorted addresses (packIndex: about 70 KB in
+   October 2026, against a Durable Object's 2 MB per value). Each data center caches that blob for 30 minutes and each
+   Worker keeps it in memory for 10, so finding an address is a binary search in memory: no outside request and no
+   budget, the same for bots and people. A Durable Object rather than KV or D1: the deployment creates it (no namespace or database
    to set up, on ipterm.net or a copy), the writes are one blob four times a day, and the reads come from the cache. */
 const VPN_WAIT = 1500;                   // a lookup waits this long at most for the index, then goes on without it
 let vpnIdx = null, vpnIdxUntil = 0, vpnIdxLoad = null;
@@ -2070,14 +2071,14 @@ export class VpnServers extends DurableObject {
   refresh(now = Date.now()) {
     return (this.running ||= refreshVpnLists(this.ctx.storage, this.env, now).finally(() => { this.running = null; }));
   }
-  // For /status: each provider's last good list (when, how many addresses) and last try (when, what went wrong).
+  // For /status: each provider's addresses kept, its last good download (when, how many on it) and last try.
   async status() { return (await this.ctx.storage.get('meta')) || {}; }
 }
 
 // Downloads every provider's list (all at once) and keeps what passes: it parses, and has at least the provider's
-// minimum. One with less than half the addresses of the last good list is held back as a likely broken answer, and
-// taken when the next refresh brings about the same number again (a provider that really shrank). Otherwise the last
-// good list stays, until it is VPN_MAX_AGE old, when it is no longer used.
+// minimum. Each address stays until it has been off its provider's list for VPN_MAX_AGE (mergeRecord), so a download
+// that fails or comes back short removes nothing seen lately, and a provider that stops answering drops out after
+// that long. The last try's trouble, if any, shows on /status.
 async function refreshVpnLists(s, env, now) {
   await s.put('tried', now);
   const ua = `ipterm (${env.SOURCE_URL || 'https://github.com/GuardWiseSec/ipterm'}) refreshing its list of known VPN servers`;
@@ -2090,35 +2091,25 @@ async function refreshVpnLists(s, env, now) {
       return { error: String((e && e.message) || e).slice(0, 160) };
     }
   }));
-  const meta = (await s.get('meta')) || {}, put = {}, iso = new Date(now).toISOString();
-  VPN_PROVIDERS.forEach((p, i) => {
+  const meta = (await s.get('meta')) || {}, put = {}, lists = [], iso = new Date(now).toISOString();
+  for (const [i, p] of VPN_PROVIDERS.entries()) {
     const { rec, error } = got[i], m = { ...meta[p.id], tried: iso };
     const n = rec ? rec.four.length + rec.role6.length : 0;
-    const last = m.at && now - Date.parse(m.at) <= VPN_MAX_AGE ? m.n4 + m.n6 : 0;
-    let why = error || (n < p.min ? `only ${n} addresses (at least ${p.min} expected)` : null);
-    if (!why && n < last / 2 && !(m.held && Math.abs(n - m.held) <= m.held / 10)) {
-      why = `only ${n} addresses, down from ${last}: kept the last good list, and takes this one if the next refresh agrees`;
-      m.held = n;
-    }
+    const why = error || (n < p.min ? `only ${n} addresses (at least ${p.min} expected)` : null);
+    const kept = mergeRecord(await s.get('list:' + p.id), why ? null : rec, now);
     if (why) m.error = why;
-    else {
-      put['list:' + p.id] = rec;
-      Object.assign(m, { at: iso, n4: rec.four.length, n6: rec.role6.length, error: null, held: null });
-    }
+    else Object.assign(m, { at: iso, listed: n, error: null });
+    Object.assign(m, { n4: kept.four.length, n6: kept.role6.length });
     meta[p.id] = m;
-  });
-  const lists = [];
-  for (const p of VPN_PROVIDERS) {
-    const m = meta[p.id];
-    if (!m || !m.at || now - Date.parse(m.at) > VPN_MAX_AGE) continue;
-    const rec = put['list:' + p.id] || await s.get('list:' + p.id);
-    if (rec) lists.push({ id: p.id, name: p.name, at: Date.parse(m.at), rec });
+    put['list:' + p.id] = kept;
+    if (m.n4 + m.n6) lists.push({ id: p.id, name: p.name, at: Date.parse(m.at) || now, rec: kept });
   }
   put.meta = meta;
   if (lists.length) put.blob = packIndex(lists, now);
   await s.put(put);
-  if (!lists.length) await s.delete('blob');             // every list too old: lookups find none
-  console.log('[ipterm] VPN server lists: ' + VPN_PROVIDERS.map(p => p.id + ' ' + (meta[p.id].error ? `kept the last good list (${meta[p.id].error})` : meta[p.id].n4 + meta[p.id].n6)).join(', '));
+  if (!lists.length) await s.delete('blob');             // nothing seen in VPN_MAX_AGE: lookups find none
+  console.log('[ipterm] VPN server lists: ' + VPN_PROVIDERS.map(p => `${p.id} ${meta[p.id].n4 + meta[p.id].n6}` +
+    (meta[p.id].error ? ` (kept; this try: ${meta[p.id].error})` : '')).join(', '));
   return meta;
 }
 
@@ -2135,7 +2126,7 @@ function vpnIndex(io) {
   return Promise.race([vpnIdxLoad, sleep(VPN_WAIT).then(() => vpnIdx)]);
 }
 async function loadVpnIndex(io) {
-  const req = cacheReq(io, 'vpn-servers'), ns = io.env.VPN_SERVERS;
+  const req = cacheReq(io, 'vpn-servers/2'), ns = io.env.VPN_SERVERS;   // the blob's format (VPN2), so a new one never meets an old copy
   let buf = null, fresh = false;
   try { const hit = await caches.default.match(req); if (hit) buf = await hit.arrayBuffer(); } catch { /* cache trouble: ask the object */ }
   if (!buf) {
@@ -2151,13 +2142,14 @@ async function loadVpnIndex(io) {
   return vpnIdx;
 }
 
-// The address's entry on a VPN provider's own server list, or null: { provider, role, listUpdated }. role "exit": the
+// The address's entry on a VPN provider's own server list, or null: { provider, role, lastSeen }. role "exit": the
 // provider's users reach sites from this address; "entry": they connect to it, and reach sites from another address.
-// Free and local, so a bot gets it too (isBot is about the paid budgets).
+// lastSeen: when it was last on that list (within the last 3 days). Free and local, so a bot gets it too (isBot is
+// about the paid budgets).
 async function vpnServerData(io, ip) {
   try {
     const hit = findServer(await vpnIndex(io), ip, Date.now());
-    return hit ? { provider: hit.provider, role: hit.role, listUpdated: hit.list } : null;
+    return hit ? { provider: hit.provider, role: hit.role, lastSeen: hit.seen } : null;
   } catch { return null; }
 }
 
@@ -4583,16 +4575,17 @@ async function statusRoute(io) {
   const coreOff = !env.IPINFO_TOKEN ? 'no IPINFO_TOKEN secret' : plan !== 'core' ? `IPINFO_PLAN is "${plan}", not "core"`
     : core.daily === 0 ? 'IPINFO_DAILY_BUDGET is 0' : null;
   const pcOff = !env.PROXYCHECK_KEY ? 'no PROXYCHECK_KEY secret' : pc.daily === 0 ? 'PROXYCHECK_DAILY_BUDGET is 0' : null;
-  // The VPN providers' server lists (VpnServers): each one's last good list and last try.
+  // The VPN providers' server lists (VpnServers): each one's addresses kept, last good download and last try.
   const vpnLists = async () => {
     const ns = env.VPN_SERVERS;
     if (!ns) return { error: 'no VPN_SERVERS binding, so no lists are kept' };
     try {
       const m = await ns.get(ns.idFromName('lists')).status();
-      return { providers: VPN_PROVIDERS.map(p => ({ id: p.id, name: p.name, addresses: m[p.id] && m[p.id].at ? m[p.id].n4 + m[p.id].n6 : 0,
-        ipv4: (m[p.id] && m[p.id].n4) || 0, ipv6: (m[p.id] && m[p.id].n6) || 0, updated: (m[p.id] && m[p.id].at) || null,
-        tried: (m[p.id] && m[p.id].tried) || null, error: (m[p.id] && m[p.id].error) || null,
-        stale: !!(m[p.id] && m[p.id].at && d.getTime() - Date.parse(m[p.id].at) > VPN_MAX_AGE) })) };
+      return { providers: VPN_PROVIDERS.map(p => {
+        const x = m[p.id] || {};
+        return { id: p.id, name: p.name, addresses: (x.n4 || 0) + (x.n6 || 0), ipv4: x.n4 || 0, ipv6: x.n6 || 0, latestList: x.listed || 0,
+          updated: x.at || null, tried: x.tried || null, error: x.error || null, stale: !!(x.at && d.getTime() - Date.parse(x.at) > VPN_MAX_AGE) };
+      }) };
     } catch (e) {
       return { error: 'lists unreachable: ' + String((e && e.message) || e) };
     }
@@ -4620,8 +4613,8 @@ function statusText(d, o) {
   ];
   const v = d.vpnServers || {}, when = iso => (iso ? iso.slice(0, 16).replace('T', ' ') + ' UTC' : 'never');
   const lists = [['vpn server lists', v.error || 'refreshed every 6 hours'],
-    ...(v.providers || []).map(p => ['  ' + p.id, `${p.addresses} addresses, updated ${when(p.updated)}` + (p.stale ? ' (too old, not used)' : '') +
-      (p.error ? `; last try ${when(p.tried)} failed: ${p.error}` : '')])];
+    ...(v.providers || []).map(p => ['  ' + p.id, `${p.addresses} addresses (${p.latestList} on the latest list), updated ${when(p.updated)}` +
+      (p.stale ? ' (too old: none used)' : '') + (p.error ? `; last try ${when(p.tried)} failed: ${p.error}` : '')])];
   return kvText([['time', d.time.slice(0, 16).replace('T', ' ') + ' UTC'], ...part('ipinfo core', d.ipinfoCore), ...part('proxycheck.io', d.proxycheck), ...lists],
     ["Counts of ipterm's own upstream lookups (hours are UTC). Nothing about visitors."], o);
 }

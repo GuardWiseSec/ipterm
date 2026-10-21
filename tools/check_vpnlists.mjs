@@ -7,14 +7,15 @@
 // 1. Parsers: each provider's saved list gives the addresses it should, every one an entry (none of these lists names
 //    the addresses its users reach sites from), and skips what isn't a VPN entry: Mullvad's in-tunnel gateways, PIA's API
 //    proxies ("meta") and its signature line, IVPN servers with no hosts, private and documentation addresses, junk.
-// 2. The packed index: exact addresses only (never a neighbour), IPv6 in any spelling, an exit preferred over an entry,
-//    a provider whose list is older than VPN_MAX_AGE passed over, and a damaged blob refused.
+// 2. What is kept and found (mergeRecord, packIndex, unpackIndex, findServer): every address seen on a provider's list
+//    in the last VPN_MAX_AGE, with when it was last listed; exact addresses only (never a neighbour), IPv6 in any
+//    spelling, an exit preferred over an entry, an address listed too long ago passed over, and a damaged blob refused.
 // 3. The refresh (VpnServers.refresh, on a stand-in for the object's storage): one request per provider and no retries,
 //    with an ipterm user agent; a list that fails to download, isn't JSON, has fewer than the provider's minimum or is
-//    over its size cap leaves the last good list in place and says why; one that shrinks by more than half is held
-//    back once and taken when the next refresh agrees; lists older than VPN_MAX_AGE drop out of the blob; with none
-//    left, a lookup's request for the blob sets an alarm to refresh, at most once an hour; two refreshes at once share
-//    one set of requests; the cron trigger (scheduled) runs one.
+//    over its size cap changes nothing and says why; PIA's lists, which name other servers each time, add up; a short
+//    list removes nothing seen in the last 3 days; an address drops out 3 days after it was last listed, and with none
+//    left, so does the blob; then a lookup's request for the blob sets an alarm to refresh, at most once an hour; two
+//    refreshes at once share one set of requests; the cron trigger (scheduled) runs one.
 // 4. Lookups: the JSON (vpnServer), the text answer (/<ip>/text, with ?color=1), the IP page and the terminal's lookup
 //    (/api/lookup, vpnText in public/app.js, which must say the same) for a listed address, in IPv4 and in IPv6; a
 //    neighbour and an unlisted address unchanged; a bot gets the listing (it is free) and still spends no budget;
@@ -84,27 +85,39 @@ for (const [id, text, what] of [['mullvad', '{"not":"a list"}', 'an object inste
 }
 let threw = 0;
 for (const p of L.VPN_PROVIDERS) { try { p.parse('<html>busy</html>'); } catch { threw++; } }
-ok(threw === L.VPN_PROVIDERS.length, 'an HTML page instead of JSON is an error for every provider (the refresh keeps the last good list)');
+ok(threw === L.VPN_PROVIDERS.length, 'an HTML page instead of JSON is an error for every provider (the refresh then changes nothing)');
 ok(L.toRecord(P.pia.parse(fixture('pia').split('\n')[0])).four.length === counts.pia[0], "PIA's list reads the same without its signature lines");
 
-console.log('-- 2. the packed index (packIndex, unpackIndex, findServer)');
-const NOW = Date.parse('2026-10-21T12:00:00Z'), HOUR = 3600_000;
-const rec = id => L.toRecord(P[id].parse(fixture(id)));
-const exitRec = L.toRecord([['203.0.114.9', 'exit'], ['45.142.26.2', 'exit'], ['2a04:27c0:0:e::f001', 'exit']]);
-const lists = [{ id: 'mullvad', name: 'Mullvad', at: NOW - HOUR, rec: rec('mullvad') }, { id: 'pia', name: 'Private Internet Access', at: NOW - 2 * HOUR, rec: rec('pia') },
-  { id: 'old', name: 'OldVPN', at: NOW - L.VPN_MAX_AGE - HOUR, rec: L.toRecord([['5.6.7.8', 'exit']]) }, { id: 'ex', name: 'ExampleVPN', at: NOW, rec: exitRec }];
+console.log('-- 2. what is kept and found (mergeRecord, packIndex, unpackIndex, findServer)');
+const NOW = Date.parse('2026-10-21T12:00:00Z'), HOUR = 3600_000, iso = t => new Date(Math.floor(t / 1000) * 1000).toISOString();
+const one = list => L.toRecord(list.map(ip => [ip, 'entry']));
+const m1 = L.mergeRecord(null, one(['1.1.1.10', '1.1.1.11', '2a0f::1']), NOW - L.VPN_MAX_AGE - 2 * HOUR);
+const m2 = L.mergeRecord(m1, one(['1.1.1.11', '1.1.1.12']), NOW - L.VPN_MAX_AGE + HOUR);
+const m3 = L.mergeRecord(m2, null, NOW), m4 = L.mergeRecord(m2, L.toRecord([['1.1.1.12', 'exit']]), NOW);
+const seenOf = (r, n) => r.seen4[[...r.four].indexOf(n)];
+ok(m2.four.length === 3 && m2.role6.length === 1 && seenOf(m2, L.v4num('1.1.1.11')) === (NOW - L.VPN_MAX_AGE + HOUR) / 1000 &&
+  seenOf(m2, L.v4num('1.1.1.10')) === (NOW - L.VPN_MAX_AGE - 2 * HOUR) / 1000,
+  "a provider's next list adds to what is kept, and each address keeps when it was last listed");
+ok(m3.four.length === 2 && m3.role6.length === 0 && !([...m3.four].includes(L.v4num('1.1.1.10'))),
+  'a failed download (no list) only lets addresses expire: those last listed over VPN_MAX_AGE ago go');
+ok(m4.role4[[...m4.four].indexOf(L.v4num('1.1.1.12'))] === 0 && L.mergeRecord({ four: new Uint32Array([1]), role4: new Uint8Array([1]) }, null, NOW).four.length === 0,
+  "the latest list's role wins, and a stored record without dates counts for nothing");
+const rec = (id, t) => L.mergeRecord(null, L.toRecord(P[id].parse(fixture(id))), t);
+const exitRec = L.mergeRecord(null, L.toRecord([['203.0.114.9', 'exit'], ['45.142.26.2', 'exit'], ['2a04:27c0:0:e::f001', 'exit']]), NOW);
+const lists = [{ id: 'mullvad', name: 'Mullvad', at: NOW - HOUR, rec: rec('mullvad', NOW - HOUR) }, { id: 'pia', name: 'Private Internet Access', at: NOW - 2 * HOUR, rec: rec('pia', NOW - 2 * HOUR) },
+  { id: 'old', name: 'OldVPN', at: NOW - L.VPN_MAX_AGE - HOUR, rec: L.mergeRecord(null, L.toRecord([['5.6.7.8', 'exit']]), NOW - L.VPN_MAX_AGE - HOUR) }, { id: 'ex', name: 'ExampleVPN', at: NOW, rec: exitRec }];
 const blob = L.packIndex(lists, NOW), idx = L.unpackIndex(blob.slice(0));
 ok(idx.n4 === lists.reduce((n, l) => n + l.rec.four.length, 0) && idx.providers.length === 4 && idx.built === new Date(NOW).toISOString(),
   `${blob.byteLength} bytes for ${idx.n4} IPv4 and ${idx.n6} IPv6 addresses, with each provider's name and date`);
 const f = ip => L.findServer(idx, ip, NOW);
-ok(JSON.stringify(f('191.96.227.42')) === JSON.stringify({ provider: 'Private Internet Access', role: 'entry', list: new Date(NOW - 2 * HOUR).toISOString() }),
-  `an exact IPv4 match names the provider, the role and the list's date: ${JSON.stringify(f('191.96.227.42'))}`);
+ok(JSON.stringify(f('191.96.227.42')) === JSON.stringify({ provider: 'Private Internet Access', role: 'entry', seen: iso(NOW - 2 * HOUR) }),
+  `an exact IPv4 match names the provider, the role and when it was last listed: ${JSON.stringify(f('191.96.227.42'))}`);
 ok(!f('191.96.227.41') && !f('191.96.227.43') && !f('191.96.227.0') && !f('191.96.0.0'), 'its neighbours and its network are no match (exact addresses only)');
 ok(f('2a06:3040:10:610::f101') && f('2A06:3040:0010:0610:0000:0000:0000:F101') && f('2a06:3040:10:610:0:0:0:f101') && !f('2a06:3040:10:610::f102'),
   'IPv6 matches in any spelling, and only that address');
 ok(f('45.142.26.2').role === 'exit' && f('45.142.26.2').provider === 'ExampleVPN' && f('2a04:27c0:0:e::f001').role === 'exit' && f('103.139.178.63').provider === 'Mullvad',
   'an address two lists name: the exit wins over the entry');
-ok(!f('5.6.7.8') && L.findServer(idx, '5.6.7.8', NOW - L.VPN_MAX_AGE) !== null, 'a list older than VPN_MAX_AGE is passed over');
+ok(!f('5.6.7.8') && L.findServer(idx, '5.6.7.8', NOW - L.VPN_MAX_AGE) !== null, 'an address last listed more than VPN_MAX_AGE ago is passed over');
 ok(!f('8.8.8.8') && !f('not-an-ip') && !f('') && !L.findServer(null, '45.142.26.2', NOW), 'an unlisted address, junk, or no index: no match');
 const bad = new Uint8Array(blob.slice(0)); bad[0] = 0;
 let refused = 0;
@@ -225,7 +238,7 @@ let skew = 0;
 Date.now = () => realNow() + skew;
 const later = ms => { skew += ms; cache.clear(); };
 
-console.log('-- 3. the refresh: keeps the last good list (VpnServers in src/worker.js)');
+console.log('-- 3. the refresh: every address seen in the last 3 days (VpnServers in src/worker.js)');
 const T0 = Date.now();
 const full = { mullvad: gen.mullvad(300), pia: gen.pia(300), ivpn: gen.ivpn(300), airvpn: gen.airvpn(300) };
 serve = { ...full };
@@ -233,7 +246,7 @@ calls.length = 0;
 let meta = await vs.refresh(T0);
 ok(lists0().length === 4 && new Set(lists0().map(c => c[1])).size === 4, `one request per provider, no more: ${lists0().map(c => c[1]).join(', ')}`);
 ok(lists0().every(c => c[2].startsWith('ipterm (https://github.com/GuardWiseSec/ipterm)')), `with ipterm's user agent: ${JSON.stringify(lists0()[0][2])}`);
-ok(Object.keys(P).every(id => meta[id].at === new Date(T0).toISOString() && meta[id].n4 + meta[id].n6 === size(id, full[id]) && !meta[id].error),
+ok(Object.keys(P).every(id => meta[id].at === new Date(T0).toISOString() && meta[id].n4 + meta[id].n6 === size(id, full[id]) && meta[id].listed === size(id, full[id]) && !meta[id].error),
   'each list kept, dated, counted: ' + Object.keys(P).map(id => `${id} ${meta[id].n4 + meta[id].n6}`).join(', '));
 let idx2 = L.unpackIndex(await vs.blob(T0));
 ok(L.findServer(idx2, '45.142.26.2', T0).provider === 'Mullvad' && L.findServer(idx2, '149.22.83.100', T0).provider === 'IVPN' &&
@@ -249,32 +262,37 @@ serve = {
 calls.length = 0;
 meta = await vs.refresh(T0 + 6 * HOUR);
 const kept = id => meta[id].at === new Date(T0).toISOString() && meta[id].n4 + meta[id].n6 === size(id, full[id]) && meta[id].tried === new Date(T0 + 6 * HOUR).toISOString();
-ok(lists0().length === 4 && Object.keys(P).every(kept), 'a failed refresh keeps every last good list, and notes the try');
+ok(lists0().length === 4 && Object.keys(P).every(kept), 'a failed refresh keeps every address, and notes the try');
 ok(/HTTP 503/.test(meta.mullvad.error) && /JSON|Unexpected/i.test(meta.pia.error) && /only 1 addresses \(at least 20 expected\)/.test(meta.ivpn.error) && /too large/.test(meta.airvpn.error),
   `and says why: ${Object.keys(P).map(id => `${id}: ${meta[id].error}`).join('; ')}`);
 idx2 = L.unpackIndex(await vs.blob(T0 + 6 * HOUR));
 ok(idx2.providers.map(p => p.n4 + p.n6).join() === Object.keys(P).map(id => size(id, full[id])).join() && L.findServer(idx2, '45.142.26.2', T0 + 6 * HOUR),
-  'the blob still holds every last good list');
+  'the blob still holds them all');
 
-serve = { ...full, airvpn: gen.airvpn(100) };
+serve = { ...full, pia: gen.pia(300, 1), airvpn: gen.airvpn(100) };
 meta = await vs.refresh(T0 + 12 * HOUR);
-const small = size('airvpn', gen.airvpn(100));
-ok(meta.airvpn.held === small && /down from/.test(meta.airvpn.error) && meta.airvpn.at === new Date(T0).toISOString() &&
-  L.unpackIndex(await vs.blob(T0 + 12 * HOUR)).providers.find(p => p.id === 'airvpn').n4 === L.toRecord(P.airvpn.parse(full.airvpn)).four.length,
-  `a list that shrank by more than half (${small} after ${size('airvpn', full.airvpn)}) is held back, the last good one kept: ${meta.airvpn.error}`);
-ok(Object.keys(P).filter(id => id !== 'airvpn').every(id => meta[id].at === new Date(T0 + 12 * HOUR).toISOString() && !meta[id].error),
-  "... while the others' fresh lists are taken");
-serve = { ...full, airvpn: gen.airvpn(104, 1) };
+idx2 = L.unpackIndex(await vs.blob(T0 + 12 * HOUR));
+ok(meta.pia.n4 === size('pia', full.pia) + 300 && meta.pia.listed === size('pia', gen.pia(300, 1)) &&
+  L.findServer(idx2, '102.100.0.44', T0 + 12 * HOUR) && L.findServer(idx2, '102.101.0.44', T0 + 12 * HOUR),
+  `PIA's list names other servers each time: both lists' addresses are kept (${meta.pia.n4} after two lists of ${meta.pia.listed})`);
+ok(meta.airvpn.at === new Date(T0 + 12 * HOUR).toISOString() && !meta.airvpn.error && meta.airvpn.listed === size('airvpn', gen.airvpn(100)) &&
+  meta.airvpn.n4 + meta.airvpn.n6 === size('airvpn', full.airvpn) && L.findServer(idx2, '185.100.1.40', T0 + 12 * HOUR),
+  `a short list (${meta.airvpn.listed} after ${size('airvpn', full.airvpn)}) is taken, but removes nothing seen in the last 3 days`);
+serve = { ...full, pia: gen.pia(300, 2), airvpn: gen.airvpn(104, 1) };
 meta = await vs.refresh(T0 + 18 * HOUR);
-ok(meta.airvpn.at === new Date(T0 + 18 * HOUR).toISOString() && !meta.airvpn.error && meta.airvpn.held == null &&
-  L.findServer(L.unpackIndex(await vs.blob(T0 + 18 * HOUR)), '185.101.0.7', T0 + 18 * HOUR) && !L.findServer(L.unpackIndex(await vs.blob(T0 + 18 * HOUR)), '185.100.0.250', T0 + 18 * HOUR),
-  'the next refresh brings about the same number again: the smaller list is taken (a provider that really shrank)');
 
 serve = Object.fromEntries(Object.keys(P).map(id => [id, () => { throw new TypeError('network connection lost'); }]));
+const TX = T0 + L.VPN_MAX_AGE + HOUR;
+meta = await vs.refresh(TX);
+const fx = ip => L.findServer(L.unpackIndex(blobX), ip, TX), blobX = await vs.blob(TX);
+ok(Object.keys(P).every(id => /network connection lost/.test(meta[id].error)) && !fx('185.100.1.40') && fx('185.100.0.7') && fx('185.101.0.7') &&
+  !fx('102.100.0.44') && fx('102.101.0.44') && fx('102.102.0.44') && fx('45.142.26.2') && meta.pia.n4 === size('pia', full.pia) + 300,
+  'an address drops out 3 days after it was last listed (AirVPN\'s that the short list left out, PIA\'s from the first list), the rest stay');
+ok(fx('102.101.0.44').seen === new Date(Math.floor((T0 + 12 * HOUR) / 1000) * 1000).toISOString(), `and a match says when it was last listed: ${fx('102.101.0.44').seen}`);
 const T4 = T0 + 18 * HOUR + L.VPN_MAX_AGE + HOUR;
 meta = await vs.refresh(T4);
-ok(Object.keys(P).every(id => /network connection lost/.test(meta[id].error)) && (await storage.get('blob')) === undefined,
-  'lists that keep failing until they are VPN_MAX_AGE old drop out: no blob is left, so lookups find nothing');
+ok(Object.keys(P).every(id => meta[id].n4 + meta[id].n6 === 0) && (await storage.get('blob')) === undefined,
+  'once nothing has been listed for 3 days, no blob is left, so lookups find nothing');
 const alarms = storage.alarms;
 ok((await vs.blob(T4 + 10 * 60_000)) === null && storage.alarms === alarms, 'with no blob, a lookup asking within the hour of the last try starts nothing');
 await vs.blob(T4 + 2 * HOUR); await vs.blob(T4 + 2 * HOUR + 1);
@@ -324,8 +342,8 @@ console.log('-- 4. lookups: the verdict (withPrivacy, vpnText in src/worker.js a
 env.VPN_SERVERS = binding;
 const MV = '45.142.26.2', MV6 = '2a04:27c0:0:e::f001';
 const j = await run(`/${MV}/json`, { ua: CURL, accept: '*/*' }), d = j.data || {};
-const listedAt = (await vs.status()).mullvad.at;
-ok(j.status === 200 && JSON.stringify(d.vpnServer) === JSON.stringify({ provider: 'Mullvad', role: 'entry', listUpdated: listedAt }) && d.source === 'ipinfo-core' &&
+const seenAt = iso(Date.parse((await vs.status()).mullvad.at));
+ok(j.status === 200 && JSON.stringify(d.vpnServer) === JSON.stringify({ provider: 'Mullvad', role: 'entry', lastSeen: seenAt }) && d.source === 'ipinfo-core' &&
   d.privacy && j.kinds.includes('proxycheck'),
   `curl /${MV}/json: vpnServer ${JSON.stringify(d.vpnServer)}; an entry still gets proxycheck.io's opinion (${d.privacy ? 'asked' : 'not asked'})`);
 const t = await run(`/${MV}/text`, { ua: CURL, accept: '*/*' });
@@ -376,8 +394,8 @@ L.VPN_PROVIDERS.pop(); extra = null;
 
 const st = await run('/status?format=text', { ua: CURL, accept: '*/*', 'x-status-key': env.STATUS_KEY });
 const sj = await run('/status', { ua: CURL, accept: '*/*', 'x-status-key': env.STATUS_KEY }), sv = (sj.data || {}).vpnServers || {};
-ok(Array.isArray(sv.providers) && sv.providers.map(p => p.id).join() === 'mullvad,pia,ivpn,airvpn' && sv.providers.every(p => p.addresses > 0 && p.updated && !p.stale) &&
-  /^ {2}mullvad +\d+ addresses, updated \d{4}-\d\d-\d\d \d\d:\d\d UTC$/m.test(st.body),
+ok(Array.isArray(sv.providers) && sv.providers.map(p => p.id).join() === 'mullvad,pia,ivpn,airvpn' && sv.providers.every(p => p.addresses > 0 && p.latestList > 0 && p.updated && !p.stale) &&
+  /^ {2}mullvad +\d+ addresses \(\d+ on the latest list\), updated \d{4}-\d\d-\d\d \d\d:\d\d UTC$/m.test(st.body),
   `/status shows each list: ${sv.providers ? sv.providers.map(p => `${p.id} ${p.addresses}`).join(', ') : 'nothing'}; text ${JSON.stringify((/^ {2}mullvad.*$/m.exec(st.body) || [''])[0])}`);
 
 delete env.VPN_SERVERS;

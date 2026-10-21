@@ -1,7 +1,8 @@
 // Known commercial VPN servers, from the server lists the VPN providers publish themselves: no third-party list, and
 // nobody hand-feeds addresses. The VpnServers Durable Object in src/worker.js downloads them on a cron trigger
-// (wrangler.toml [triggers]), keeps each provider's last good list when a download fails or looks broken, and packs
-// them into one blob of sorted addresses (packIndex) that every lookup searches by exact address (findServer).
+// (wrangler.toml [triggers]) and keeps every address seen on a provider's list in the last 3 days (mergeRecord), so a
+// download that fails or looks broken changes nothing. It packs them into one blob of sorted addresses (packIndex)
+// that every lookup searches by exact address (findServer).
 // Pure functions only, no Cloudflare APIs: tools/check_vpnlists.mjs runs them in Node on saved copies of each list.
 //
 // Each listed address has a role:
@@ -11,7 +12,7 @@
 //          name. It is still that provider's server, so a visitor whose own address it is, is on it (leaktest).
 // An address a list doesn't give, or gives in a form that is not a public IPv4 or global IPv6 address, is skipped.
 
-export const VPN_MAX_AGE = 3 * 86400_000;      // a provider's last good list older than this is no longer used
+export const VPN_MAX_AGE = 3 * 86400_000;      // an address not on its provider's list for this long is dropped
 export const VPN_FETCH_TIMEOUT = 20_000;       // per list; the next cron run tries again (no retries in between)
 
 // The providers, in the order lookups prefer when two lists name one address. url: one request per refresh.
@@ -101,7 +102,7 @@ function publicV4(n) {
 }
 const globalV6 = w => w[0] >>> 29 === 1 && w[0] !== 0x20010db8;      // 2000::/3, but not 2001:db8::/32
 
-// A provider's parsed [address, role] pairs as its stored record: each address once (exit wins over entry), sorted,
+// A provider's parsed [address, role] pairs as one downloaded list: each address once (exit wins over entry), sorted,
 // in typed arrays. role arrays: 0 = exit, 1 = entry.
 export function toRecord(pairs) {
   const four = new Map(), six = new Map();
@@ -122,18 +123,44 @@ export function toRecord(pairs) {
 }
 const cmp6 = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3];
 
+// A provider's addresses as kept: every address on any of its lists within VPN_MAX_AGE, each with the time (Unix
+// seconds) it was last on one (seen4, seen6). fresh: the list just downloaded (toRecord), or null when that download
+// failed or didn't pass, which only lets old addresses expire. So a failed or short download removes nothing seen
+// lately (the last good list stays), and a list that names a different part of the servers each time (PIA's changes
+// every few minutes) adds up to far more of them than any one download.
+export function mergeRecord(old, fresh, now) {
+  const t = Math.floor(now / 1000), oldest = t - VPN_MAX_AGE / 1000;
+  const four = new Map(), six = new Map();
+  if (old && old.seen4 && old.seen6) {
+    old.four.forEach((n, i) => { if (old.seen4[i] >= oldest) four.set(n, [old.role4[i], old.seen4[i]]); });
+    for (let i = 0; i < old.role6.length; i++) if (old.seen6[i] >= oldest) six.set(old.six.subarray(i * 4, i * 4 + 4).join(','), [old.role6[i], old.seen6[i]]);
+  }
+  if (fresh) {
+    fresh.four.forEach((n, i) => four.set(n, [fresh.role4[i], t]));
+    for (let i = 0; i < fresh.role6.length; i++) six.set(fresh.six.subarray(i * 4, i * 4 + 4).join(','), [fresh.role6[i], t]);
+  }
+  const f = [...four.keys()].sort((a, b) => a - b), s = [...six.keys()].map(k => k.split(',').map(Number)).sort(cmp6);
+  const at6 = s.map(w => six.get(w.join(',')));
+  return {
+    four: Uint32Array.from(f), role4: Uint8Array.from(f.map(n => four.get(n)[0])), seen4: Uint32Array.from(f.map(n => four.get(n)[1])),
+    six: Uint32Array.from(s.flat()), role6: Uint8Array.from(at6.map(e => e[0])), seen6: Uint32Array.from(at6.map(e => e[1])),
+  };
+}
+
 /* ---------- the packed index ----------
    One ArrayBuffer, the same in the Durable Object, the Cache API and each Worker's memory:
-     "VPN1", header length (uint32), header JSON { built, providers: [{ id, name, at, n4, n6 }], n4, n6 }, padding to 4
-     IPv4 addresses (n4 x uint32, sorted), IPv6 addresses (n6 x 4 uint32, sorted), then one tag byte per address
-     (provider number x 2, + 1 for an entry), IPv4 first.
-   The numbers are little-endian, as Workers and Node write them. 15,000 addresses come to about 100 KB. */
+     "VPN2", header length (uint32), header JSON { built, providers: [{ id, name, at, n4, n6 }], n4, n6 }, padding to 4,
+     IPv4 addresses (n4 x uint32, sorted), IPv6 addresses (n6 x 4 uint32, sorted), when each was last listed (n4 + n6
+     x uint32, Unix seconds), then one tag byte per address (provider number x 2, + 1 for an entry), IPv4 first.
+   The numbers are little-endian, as Workers and Node write them. 9 bytes per IPv4 address and 21 per IPv6: about 70 KB
+   for October 2026's lists, as PIA's add up. A SQLite-backed Durable Object takes 2 MB per value. */
 export function packIndex(lists, built) {
-  // lists: [{ id, name, at, rec }] in provider order. Merged and sorted, a provider's number in its tag.
+  // lists: [{ id, name, at, rec }] in provider order, rec as mergeRecord makes it. Merged and sorted, with each
+  // provider's number in the tag.
   const four = [], six = [];
   lists.forEach(({ rec }, p) => {
-    rec.four.forEach((n, i) => four.push([n, p * 2 + rec.role4[i]]));
-    for (let i = 0; i < rec.role6.length; i++) six.push([...rec.six.subarray(i * 4, i * 4 + 4), p * 2 + rec.role6[i]]);
+    rec.four.forEach((n, i) => four.push([n, p * 2 + rec.role4[i], rec.seen4[i]]));
+    for (let i = 0; i < rec.role6.length; i++) six.push([...rec.six.subarray(i * 4, i * 4 + 4), p * 2 + rec.role6[i], rec.seen6[i]]);
   });
   four.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   six.sort((a, b) => cmp6(a, b) || a[4] - b[4]);
@@ -142,14 +169,16 @@ export function packIndex(lists, built) {
     providers: lists.map(({ id, name, at, rec }) => ({ id, name, at: new Date(at).toISOString(), n4: rec.four.length, n6: rec.role6.length })),
   }));
   const start = 8 + head.length + ((4 - (head.length % 4)) % 4);
-  const buf = new ArrayBuffer(start + four.length * 4 + six.length * 16 + four.length + six.length);
+  const buf = new ArrayBuffer(start + four.length * 9 + six.length * 21);
   const dv = new DataView(buf);
-  new Uint8Array(buf).set([86, 80, 78, 49]);           // VPN1
+  new Uint8Array(buf).set([86, 80, 78, 50]);           // VPN2
   dv.setUint32(4, head.length, true);
   new Uint8Array(buf, 8, head.length).set(head);
   let o = start;
   for (const [n] of four) { dv.setUint32(o, n, true); o += 4; }
   for (const w of six) for (let i = 0; i < 4; i++) { dv.setUint32(o, w[i], true); o += 4; }
+  for (const x of four) { dv.setUint32(o, x[2], true); o += 4; }
+  for (const x of six) { dv.setUint32(o, x[5], true); o += 4; }
   for (const x of four) dv.setUint8(o++, x[1]);
   for (const x of six) dv.setUint8(o++, x[4]);
   return buf;
@@ -157,21 +186,23 @@ export function packIndex(lists, built) {
 
 export function unpackIndex(buf) {
   const u8 = new Uint8Array(buf);
-  if (u8.length < 8 || String.fromCharCode(...u8.subarray(0, 4)) !== 'VPN1') throw new Error('not a VPN server index');
+  if (u8.length < 8 || String.fromCharCode(...u8.subarray(0, 4)) !== 'VPN2') throw new Error('not a VPN server index');
   const dv = new DataView(buf), hl = dv.getUint32(4, true);
   const head = JSON.parse(new TextDecoder().decode(u8.subarray(8, 8 + hl)));
   const start = 8 + hl + ((4 - (hl % 4)) % 4), n4 = head.n4 >>> 0, n6 = head.n6 >>> 0;
-  if (buf.byteLength !== start + n4 * 4 + n6 * 16 + n4 + n6) throw new Error('VPN server index has the wrong length');
-  const four = new Uint32Array(n4), six = new Uint32Array(n6 * 4);
-  for (let i = 0, o = start; i < n4; i++, o += 4) four[i] = dv.getUint32(o, true);
-  for (let i = 0, o = start + n4 * 4; i < n6 * 4; i++, o += 4) six[i] = dv.getUint32(o, true);
-  const tags = start + n4 * 4 + n6 * 16;
-  return { ...head, four, six, tag4: u8.slice(tags, tags + n4), tag6: u8.slice(tags + n4, tags + n4 + n6) };
+  if (buf.byteLength !== start + n4 * 9 + n6 * 21 || !Array.isArray(head.providers)) throw new Error('VPN server index has the wrong length');
+  const words = (o, n) => { const a = new Uint32Array(n); for (let i = 0; i < n; i++) a[i] = dv.getUint32(o + i * 4, true); return a; };
+  const tags = start + (n4 + n6) * 4 + n4 * 4 + n6 * 16;
+  return {
+    ...head, four: words(start, n4), six: words(start + n4 * 4, n6 * 4),
+    seen4: words(start + n4 * 4 + n6 * 16, n4), seen6: words(start + n4 * 8 + n6 * 16, n6),
+    tag4: u8.slice(tags, tags + n4), tag6: u8.slice(tags + n4, tags + n4 + n6),
+  };
 }
 
-// The listing for one address (a string), or null: { provider, role, list }. Exact address only, never its network.
-// A provider whose list is older than VPN_MAX_AGE at `now` is passed over, and when two lists name the address, an
-// exit beats an entry, then the provider listed first.
+// The listing for one address (a string), or null: { provider, role, seen } (seen: when it was last on that
+// provider's list, as an ISO date). Exact address only, never its network. A listing older than VPN_MAX_AGE at `now`
+// is passed over, and when two lists name the address, an exit beats an entry, then the provider listed first.
 export function findServer(idx, ip, now) {
   if (!idx || typeof ip !== 'string') return null;
   const hits = [];
@@ -179,17 +210,17 @@ export function findServer(idx, ip, now) {
   if (n != null) {
     let lo = 0, hi = idx.four.length;
     while (lo < hi) { const m = (lo + hi) >>> 1; if (idx.four[m] < n) lo = m + 1; else hi = m; }
-    for (let i = lo; i < idx.four.length && idx.four[i] === n; i++) hits.push(idx.tag4[i]);
+    for (let i = lo; i < idx.four.length && idx.four[i] === n; i++) hits.push([idx.tag4[i], idx.seen4[i]]);
   } else {
     const w = v6words(ip.trim().toLowerCase());
     if (!w) return null;
     const at = i => idx.six.subarray(i * 4, i * 4 + 4);
     let lo = 0, hi = idx.tag6.length;
     while (lo < hi) { const m = (lo + hi) >>> 1; if (cmp6(at(m), w) < 0) lo = m + 1; else hi = m; }
-    for (let i = lo; i < idx.tag6.length && cmp6(at(i), w) === 0; i++) hits.push(idx.tag6[i]);
+    for (let i = lo; i < idx.tag6.length && cmp6(at(i), w) === 0; i++) hits.push([idx.tag6[i], idx.seen6[i]]);
   }
-  const fresh = hits.filter(t => { const p = idx.providers[t >> 1]; return p && now - Date.parse(p.at) <= VPN_MAX_AGE; });
+  const fresh = hits.filter(([t, seen]) => idx.providers[t >> 1] && now - seen * 1000 <= VPN_MAX_AGE);
   if (!fresh.length) return null;
-  const t = fresh.sort((a, b) => (a & 1) - (b & 1) || a - b)[0], p = idx.providers[t >> 1];
-  return { provider: p.name, role: t & 1 ? 'entry' : 'exit', list: p.at };
+  const [t, seen] = fresh.sort((a, b) => (a[0] & 1) - (b[0] & 1) || a[0] - b[0])[0];
+  return { provider: idx.providers[t >> 1].name, role: t & 1 ? 'entry' : 'exit', seen: new Date(seen * 1000).toISOString() };
 }
