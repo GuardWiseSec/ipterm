@@ -492,7 +492,7 @@ const edges = [
   ['172.224.226.46', false, 'the next address'], ['172.224.225.255', false, 'the address before the first'],
   ['172.225.7.16', true, 'a /32'], ['172.225.7.18', true, 'the last of three adjacent /32s'], ['172.225.7.15', false, 'just below them'], ['172.225.7.19', false, 'just above them'],
   ['172.225.76.255', true, 'the last address of two adjacent /24s'], ['172.225.77.0', false, 'the next /24'], ['172.225.74.255', false, 'the /24 before'],
-  ['172.226.1.7', true, 'a line ending in CRLF'],
+  ['172.226.1.7', true, "the saved list's last line"],
   ['2606:54c0::', true, 'the first address of three adjacent IPv6 /45s'], ['2606:54c0:17:ffff:ffff:ffff:ffff:ffff', true, 'their last address'],
   ['2606:54c0:18::', false, 'the next /64'], ['2606:54bf:ffff:ffff:ffff:ffff:ffff:ffff', false, 'the address before the first'],
   ['2a02:26f7:b000:4000::', true, "an isolated /64's first address"], ['2A02:26F7:B000:4000:FFFF:FFFF:FFFF:FFFF', true, 'its last address, in capitals'],
@@ -506,6 +506,8 @@ const wrongEdges = edges.filter(([ip, want]) => rf(ip) !== want);
 ok(!wrongEdges.length, `range edges in IPv4 and IPv6 (${edges.length} addresses): ` + (wrongEdges.length ? 'wrong: ' + wrongEdges.map(e => `${e[0]} (${e[2]})`).join(', ')
   : 'first and last addresses in, their neighbours out, adjacent ranges merged, also across a 32-bit word'));
 ok(A.findRelay(ri, '172.224.226.0', NOW + L.VPN_MAX_AGE) && !A.findRelay(ri, '172.224.226.0', NOW + L.VPN_MAX_AGE + 1), 'a copy of the list 3 days old (VPN_MAX_AGE) is not used');
+const crlf = A.parseRelay('172.226.1.0/24,US,US-CA,San Jose,' + String.fromCharCode(13, 10) + '2a02:26f7:c000::/48,US,,,' + String.fromCharCode(13, 10));
+ok(crlf.count === 2 && crlf.four[0][1] === L.v4num('172.226.1.255') && crlf.six.length === 1, 'lines ending in CRLF read the same (a Windows copy of the list)');
 const rs1 = A.unpackRelay(A.restampRelay(A.packRelay(rr, NOW), NOW + HOUR));
 ok(rs1.at === new Date(NOW + HOUR).toISOString() && rs1.count === 20 && [...rs1.first6].join() === [...ri.first6].join() && [...rs1.last4].join() === [...ri.last4].join(),
   'restampRelay (after a 304) keeps every range and changes only the date');
