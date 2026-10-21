@@ -355,8 +355,10 @@ const vpnLine = body => (/^vpn \/ proxy +(.*)$/m.exec(body) || [])[1];
 const dd = body => (/<dt>vpn \/ proxy<\/dt><dd>([^<]*)<\/dd>/.exec(body) || [])[1];
 const unesc = s => String(s).replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&');
 const V = Function(slice(app, '  const pcKnown =', "  // A lookup's block") + 'return { vpnText, listedText };')();
-const ENTRY = p => `yes: a known VPN server (on ${p}'s own server list, as an address its users connect to; sites may see them at a different address)`;
-const EXIT = p => `yes: a known VPN server (on ${p}'s own server list, as an address its users reach sites from)`;
+// The owner's wording: the provider first ("a known Mullvad VPN server"), and a name with VPN in it just "server".
+const lab = p => (/vpn/i.test(p) ? `${p} server` : `${p} VPN server`);
+const ENTRY = p => `yes: a known ${lab(p)} (on ${p}'s own server list, as an address its users connect to; sites may see them at a different address)`;
+const EXIT = p => `yes: a known ${lab(p)} (on ${p}'s own server list, as an address its users reach sites from)`;
 
 console.log('-- 4. lookups: the verdict (withPrivacy, vpnText in src/worker.js and public/app.js)');
 env.VPN_SERVERS = binding;
@@ -370,7 +372,7 @@ const t = await run(`/${MV}/text`, { ua: CURL, accept: '*/*' });
 ok(vpnLine(t.body) === ENTRY('Mullvad') && /^source +IPinfo Core \+ proxycheck\.io \+ Mullvad's server list$/m.test(t.body),
   `curl /${MV}/text: ${JSON.stringify(vpnLine(t.body))}, and the source line names the list`);
 const c = await run(`/${MV}/text?color=1`, { ua: CURL, accept: '*/*' });
-ok(c.body.includes("\x1b[1;33myes\x1b[0m: a known VPN server (on Mullvad's own server list"), '... and with ?color=1 its "yes" is bold yellow, as a known VPN address was');
+ok(c.body.includes("\x1b[1;33myes\x1b[0m: a known Mullvad VPN server (on Mullvad's own server list"), '... and with ?color=1 its "yes" is bold yellow, as a known VPN address was');
 const pg = await run(`/${MV}`, { ua: CHROME, ...NAV });
 ok(unesc(dd(pg.body)) === ENTRY('Mullvad'), `the IP page: ${JSON.stringify(unesc(dd(pg.body)))}`);
 const t6 = await run(`/${MV6}/text`, { ua: CURL, accept: '*/*' }), pg6 = await run(`/${MV6}`, { ua: CHROME, ...NAV }), tl4 = await run(`/api/lookup?ip=${MV}`, { ua: CHROME, ...TERMINAL });
@@ -410,6 +412,10 @@ const ex = await run('/203.0.114.10/text', { ua: CURL, accept: '*/*' }), exj = a
 ok(vpnLine(ex.body) === EXIT('ExampleVPN') && !ex.kinds.includes('proxycheck') && exj.data && exj.data.vpnServer && exj.data.vpnServer.role === 'exit' &&
   !exj.data.privacy && V.vpnText(exj.data) === EXIT('ExampleVPN'),
   `a listed exit: ${JSON.stringify(vpnLine(ex.body))}, and no proxycheck.io query (requests ${JSON.stringify(ex.kinds)})`);
+ok(V.vpnText({ source: 'ipinfo-lite', vpnServer: { provider: 'IVPN', role: 'entry' } }).startsWith("yes: a known IVPN server (on IVPN's own server list") &&
+  V.vpnText({ source: 'ipinfo-lite', vpnServer: { provider: 'AirVPN', role: 'entry' } }).startsWith('yes: a known AirVPN server (') &&
+  V.vpnText({ source: 'ipinfo-lite', vpnServer: { provider: 'Private Internet Access', role: 'entry' } }).startsWith('yes: a known Private Internet Access VPN server ('),
+  'the provider comes first (the owner\'s wording), and a name that already says VPN gets just "server": IVPN, AirVPN, Private Internet Access VPN');
 ok(V.vpnText({ source: 'ipinfo-core', flags: { anonymous: true }, vpnServer: { provider: 'Mullvad', role: 'entry' } }) === 'yes: a known VPN, proxy or Tor address' &&
   V.vpnText({ source: 'ipinfo-core', flags: { anonymous: true }, vpnServer: { provider: 'ExampleVPN', role: 'exit' } }) === EXIT('ExampleVPN') &&
   V.vpnText({ source: 'ipinfo-lite', vpnServer: { provider: 'Mullvad', role: 'entry' } }) === ENTRY('Mullvad') &&
@@ -469,16 +475,16 @@ ok(listedRun.vpn && listedRun.anon && listedRun.vpnKnown && !listedRun.homeNet &
   'a visitor whose address a provider lists is on a VPN (even an entry address on a home-ISP network, or with IPinfo Lite only); an unlisted home address is not');
 ok(app.includes('    const offer = vpnKnown && !vpn && !vpnSeen;') && app.includes("    if (offer) await sponsor('check');"),
   'the sponsored line still needs a check that ran and found no VPN (offer = vpnKnown && !vpn && !vpnSeen), which a listing never is');
-ok(app.includes("else if (listed) add('vpn', 'ok', 'VPN detection', `your IP is a known VPN server (on ${listed.provider}'s own server list): sites see that, not your provider`") &&
+ok(app.includes("else if (listed) add('vpn', 'ok', 'VPN detection', `your IP is a known ${vpnLabel(listed.provider)} (on ${listed.provider}'s own server list): sites see that, not your provider`") &&
   app.includes("pc && pc.operator, listed && listed.provider, ...placeTerms(otherInfo)"),
   "leaktest's VPN line names the list, and its copied Markdown hides the provider's name with the visitor's other details");
 
 const MD = Function(slice(app, '  const reEsc =', '  function markdown(') + 'return { termRe, mdTerms };')();
 const hid = L.VPN_PROVIDERS.map(p => p.name).map(name => {
-  const line = `your IP is a known VPN server (on ${name}'s own server list): sites see that, not your provider`;
-  return MD.mdTerms(['Example ISP', name]).map(MD.termRe).reduce((t, re) => t.replace(re, '[hidden]'), line);
-});
-ok(hid.every(t => t === "your IP is a known VPN server (on [hidden]'s own server list): sites see that, not your provider"),
+  const line = `your IP is a known ${lab(name)} (on ${name}'s own server list): sites see that, not your provider`;
+  return [line.split(name).join('[hidden]'), MD.mdTerms(['Example ISP', name]).map(MD.termRe).reduce((t, re) => t.replace(re, '[hidden]'), line)];
+}).map(([want, got]) => (want === got ? got : 'MISMATCH ' + got));
+ok(hid.every(t => !t.startsWith('MISMATCH')) && hid[0] === "your IP is a known [hidden] VPN server (on [hidden]'s own server list): sites see that, not your provider",
   `the copied Markdown's own masking (termRe, mdTerms in public/app.js) hides every provider's name in that line: ${JSON.stringify(hid[1])}`);
 
 console.log("-- 6. iCloud Private Relay: Apple's own list of its relays' addresses (src/relay-list.js, refreshRelay in src/worker.js)");
@@ -606,7 +612,7 @@ const rv = decide(null, { network: relayNet }, pcKnown, { asn: 'AS13335', relay:
 const rv2 = decide(null, { network: relayNet }, pcKnown, { asn: 'AS7922' });
 ok(rv.relay && rv.vpn && rv.anon && rv.vpnKnown && rv.otherRelay && rv2.vpn && !rv2.otherRelay,
   "a visitor on Apple's list is on a relay (vpn and vpnKnown true, so no sponsored line); their other IP version counts as relayed only when Apple lists it too");
-ok(app.includes("else if (relay) add('vpn', 'ok', 'VPN detection', \"you're on Apple's iCloud Private Relay (your IP is on Apple's own list of its relay addresses): sites see Apple's address, not yours. It covers Safari, not your other apps\"") &&
+ok(app.includes("else if (relay) add('vpn', 'ok', 'VPN detection', \"you're on Apple's iCloud Private Relay (your IP is on Apple's own list of its relay addresses): sites see Apple's address, not your provider's. It covers Safari only\"") &&
   app.includes("relay ? 'relay on' : vpn ? 'vpn on'") && app.includes("(g.kind === 'other' && !tor && !relay)") && app.includes("else if (otherRelay) add('ipv6', 'ok', otherV") &&
   app.includes("const offer = vpnKnown && !vpn && !vpnSeen;"),
   "leaktest names it (tag \"relay on\"), lets the relay pick the DNS resolver as a Tor exit does, accepts the other IP version through the relay, and the sponsored line's rule is unchanged");

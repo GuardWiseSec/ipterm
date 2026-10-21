@@ -153,9 +153,9 @@ The verdict on the **vpn / proxy** line combines these with the VPN providers' o
 | What the sources say | The line says |
 | --- | --- |
 | Apple's iCloud Private Relay list has it (see "iCloud Private Relay") | `yes: Apple's iCloud Private Relay (on Apple's own list of its relay addresses: sites see Apple's address, not the user's)` |
-| A VPN provider's own list names the address as one its users reach sites from (none of the lists does today) | `yes: a known VPN server (on Mullvad's own server list, as an address its users reach sites from)` |
+| A VPN provider's own list names the address as one its users reach sites from (none of the lists does today) | `yes: a known Mullvad VPN server (on Mullvad's own server list, as an address its users reach sites from)` |
 | Core flags it, or proxycheck.io finds a VPN, proxy or Tor exit, or names the service | `yes: a known VPN address (Proton VPN)` (or proxy, Tor, or "VPN, proxy or Tor" when it isn't specific) |
-| A VPN provider's own list names the address as one its users connect to, an entry (even when Core and proxycheck.io weren't asked) | `yes: a known VPN server (on Mullvad's own server list, as an address its users connect to; sites may see them at a different address)` |
+| A VPN provider's own list names the address as one its users connect to, an entry (even when Core and proxycheck.io weren't asked) | `yes: a known Mullvad VPN server (on Mullvad's own server list, as an address its users connect to; sites may see them at a different address)`; a name that already says VPN gets just "server" (`a known IVPN server`, `a known AirVPN server`) |
 | proxycheck.io's `anonymous` flag alone, with no VPN, proxy, Tor or service name | `not a known VPN, proxy or Tor service (proxycheck.io sets its catch-all "anonymous" flag, which it also gives public DNS and CDN addresses)` |
 | proxycheck.io's `compromised` flag alone (seen performing attacks) | `flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service` |
 | Neither flags it | `not on known VPN or proxy lists`, plus the hosting-network note or the "not a guarantee" note |
@@ -194,14 +194,15 @@ an entry: the provider's users connect to it, and the list doesn't say that site
 document separate exit addresses (for AirVPN, none of its 250 servers' exit addresses is one of its entries), PIA's
 own code says its listed address is not necessarily the exit, and IVPN doesn't say. So:
 
-- A lookup of a listed address says `yes: a known VPN server (on Mullvad's own server list, as an address its users
-  connect to; sites may see them at a different address)`. That answers "is this address a VPN?" for the
+- A lookup of a listed address says `yes: a known Mullvad VPN server (on Mullvad's own server list, as an address its
+  users connect to; sites may see them at a different address)`: the provider first, as the owner chose, in the text
+  and in the JSON (`vpnServer.provider`). That answers "is this address a VPN?" for the
   address itself, and "what are these connections my firewall sees?", but it doesn't make the addresses VPN users
   browse from easier to spot: those are still for IPinfo Core and proxycheck.io to judge, and the line keeps their
   "yes" first when they have one.
 - In `leaktest`, the visitor's own address on a list means they are on that provider's server, whatever the address
-  is for others: the VPN line says `your IP is a known VPN server (on Mullvad's own server list): sites see that,
-  not your provider`, it counts as a VPN, proxycheck.io isn't asked (unless the Worker couldn't read its copy of
+  is for others: the VPN line says `your IP is a known Mullvad VPN server (on Mullvad's own server list): sites see
+  that, not your provider`, it counts as a VPN, proxycheck.io isn't asked (unless the Worker couldn't read its copy of
   the lists in time: then it is asked as before), and no sponsored line follows. The copied Markdown hides the
   provider's name, as it hides proxycheck.io's.
 - The data also has a role for an exit, an address the provider says its users reach sites from. None of the four
@@ -273,11 +274,11 @@ from, so a match is certain in the way that matters to a site.
   other finding, and proxycheck.io isn't asked about it. The text answer's `source` line adds `+ Apple's iCloud Private
   Relay list`.
 - **`leaktest`:** a visitor whose address Apple lists is on Private Relay. Like Cloudflare WARP and Tor it is named
-  (`you're on Apple's iCloud Private Relay ...: sites see Apple's address, not yours. It covers Safari, not your other
-  apps`; tag `relay on`) and graded the way they are, so no sponsored line follows it. As with a Tor exit, the relay
+  (`you're on Apple's iCloud Private Relay ...: sites see Apple's address, not your provider's. It covers Safari only`;
+  tag `relay on`) and graded the way they are, so no sponsored line follows it. As with a Tor exit, the relay
   picks the DNS resolver, so only the visitor's own provider's resolver is a DNS LEAK; and the other IP version may
   leave through another relay network, which is fine when Apple lists that address too (`also through iCloud Private
-  Relay`). (How it should count is the owner's call; this is the default until then.)
+  Relay`). This is how the owner chose to count it.
 - `/status` shows it as `privateRelay`: `ranges` (as read), `ipv4` and `ipv6` (merged), `updated`, `unchanged` (the
   last good answer was a 304), `tried`, `error` and `stale`.
 
@@ -1111,7 +1112,7 @@ address, and grades the leaks A to F. Each line is marked OK, LEAK or INFO:
   flag, or a network whose type is hosting), plus proxycheck.io's when `PROXYCHECK_KEY` is set
   (which can name the VPN service). An address on a VPN provider's own server list (see "Known VPN servers")
   is that provider's server, entry or not, since the visitor's traffic reaches ipterm from it: the line names
-  it ("your IP is a known VPN server (on Mullvad's own server list)"), it counts as a VPN, and
+  it ("your IP is a known Mullvad VPN server (on Mullvad's own server list)"), it counts as a VPN, and
   proxycheck.io isn't asked. Three services are named outright: **Cloudflare WARP**, when
   Cloudflare's edge says the request came through it (`warp=on` or `warp=plus` in `/cdn-cgi/trace`, which
   the page reads itself); **Tor**, when the address is on the Tor Project's exit list (see "Tor exits"

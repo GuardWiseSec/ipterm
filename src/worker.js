@@ -4240,8 +4240,11 @@ const PC_CATCHALL = 'not a known VPN, proxy or Tor service (proxycheck.io sets i
 const pcFlag = pc => (pc.compromised ? 'flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service' : PC_CATCHALL);
 const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
 const RELAY_TEXT = "yes: Apple's iCloud Private Relay (on Apple's own list of its relay addresses: sites see Apple's address, not the user's)";
-const listedText = ls => (ls.role === 'exit' ? `yes: a known VPN server (on ${ls.provider}'s own server list, as an address its users reach sites from)`
-  : `yes: a known VPN server (on ${ls.provider}'s own server list, as an address its users connect to; sites may see them at a different address)`);
+// The provider first, as the owner chose ("a known Mullvad VPN server"); a name that already says VPN (IVPN, AirVPN)
+// just gets "server".
+const vpnLabel = p => (/vpn/i.test(p) ? `${p} server` : `${p} VPN server`);
+const listedText = ls => (ls.role === 'exit' ? `yes: a known ${vpnLabel(ls.provider)} (on ${ls.provider}'s own server list, as an address its users reach sites from)`
+  : `yes: a known ${vpnLabel(ls.provider)} (on ${ls.provider}'s own server list, as an address its users connect to; sites may see them at a different address)`);
 function vpnText(d) {
   const core = d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = d.privacy || null, ls = d.vpnServer || null;
   if (d.relay) return RELAY_TEXT;

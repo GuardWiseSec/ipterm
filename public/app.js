@@ -706,8 +706,11 @@
     : 'has proxycheck.io\'s catch-all "anonymous" flag (which it also gives public DNS and CDN addresses) but is not a known VPN, proxy or Tor service');
   const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
   const RELAY_TEXT = "yes: Apple's iCloud Private Relay (on Apple's own list of its relay addresses: sites see Apple's address, not the user's)";
-  const listedText = ls => (ls.role === 'exit' ? `yes: a known VPN server (on ${ls.provider}'s own server list, as an address its users reach sites from)`
-    : `yes: a known VPN server (on ${ls.provider}'s own server list, as an address its users connect to; sites may see them at a different address)`);
+  // The provider first, as the owner chose ("a known Mullvad VPN server"); a name that already says VPN (IVPN, AirVPN)
+  // just gets "server".
+  const vpnLabel = p => (/vpn/i.test(p) ? `${p} server` : `${p} VPN server`);
+  const listedText = ls => (ls.role === 'exit' ? `yes: a known ${vpnLabel(ls.provider)} (on ${ls.provider}'s own server list, as an address its users reach sites from)`
+    : `yes: a known ${vpnLabel(ls.provider)} (on ${ls.provider}'s own server list, as an address its users connect to; sites may see them at a different address)`);
   function vpnText(d) {
     const core = d && d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = (d && d.privacy) || null, ls = (d && d.vpnServer) || null;
     if (d && d.relay) return RELAY_TEXT;
@@ -1051,9 +1054,9 @@
     // 2. VPN / proxy detection
     if (warp) add('vpn', 'ok', 'VPN detection', "you're on Cloudflare WARP (Cloudflare's edge says so): sites see a Cloudflare address, not your provider", { sum: 'Cloudflare WARP' });
     else if (torListed) add('vpn', 'ok', 'VPN detection', "your IP is a Tor exit (on the Tor Project's list): sites see the Tor network, not your provider", { sum: 'Tor' });
-    else if (relay) add('vpn', 'ok', 'VPN detection', "you're on Apple's iCloud Private Relay (your IP is on Apple's own list of its relay addresses): sites see Apple's address, not yours. It covers Safari, not your other apps",
+    else if (relay) add('vpn', 'ok', 'VPN detection', "you're on Apple's iCloud Private Relay (your IP is on Apple's own list of its relay addresses): sites see Apple's address, not your provider's. It covers Safari only",
       { sum: 'iCloud Private Relay' });
-    else if (listed) add('vpn', 'ok', 'VPN detection', `your IP is a known VPN server (on ${listed.provider}'s own server list): sites see that, not your provider`,
+    else if (listed) add('vpn', 'ok', 'VPN detection', `your IP is a known ${vpnLabel(listed.provider)} (on ${listed.provider}'s own server list): sites see that, not your provider`,
       { sum: listed.provider });
     else if (!vpnKnown) add('vpn', 'info', 'VPN detection', "unavailable for this check, so the lines below can't tell whether you use a VPN", { sum: 'unavailable' });
     else if (anon) add('vpn', 'ok', 'VPN detection', `your IP is a known ${vpnKind(pc)} address${pc && pc.operator ? ' (' + pc.operator + ')' : ''}: sites see that, not your provider`,
