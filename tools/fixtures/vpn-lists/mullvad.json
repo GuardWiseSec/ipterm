@@ -1,0 +1,92 @@
+{
+ "locations": {
+  "al-tia": {
+   "country": "Albania",
+   "city": "Tirana",
+   "latitude": 41.327953,
+   "longitude": 19.819025
+  },
+  "br-sao": {
+   "country": "Brazil",
+   "city": "Sao Paulo",
+   "latitude": -23.533773,
+   "longitude": -46.62529
+  }
+ },
+ "wireguard": {
+  "relays": [
+   {
+    "hostname": "al-tia-wg-001",
+    "location": "al-tia",
+    "active": true,
+    "owned": false,
+    "provider": "iRegister",
+    "ipv4_addr_in": "45.142.26.2",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "ofyfRvMPB0PPIGGItNL+5tNdvTKXuWye5CfjPgPNvQ8=",
+    "ipv6_addr_in": "2a04:27c0:0:e::f001"
+   },
+   {
+    "hostname": "al-tia-wg-002",
+    "location": "al-tia",
+    "active": true,
+    "owned": false,
+    "provider": "iRegister",
+    "ipv4_addr_in": "62.101.165.2",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "Ny/8wG/vmSH3/bbyIER+8w32oGQBRGIcTnXtg+O90Cc=",
+    "ipv6_addr_in": "2a04:27c0:0:f::f001"
+   },
+   {
+    "hostname": "br-sao-wg-302",
+    "location": "br-sao",
+    "active": false,
+    "owned": false,
+    "provider": "HostRoyale",
+    "ipv4_addr_in": "103.139.178.63",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "Xv1QvURPbgywITL6MNVhbYtfZXTm0lR98SPaf3AXeCc=",
+    "ipv6_addr_in": "2a06:3040:10:610::f101"
+   },
+   {
+    "hostname": "al-tia-wg-004",
+    "location": "al-tia",
+    "active": true,
+    "owned": false,
+    "provider": "iRegister",
+    "ipv4_addr_in": "103.124.165.191",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "x62J1c4gfHu/bF3DSjwIjC0qOE3azRG03i/YW6bOEGY=",
+    "ipv6_addr_in": null
+   }
+  ],
+  "port_ranges": [
+   [
+    53,
+    53
+   ],
+   [
+    123,
+    123
+   ],
+   [
+    4000,
+    33433
+   ],
+   [
+    33565,
+    51820
+   ],
+   [
+    52001,
+    60000
+   ]
+  ],
+  "ipv4_gateway": "10.64.0.1",
+  "ipv6_gateway": "fc00:bbbb:bbbb:bb01::1"
+ }
+}

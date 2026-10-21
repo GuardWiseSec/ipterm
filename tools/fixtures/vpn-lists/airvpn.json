@@ -1,0 +1,59 @@
+{
+ "deprecated_warning": "'ip_entry' and 'ip_entry_alt' are deprecated. Use 'ip_v4_in1' and 'ip_v4_in2' instead.",
+ "servers": [
+  {
+   "public_name": "Achernar",
+   "country_name": "Switzerland",
+   "country_code": "ch",
+   "location": "Zurich",
+   "continent": "Europe",
+   "bw": 1925,
+   "bw_max": 2000,
+   "users": 315,
+   "currentload": 96,
+   "ip_v4_in1": "185.156.175.170",
+   "ip_v4_in2": "185.156.175.172",
+   "ip_v4_in3": "185.156.175.173",
+   "ip_v4_in4": "185.156.175.174",
+   "ip_v6_in1": "2001:ac8:28:8:c4d0:d13a:3b31:4d",
+   "ip_v6_in2": "2001:ac8:28:8:55b7:bd13:3330:e8ed",
+   "ip_v6_in3": "2001:ac8:28:8:a59c:62d3:7664:de71",
+   "ip_v6_in4": "2001:ac8:28:8:e160:155f:6fdd:e281",
+   "health": "ok"
+  },
+  {
+   "public_name": "Achird",
+   "country_name": "Switzerland",
+   "country_code": "ch",
+   "location": "Zurich",
+   "continent": "Europe",
+   "bw": 1914,
+   "bw_max": 2000,
+   "users": 292,
+   "currentload": 95,
+   "ip_v4_in1": "185.156.175.34",
+   "ip_v4_in2": "185.156.175.36",
+   "ip_v4_in3": "185.156.175.37",
+   "ip_v4_in4": "185.156.175.38",
+   "ip_v6_in1": "2001:ac8:28:3:297a:d23b:d23d:4878",
+   "ip_v6_in2": "2001:ac8:28:3:1528:ec3e:734d:e234",
+   "ip_v6_in3": "2001:ac8:28:3:90d7:29d6:7c38:8a36",
+   "ip_v6_in4": "2001:ac8:28:3:39e7:7830:4298:4e8c",
+   "health": "ok"
+  }
+ ],
+ "routing": [
+  {
+   "public_name": "AU2",
+   "country_name": "Australia",
+   "country_code": "au",
+   "location": "Sydney",
+   "continent": "Oceania",
+   "bw": 5,
+   "bw_max": 2000,
+   "currentload": 0,
+   "health": "ok"
+  }
+ ],
+ "result": "ok"
+}

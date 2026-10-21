@@ -65,8 +65,8 @@ searches your history, and `ipterm.net/go?q=<anything>` works as a browser searc
 | Command | What it does |
 | --- | --- |
 | `whoami` | your IP, network and approximate location |
-| `leaktest` | a VPN and DNS leak test, graded A to F on leaks only: which DNS servers look up sites for you, WebRTC and IPv6 leaks, your time zone, VPN detection (Cloudflare WARP and Tor by name). `share` copies an IP-free link to the grade |
-| `lookup <ip, domain or ASN>` | owner, network and location of any address; a domain's DNS records |
+| `leaktest` | a VPN and DNS leak test, graded A to F on leaks only: which DNS servers look up sites for you, WebRTC and IPv6 leaks, your time zone, VPN detection (Cloudflare WARP, Tor, iCloud Private Relay, and servers on VPN providers' own lists by name). `share` copies an IP-free link to the grade |
+| `lookup <ip, domain or ASN>` | owner, network and location of any address, and whether it's a VPN or relay (including servers on Mullvad's, PIA's, IVPN's and AirVPN's own lists, and Apple's iCloud Private Relay addresses); a domain's DNS records |
 | `dig <name> [type]` | one DNS record type, with TTLs |
 | `whois <ip, ASN or domain>` | the registry record, over RDAP |
 | `mail <domain>` | email security (MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI), graded A to F |
@@ -84,6 +84,9 @@ searches your history, and `ipterm.net/go?q=<anything>` works as a browser searc
   only other hosts it may fetch from are ipify (to show your other IP version) and ipterm's own DNS leak test zone.
   `leaktest` also asks Cloudflare's STUN server which addresses WebRTC reveals.
 - Your own address goes to a data provider (IPinfo, proxycheck.io) only when you run `leaktest`.
+- Known VPN servers come from the server lists Mullvad, PIA, IVPN and AirVPN publish, and iCloud Private Relay's
+  addresses from Apple's list, which ipterm downloads every six hours. Lookups are checked against its own copy, so
+  no address is sent to them.
 - One labeled affiliate line (Proton VPN) appears after a leak test whose VPN check ran and found no VPN. It's a plain
   link, and never appears in `curl` output.
 
@@ -94,7 +97,8 @@ repository, and names the exact commit that's running when the site is deployed 
 
 One Cloudflare Worker (`src/worker.js`) and a vanilla JavaScript page (`public/`), with no build step. Your own
 address comes from Cloudflare's edge, other addresses from [IPinfo](https://ipinfo.io), networks from RIPEstat,
-registry records over RDAP and DNS from Cloudflare's 1.1.1.1. The DNS leak test has its own small DNS server on a VPS
+registry records over RDAP, DNS from Cloudflare's 1.1.1.1, and known VPN servers and iCloud Private Relay addresses
+from the providers' own published lists, refreshed by a cron trigger (`src/vpn-lists.js`, `src/relay-list.js`). The DNS leak test has its own small DNS server on a VPS
 (`dnsleak-server/`).
 
 ## Run your own

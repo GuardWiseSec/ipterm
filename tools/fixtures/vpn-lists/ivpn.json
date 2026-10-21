@@ -1,0 +1,122 @@
+{
+ "servers": [
+  {
+   "gateway": "ar1.gw.ivpn.net",
+   "hostnames": {
+    "openvpn": "ar1.gw.ivpn.net",
+    "wireguard": "ar1.wg.ivpn.net"
+   },
+   "hosts": {
+    "openvpn": {
+     "host": "149.22.83.97",
+     "hostname": "ar1.gw.ivpn.net"
+    },
+    "wireguard": {
+     "host": "149.22.83.100",
+     "hostname": "ar1.wg.ivpn.net"
+    }
+   },
+   "is_active": true,
+   "in_maintenance": false,
+   "status": 0,
+   "country_code": "AR",
+   "country": "Argentina",
+   "city": "Buenos Aires",
+   "latitude": -34.614,
+   "longitude": -58.371,
+   "isp": "Datapacket",
+   "load": 15.72,
+   "protocols": [
+    "wireguard",
+    "openvpn"
+   ],
+   "wg_public_key": "NXlWMTFlNJKQXfOnt+DJogxnDmfapEdgmHNat2JqwE0=",
+   "multihop_port": 20600,
+   "obfs": {
+    "obfs3_multihop_port": 20601,
+    "obfs4_multihop_port": 20602,
+    "obfs4_key": "nYpMZiGcjWbjQ+8GzltcIqSwcVS4u6m8q7A7szcJHNQ1XHrpHk9r99bHCpzfvnQmNAjdWw"
+   },
+   "socks5": "socks5.ar1.gw.ivpn.net:10.1.75.77"
+  },
+  {
+   "gateway": "au-nsw1.gw.ivpn.net",
+   "hostnames": {
+    "openvpn": "au-nsw1.gw.ivpn.net",
+    "wireguard": "au-nsw1.wg.ivpn.net"
+   },
+   "hosts": {
+    "openvpn": {
+     "host": "46.102.153.242",
+     "hostname": "au-nsw1.gw.ivpn.net"
+    },
+    "wireguard": {
+     "host": "46.102.153.246",
+     "hostname": "au-nsw1.wg.ivpn.net"
+    }
+   },
+   "is_active": true,
+   "in_maintenance": false,
+   "status": 0,
+   "country_code": "AU",
+   "country": "Australia",
+   "city": "Sydney",
+   "latitude": -33.92,
+   "longitude": 151.1852,
+   "isp": "M247",
+   "load": 90.19,
+   "protocols": [
+    "wireguard",
+    "openvpn"
+   ],
+   "wg_public_key": "KmSrG48t5xw9CJCPlYLBG3JnmiY0CnUgyRM5TUEwZhM=",
+   "multihop_port": 26601,
+   "obfs": {
+    "obfs3_multihop_port": 26602,
+    "obfs4_multihop_port": 26603,
+    "obfs4_key": "/rjoeDjduOFq1UvT332vhS398h1RP5hC3m7sDJKNSyJ6TO8mkcxWAYILw0i+bgS/3JD5YA"
+   },
+   "socks5": "socks5.au-nsw1.gw.ivpn.net:10.1.84.201"
+  },
+  {
+   "gateway": "xx1.gw.ivpn.net",
+   "is_active": true
+  },
+  {
+   "gateway": "au-nsw2.gw.ivpn.net",
+   "hostnames": {
+    "openvpn": "au-nsw2.gw.ivpn.net",
+    "wireguard": "au-nsw2.wg.ivpn.net"
+   },
+   "hosts": {
+    "openvpn": {
+     "host": "146.70.78.74",
+     "hostname": "au-nsw2.gw.ivpn.net"
+    }
+   },
+   "is_active": true,
+   "in_maintenance": false,
+   "status": 0,
+   "country_code": "AU",
+   "country": "Australia",
+   "city": "Sydney",
+   "latitude": -33.92,
+   "longitude": 151.1852,
+   "isp": "M247",
+   "load": 17.99,
+   "protocols": [
+    "wireguard",
+    "openvpn"
+   ],
+   "wg_public_key": "q+wbp7GjiTszp5G16rNpGCqxkL0qSY3CH4pcgD6UsVQ=",
+   "multihop_port": 27901,
+   "obfs": {
+    "obfs3_multihop_port": 27902,
+    "obfs4_multihop_port": 27903,
+    "obfs4_key": "qtdQ5krD9EQFR98xNo/v5cmGb10wqt0Om9pYMIHWQh4oz5xcAXj32rViEyN0bnkkhaZnBA"
+   },
+   "socks5": "socks5.au-nsw2.gw.ivpn.net:10.1.31.122"
+  }
+ ],
+ "config": {}
+}

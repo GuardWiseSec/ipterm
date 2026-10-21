@@ -687,9 +687,13 @@
     return out.join(' · ');
   }
 
-  // VPN / proxy verdict for a lookup. Only Core and proxycheck.io check for it, and a clean result is
-  // not proof: VPN providers keep adding fresh addresses that no list knows yet. Matches worker.js.
-  // "yes" needs Core's flag or a specific proxycheck.io finding (VPN, proxy, Tor or a named service).
+  // VPN / proxy verdict for a lookup. Core, proxycheck.io and the VPN providers' own server lists check
+  // for it, and a clean result is not proof: VPN providers keep adding fresh addresses that no list knows
+  // yet. Matches worker.js.
+  // "yes" needs Core's flag, a specific proxycheck.io finding (VPN, proxy, Tor or a named service), or the
+  // address on a provider's own list (vpnServer) or Apple's iCloud Private Relay list (relay): Apple's list
+  // and a listed exit first, as they are certain; an entry (users connect to it, and reach sites from another
+  // address) after Core's and proxycheck.io's findings. Private Relay is named as a relay, not a VPN.
   // proxycheck.io's own "anonymous" is a catch-all, also set on addresses that are none of those
   // (Google Public DNS, 8.8.8.8), so alone it is reported as what it is (PC_CATCHALL), never as
   // "anonymizing"; "compromised" means seen performing attacks and gets a hedged line. leaktest
@@ -701,10 +705,19 @@
   const pcWhy = pc => (pc.compromised ? `is ${pcFlag(pc)}`
     : 'has proxycheck.io\'s catch-all "anonymous" flag (which it also gives public DNS and CDN addresses) but is not a known VPN, proxy or Tor service');
   const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
+  const RELAY_TEXT = "yes: Apple's iCloud Private Relay (on Apple's own list of its relay addresses: sites see Apple's address, not the user's)";
+  // The provider first, as the owner chose ("a known Mullvad VPN server"); a name that already says VPN (IVPN, AirVPN)
+  // just gets "server".
+  const vpnLabel = p => (/vpn/i.test(p) ? `${p} server` : `${p} VPN server`);
+  const listedText = ls => (ls.role === 'exit' ? `yes: a known ${vpnLabel(ls.provider)} (on ${ls.provider}'s own server list, as an address its users reach sites from)`
+    : `yes: a known ${vpnLabel(ls.provider)} (on ${ls.provider}'s own server list, as an address its users connect to; sites may see them at a different address)`);
   function vpnText(d) {
-    const core = d && d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = (d && d.privacy) || null;
-    if (!core && !pc) return 'not checked (detailed data unavailable for this lookup)';
+    const core = d && d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = (d && d.privacy) || null, ls = (d && d.vpnServer) || null;
+    if (d && d.relay) return RELAY_TEXT;
+    if (ls && ls.role === 'exit') return listedText(ls);
+    if (!core && !pc) return ls ? listedText(ls) : 'not checked (detailed data unavailable for this lookup)';
     if ((core && core.anonymous) || pcKnown(pc)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
+    if (ls) return listedText(ls);
     if (pc && pc.anonymous) return pcFlag(pc);
     const hosting = (core && core.hosting) || d.asType === 'hosting' || (pc && pc.hosting);
     return 'not on known VPN or proxy lists' + (hosting
@@ -990,8 +1003,16 @@
     const warp = !!(trace && /^(on|plus)$/i.test(trace.warp || ''));
     const torListed = !!net.tor || d.countryCode === 'T1';
     const tor = torListed || !!(pcKnown(pc) && pc.tor);
-    const vpnKnown = net.source === 'ipinfo-core' || !!pc || warp || torListed;
-    const anon = !!(f.anonymous || pcKnown(pc) || warp || torListed);
+    // On a VPN provider's own server list (vpnServer): the visitor reaches sites from that provider's server, whether
+    // the list has it as an exit or as an entry, so either counts as a VPN here.
+    const listed = net.vpnServer || null;
+    // On Apple's iCloud Private Relay list (relay): sites see one of Apple's relay addresses. Named like WARP and Tor,
+    // and counted the way they are (its own tag, graded as a tunnel, no sponsored line after it). Like Tor's exits,
+    // the relay picks the DNS resolver, and the other IP version may leave through another of its networks.
+    const relay = net.relay || null;
+    const otherRelay = !!(relay && otherInfo && !otherInfo.error && otherInfo.relay);
+    const vpnKnown = net.source === 'ipinfo-core' || !!pc || warp || torListed || !!listed || !!relay;
+    const anon = !!(f.anonymous || pcKnown(pc) || warp || torListed || listed || relay);
     // proxycheck.io's catch-all flag alone (see vpnText) doesn't say a VPN is on, so it doesn't count
     // as one here. On a hosting network the hosting check below still counts it; anywhere else the
     // check is unsure, and treats it like an address it couldn't classify.
@@ -1008,8 +1029,8 @@
     const unsure = !vpnKnown || (flagged && !vpn);
     const strict = vpn || unsure, ifVpn = !vpn ? ' (a leak if you use a VPN)' : '';
     const vpnState = vpn ? 'vpn' : unsure ? 'unsure' : 'none';
-    const tunnel = warp ? 'Cloudflare WARP' : tor ? 'Tor' : 'your VPN';
-    const tunnelNet = warp ? "Cloudflare WARP's network" : tor ? 'the Tor network' : "your VPN's network";
+    const tunnel = warp ? 'Cloudflare WARP' : tor ? 'Tor' : relay ? 'iCloud Private Relay' : 'your VPN';
+    const tunnelNet = warp ? "Cloudflare WARP's network" : tor ? 'the Tor network' : relay ? "iCloud Private Relay's network" : "your VPN's network";
     // Each line: { key, st, label, v, fix, sum, data, flag }. sum is the short form the compare prints.
     // A graded line's flag: LEAK lines leak. On a VPN only an OK line passes (an INFO line there couldn't
     // tell); without one every line that ran passes, since nothing can leak past a VPN that isn't there.
@@ -1026,13 +1047,17 @@
     const place = [d.city, /^[A-Z]{2}$/.test(d.countryCode || '') && d.countryCode !== 'T1' ? d.countryCode : null].filter(Boolean).join(', ');
     const seen = [d.org, place && 'near ' + place].filter(Boolean).join(', ');
     add('see', 'info', 'sites see', frag(ipLink(d.ip), seen ? ` (${seen})` : '', vpn
-      ? `: ${warp ? "Cloudflare WARP's" : tor ? "a Tor exit's" : "your VPN's"} address, not your provider's. Not graded`
+      ? `: ${warp ? "Cloudflare WARP's" : tor ? "a Tor exit's" : relay ? "an iCloud Private Relay" : "your VPN's"} address, not your provider's. Not graded`
       : unsure ? ": unless you use a VPN, that's your provider and rough location. Not graded"
       : ': your provider and rough location, which every site you visit sees without a VPN. Not graded'), { sum: [d.ip, d.org].filter(Boolean).join(' ') });
 
     // 2. VPN / proxy detection
     if (warp) add('vpn', 'ok', 'VPN detection', "you're on Cloudflare WARP (Cloudflare's edge says so): sites see a Cloudflare address, not your provider", { sum: 'Cloudflare WARP' });
     else if (torListed) add('vpn', 'ok', 'VPN detection', "your IP is a Tor exit (on the Tor Project's list): sites see the Tor network, not your provider", { sum: 'Tor' });
+    else if (relay) add('vpn', 'ok', 'VPN detection', "you're on Apple's iCloud Private Relay (your IP is on Apple's own list of its relay addresses): sites see Apple's address, not your provider's. It covers Safari only",
+      { sum: 'iCloud Private Relay' });
+    else if (listed) add('vpn', 'ok', 'VPN detection', `your IP is a known ${vpnLabel(listed.provider)} (on ${listed.provider}'s own server list): sites see that, not your provider`,
+      { sum: listed.provider });
     else if (!vpnKnown) add('vpn', 'info', 'VPN detection', "unavailable for this check, so the lines below can't tell whether you use a VPN", { sum: 'unavailable' });
     else if (anon) add('vpn', 'ok', 'VPN detection', `your IP is a known ${vpnKind(pc)} address${pc && pc.operator ? ' (' + pc.operator + ')' : ''}: sites see that, not your provider`,
       { sum: vpnKind(pc) + (pc && pc.operator ? ' (' + pc.operator + ')' : '') });
@@ -1049,7 +1074,7 @@
     let dnsAsns = [];
     if (dnsRan) {
       // On a VPN, your provider's network is known only if the other IP version leaked (step 5 below).
-      const ispAsn = vpn ? (otherInfo && !otherInfo.error && up(otherInfo.asn) !== up(d.asn) ? up(otherInfo.asn) : '') : up(d.asn);
+      const ispAsn = vpn ? (otherInfo && !otherInfo.error && !otherRelay && up(otherInfo.asn) !== up(d.asn) ? up(otherInfo.asn) : '') : up(d.asn);
       const mine = new Set([canonIp(d.ip), canonIp(other)].filter(Boolean));
       const groups = new Map();
       for (const r of dns.resolvers) {
@@ -1069,13 +1094,15 @@
         : g.service || g.org || g.asn || 'a network ipterm could not identify');
       const named = list => list.flatMap((g, i) => [i ? '; ' : '', label(g), ' at ',
         ...g.ips.slice(0, 2).flatMap((ip, j) => (j ? [', ', ipLink(ip)] : [ipLink(ip)])), g.ips.length > 2 ? ` +${g.ips.length - 2} more` : '']);
-      const all = [...groups.values()], outside = all.filter(g => g.kind === 'isp' || (g.kind === 'other' && !tor));
+      const all = [...groups.values()], outside = all.filter(g => g.kind === 'isp' || (g.kind === 'other' && !tor && !relay));
       dnsAsns = all.map(g => g.asn).filter(Boolean);
       const o = { sum: all.map(label).join('; '), data: { leakAsns: outside.map(g => g.asn).filter(Boolean) }, ran: !unsure };
-      if (vpn && outside.length) add('dns', 'warn', 'DNS', frag('sites you visit are looked up by ', ...named(outside), `, outside ${tunnelNet}${!warp && !tor && d.org ? ' (' + d.org + ')' : ''}`), { ...o,
-        fix: "turn on DNS leak protection in your VPN app, so lookups go through the tunnel to the VPN's own DNS servers. Also check your browser's secure DNS setting (Chrome and Edge: Settings › Privacy and security › Security › Use secure DNS; Firefox: Settings › Privacy & Security › DNS over HTTPS): when it names a provider, lookups go there instead of to your VPN" });
-      else if (vpn && (tor || all.every(g => g.kind === 'vpn'))) add('dns', 'ok', 'DNS', frag('sites you visit are looked up by ', ...named(all),
-        tor ? ", which the Tor exit chose, so your internet provider can't see them" : ", so your internet provider can't see them"), o);
+      if (vpn && outside.length) add('dns', 'warn', 'DNS', frag('sites you visit are looked up by ', ...named(outside), `, outside ${tunnelNet}${!warp && !tor && !relay && d.org ? ' (' + d.org + ')' : ''}`), { ...o,
+        fix: relay ? "check that iCloud Private Relay is on for this network (it can be turned off for one Wi-Fi or cellular network): it covers Safari's lookups"
+          : "turn on DNS leak protection in your VPN app, so lookups go through the tunnel to the VPN's own DNS servers. Also check your browser's secure DNS setting (Chrome and Edge: Settings › Privacy and security › Security › Use secure DNS; Firefox: Settings › Privacy & Security › DNS over HTTPS): when it names a provider, lookups go there instead of to your VPN" });
+      else if (vpn && (tor || relay || all.every(g => g.kind === 'vpn'))) add('dns', 'ok', 'DNS', frag('sites you visit are looked up by ', ...named(all),
+        tor ? ", which the Tor exit chose, so your internet provider can't see them" : relay ? ", which iCloud Private Relay chose, so your internet provider can't see them"
+          : ", so your internet provider can't see them"), o);
       else add('dns', 'info', 'DNS', frag('sites you visit are looked up by ', ...named(all), all.length === 1 && all[0].kind === 'isp' ? ', which can see the name of every site you visit' : ''), o);
     } else skipped.push('DNS');
 
@@ -1086,7 +1113,8 @@
     const rtcData = { extra: extra.map(canonIp) };
     if (!rtc.supported) add('webrtc', 'ok', 'WebRTC', 'turned off in this browser, so it cannot leak', { sum: 'turned off', data: rtcData });
     else if (extra.length && strict) add('webrtc', 'warn', 'WebRTC', frag('reveals ', ...ipList(extra), vpn ? `, an address outside ${tunnel}` : ', a second public address' + ifVpn), { sum: 'shows ' + extra.join(', '), data: rtcData,
-      fix: 'turn on WebRTC leak protection in your VPN app, or block WebRTC in your browser (Firefox: set media.peerconnection.enabled to false in about:config)' });
+      fix: relay ? "iCloud Private Relay doesn't cover WebRTC here: block WebRTC in your browser if it lets you"
+        : 'turn on WebRTC leak protection in your VPN app, or block WebRTC in your browser (Firefox: set media.peerconnection.enabled to false in about:config)' });
     else if (extra.length) add('webrtc', 'info', 'WebRTC', frag('also shows ', ...ipList(extra), ' (a second public address; common on some networks)' + ifVpn), { sum: 'also shows ' + extra.join(', '), data: rtcData });
     else if (rtc.ips.length) add('webrtc', 'ok', 'WebRTC', 'only shows the IP above, so nothing extra leaks', { sum: 'nothing extra', data: rtcData });
     else add('webrtc', 'ok', 'WebRTC', 'no public address exposed', { sum: 'nothing exposed', data: rtcData });
@@ -1103,10 +1131,12 @@
       const o = { data: { asn: up(oAsn) } };
       if (!oAsn) add('ipv6', 'info', otherV, frag(ipLink(other), "  couldn't check which network this belongs to; look it up to compare with your " + 'IPv' + p.v), { sum: other, ran: false, skip: true, data: {} });
       else if (sameNet) add('ipv6', 'ok', otherV, frag(ipLink(other), `  same network${oOrg ? ' (' + oOrg + ')' : ''}`), { ...o, sum: 'same network' + (oOrg ? ' (' + oOrg + ')' : '') });
+      else if (otherRelay) add('ipv6', 'ok', otherV, frag(ipLink(other), `  also through iCloud Private Relay${oOrg ? ' (' + oOrg + ')' : ''}`), { ...o, sum: 'iCloud Private Relay' });
       else add('ipv6', strict ? 'warn' : 'info', otherV, frag(ipLink(other), vpn
         ? `  goes through ${oOrg || oAsn}, not ${tunnel}`
         : `  through ${oOrg || oAsn}, a different network than your ${'IPv' + p.v}` + ifVpn), { ...o, sum: 'through ' + (oOrg || oAsn),
-        fix: `turn on your VPN app's ${otherV} leak protection (sometimes called "block ${otherV}"), or turn off ${otherV} on this device` });
+        fix: relay ? `check that iCloud Private Relay is on for this network: this ${otherV} address goes around it`
+          : `turn on your VPN app's ${otherV} leak protection (sometimes called "block ${otherV}"), or turn off ${otherV} on this device` });
     }
 
     // 6. time zone. A device that reports UTC (Tor Browser, Firefox's resistFingerprinting) gives nothing away.
@@ -1116,7 +1146,7 @@
       if (same) add('tz', 'ok', 'time zone', `your device (${devTz}) matches your IP's location`, { sum: 'matches (' + devTz + ')' });
       else if (/^(Etc\/)?(UTC|UCT|GMT|Universal|Zulu)$/i.test(devTz)) add('tz', 'ok', 'time zone', "your device reports UTC, which doesn't give away your region", { sum: 'reports UTC' });
       else add('tz', strict ? 'warn' : 'info', 'time zone', `your device says ${devTz}, your IP says ${d.timezone}` + (vpn ? ': sites can tell your real region from your clock' : ifVpn), { sum: `${devTz} vs ${d.timezone}`,
-        fix: "set your device's time zone to match the VPN location, or use a browser that reports UTC (Tor Browser, or Firefox with privacy.resistFingerprinting turned on)" });
+        fix: `set your device's time zone to match the ${relay ? "relay address's" : 'VPN'} location, or use a browser that reports UTC (Tor Browser, or Firefox with privacy.resistFingerprinting turned on)` });
     } else skipped.push('time zone');
 
     // 7. browser language vs the IP's country: INFO only, since expats and travelers differ for good reasons
@@ -1158,7 +1188,7 @@
     const head = el('div', 'head');
     // The tag names the tunnel as `tunnel` does (a Tor exit known only to proxycheck.io too).
     head.append(el('span', 'hip', 'leaktest'), el('span', 'tag pub', 'privacy check'),
-      el('span', 'tag', warp ? 'warp on' : tor ? 'tor' : vpn ? 'vpn on' : homeNet ? 'no vpn' : flagged ? 'vpn unclear' : vpnKnown ? 'no vpn detected' : 'vpn unknown'),
+      el('span', 'tag', warp ? 'warp on' : tor ? 'tor' : relay ? 'relay on' : vpn ? 'vpn on' : homeNet ? 'no vpn' : flagged ? 'vpn unclear' : vpnKnown ? 'no vpn detected' : 'vpn unknown'),
       el('span', 'tag', grade ? 'grade ' + grade : 'not graded'));
     // Share: your grade's link, whose code holds only the grade and each check's flag (leakgrade.js), or the check
     // itself when the run has no grade. The Markdown keeps the findings but nothing that is you: no address or
@@ -1168,7 +1198,7 @@
     // counts only when it names a country (en-US): a bare one (no, it, so) places no one, and as a whole word
     // it would hide ordinary words ("no vpn").
     const mine = [d.ip, other, ...rtc.ips, ...rtc.local, ...(dns && Array.isArray(dns.resolvers) ? dns.resolvers.map(r => r && r.ip) : [])].filter(Boolean);
-    const myTerms = [...placeTerms(d), net.org, net.asn, pc && pc.operator, ...placeTerms(otherInfo),
+    const myTerms = [...placeTerms(d), net.org, net.asn, pc && pc.operator, listed && listed.provider, ...placeTerms(otherInfo),
       ...(dns && Array.isArray(dns.resolvers) ? dns.resolvers.flatMap(r => (r ? [r.org, r.asn, r.service, r.countryCode] : [])) : []),
       devTz, ...(lr && lr.region ? [lr.tag, lr.region, regionName(lr.region)] : []), cc && regionName(cc), trace && trace.colo, trace && trace.loc];
     head.append(shareBar({ cmd: 'leaktest', value: verdict, what: 'the verdict', path: leakCode ? '/leaktest/r/' + leakCode : '/leaktest',
@@ -1188,7 +1218,7 @@
     if (!dnsRan) {
       const why = !d.dnsleak ? '' : dns && !dns.error ? ": none of the test lookups reached ipterm's DNS server (a blocker or proxy may have stopped them)"
         : ": ipterm's DNS test server didn't answer this time";
-      line(`Not tested: DNS leaks (which DNS servers answer for you)${why}. Your VPN app usually has a setting for this.`, 'sys');
+      line(`Not tested: DNS leaks (which DNS servers answer for you)${why}.${relay ? '' : ' Your VPN app usually has a setting for this.'}`, 'sys');
     }
 
     // Compare with the previous run in this tab, then keep this one (in memory only) for the next.
@@ -1196,8 +1226,8 @@
       ips: known, asns: new Set([d.asn, otherInfo && !otherInfo.error ? otherInfo.asn : null].filter(Boolean).map(up)), dnsAsns: new Set(dnsAsns) };
     if (lastLeak) await compareLeaks(lastLeak, run);
     lastLeak = run;
-    // The VPN offer follows a no-VPN verdict only: VPN detection ran (IPinfo Core or proxycheck.io answered) and
-    // found none. When it couldn't run (both budgets spent for the hour, say), the visitor may well be on a VPN
+    // The VPN offer follows a no-VPN verdict only: VPN detection ran (IPinfo Core or proxycheck.io answered, or a VPN
+    // provider's own list named the address, which is a VPN) and found none. When it couldn't run (both budgets spent for the hour, say), the visitor may well be on a VPN
     // already. proxycheck.io's catch-all flag alone still counts as found none (see flagged). And not even then once
     // this tab has seen a VPN on: someone who turned theirs off to compare already has one. (Memory only, like the
     // compare: a reload forgets it.)
@@ -1205,7 +1235,7 @@
     vpnSeen = vpnSeen || vpn;
 
     if (offer) await sponsor('check');
-    next(['leaktest', 'leaktest', n ? 'run it again after a fix, to compare' : 'turn your VPN on or off, then run it again to compare'],
+    next(['leaktest', 'leaktest', n ? 'run it again after a fix, to compare' : `turn ${relay ? 'iCloud Private Relay' : 'your VPN'} on or off, then run it again to compare`],
       ['share', 'share', leakCode ? 'copy a link to your grade (no IP address or location in it)' : 'copy a link to this check, so others can run it'],
       ['man leaktest', 'man leaktest', 'what each check means and how the grade works'], ['whoami', 'whoami', 'your IP, network and location']);
   }
@@ -2233,7 +2263,7 @@
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
       ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/me', '/json', '/text', '/city', '/line']],
     // The sixth entry: the grading rubric, from leakgrade.js (also on the /leaktest page and in docs/handbook.md).
-    leaktest: ['leaktest   or   leaktest --result <code>', "VPN and DNS leak test, graded A to F: is your IP a known VPN (Cloudflare WARP and Tor by name), which DNS servers look up sites for you, and does WebRTC, IPv6 or your time zone give away more than your IP? For DNS, your browser looks up a few random names under ipterm's own DNS server (which answers \"no such name\"), and the check shows which resolvers asked: on a VPN, any outside the VPN's network is a DNS leak. Runs in your browser in a few seconds; nothing is stored. --result <code> shows a shared result without testing anything.",
+    leaktest: ['leaktest   or   leaktest --result <code>', "VPN and DNS leak test, graded A to F: is your IP a known VPN (Cloudflare WARP, Tor and iCloud Private Relay by name), which DNS servers look up sites for you, and does WebRTC, IPv6 or your time zone give away more than your IP? For DNS, your browser looks up a few random names under ipterm's own DNS server (which answers \"no such name\"), and the check shows which resolvers asked: on a VPN, any outside the VPN's network is a DNS leak. Runs in your browser in a few seconds; nothing is stored. --result <code> shows a shared result without testing anything.",
       ['leaktest'], ['whoami', 'share'], ['/leaktest/r/1bjp', '/leaktest/r/1bjp?format=text'], [
         ...(LEAKLIB ? LEAKLIB.GRADES.map(([g, t], i) => [i ? '' : 'GRADE', `${g}: ${t}`]) : []),
         ...(LEAKLIB ? LEAKLIB.RULES.map((t, i) => [i ? '' : 'COUNTS', t]) : []),
