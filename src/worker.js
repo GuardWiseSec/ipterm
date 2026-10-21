@@ -61,8 +61,9 @@
 //   GET /robots.txt
 //   GET /sitemap.xml        a sitemap index: /sitemap-pages.xml (SITEMAP_PATHS) and /sitemap-asn-<n>.xml, the
 //                           largest networks in tiers (src/asn-sitemap.js, built by tools/build_asn_sitemap.mjs)
-//   GET /status             for the owner: today's and this hour's IPinfo Core and proxycheck.io budget use.
-//                           Needs the STATUS_KEY secret (x-status-key header or ?key=); without it, a 404
+//   GET /status             for the owner: today's and this hour's IPinfo Core and proxycheck.io budget use, and
+//                           each VPN server list's size and freshness. Needs the STATUS_KEY secret (x-status-key
+//                           header or ?key=); without it, a 404
 //   ?format=text            on /, /json, /<ip>, /AS<number>, /dns/..., /mail/..., /grade/..., /whois/..., /cidr/..., /route/..., /leaktest/r/...
 //                           and their /api/ forms: the same answer as aligned key/value lines (like the terminal) instead of JSON
 //   ?color=1                with a text answer: ANSI colors on the key column and the VPN / proxy verdict. Only when asked
@@ -88,6 +89,8 @@
 //   Report card (grade): the DNS, mail and registry reads above, plus HEAD requests to the domain's own site.
 //   DNS leak test: ipterm's own DNS server for DNSLEAK_ZONE (dnsleak-server/, on a VPS), plus IPinfo Lite.
 //   Tor exits (leaktest): the Tor Project's exit list, cached for an hour per data center.
+//   Known VPN servers: the VPN providers' own server lists (src/vpn-lists.js), downloaded every 6 hours by the cron
+//   trigger into a Durable Object (VpnServers); lookups search a copy in memory, so they cost nothing.
 //
 // Hardening
 //   - Upstream lookups are cached; cache misses are rate limited per visitor IP (LOOKUP_LIMITER).
@@ -109,6 +112,7 @@ import '../public/leakgrade.js';                  // the leak test's grade and s
 import { meCard, ME_WIDTH, ANSI, ansi } from './me.js';   // the /me card and its world map, and its colors
 import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
 import { holderOf, personReason } from './holder-heuristic.js';     // whether a network's holder may be a private person
+import { VPN_PROVIDERS, VPN_MAX_AGE, VPN_FETCH_TIMEOUT, toRecord, packIndex, unpackIndex, findServer } from './vpn-lists.js';   // VPN providers' own server lists
 // Pages that name a network holder who may be a private person are "noindex, follow" (GDPR caution; the rules are
 // in src/holder-heuristic.js). personHeld takes an AS name as RIPEstat gives it, with its handle ("JDOE-AS Jane Doe",
 // "CLOUDFLARENET - Cloudflare, Inc."); personName takes a name on its own ("Jane Doe").
@@ -159,6 +163,10 @@ class RateLimited extends Error {}
 export default {
   async fetch(request, env, ctx) {
     return secure(await route(request, env, ctx), env);
+  },
+  // The cron trigger (wrangler.toml [triggers]): refresh the VPN providers' server lists (VpnServers).
+  async scheduled(controller, env, ctx) {
+    if (env.VPN_SERVERS) ctx.waitUntil(env.VPN_SERVERS.get(env.VPN_SERVERS.idFromName('lists')).refresh());
   },
 };
 
@@ -708,14 +716,17 @@ async function routeRoute(io, raw, html) {
   (msg, status) => reply(io, { error: msg }, status));
 }
 
-// Adds proxycheck.io's VPN / proxy opinion, unless IPinfo already flagged the address (then a
-// second query adds little, and the free allowance is better spent on unflagged ones). A bot gets
-// only a cached one (privacyData).
+// Adds the address's entry on a VPN provider's own server list (vpnServer, free and local), and proxycheck.io's VPN /
+// proxy opinion, unless IPinfo already flagged the address or a provider lists it as a server its users reach sites
+// from (then a second query adds little, and the free allowance is better spent on unflagged ones). A bot gets only a
+// cached proxycheck.io answer (privacyData).
 async function withPrivacy(io, ip, pending) {
-  const d = await pending;
-  if (!d || d.bogon || (d.flags && d.flags.anonymous)) return d;
+  const [d, listed] = await Promise.all([pending, vpnServerData(io, ip)]);
+  if (!d || d.bogon) return d;
+  const out = listed ? { ...d, vpnServer: listed } : d;
+  if ((d.flags && d.flags.anonymous) || (listed && listed.role === 'exit')) return out;
   const privacy = await privacyData(io, ip);
-  return privacy ? { ...d, privacy } : d;
+  return privacy ? { ...out, privacy } : out;
 }
 
 // Adds the registry date of the address's network (blockData). Its registry request starts once the lookup has
@@ -1299,7 +1310,7 @@ function ipText(d, o) {
     ['block', blockText(d.block)],
     ['connection', connectionText(d)], ['vpn / proxy', self ? null : vpnText(d), vpnTone],
     ['edge', d.colo ? `${d.colo} (the Cloudflare data center that answered you)` : null],
-    ['source', (SOURCE_NAMES[d.source] || d.source || '') + (d.privacy ? ' + proxycheck.io' : '')],
+    ['source', (SOURCE_NAMES[d.source] || d.source || '') + (d.privacy ? ' + proxycheck.io' : '') + (d.vpnServer ? ` + ${d.vpnServer.provider}'s server list` : '')],
   ], /^ipinfo/.test(d.source || '') ? [IPINFO_CREDIT] : [], o);
 }
 
@@ -1501,6 +1512,9 @@ function helpBody(h, env = {}) {
       [`curl ${h}/8.8.8.8/text`, 'the same as aligned lines'],
       [`curl ${h}/8.8.8.8/country`, 'one value: asn, org, cc, country,'],
       ['', 'continent or hostname'],
+      ["The vpn / proxy line also checks the VPN providers' own server lists"],
+      ['(Mullvad, PIA, IVPN, AirVPN): a listed address is one their users'],
+      ['connect to, and sites may see them at a different address.'],
       ['A block registered in the last 180 days gets a line saying so: location'],
       ['databases lag behind new blocks, so sites may disagree about where it is.'],
       ['Your own address never gets one: a lookup never sends it to a registry.'],
@@ -1694,9 +1708,13 @@ async function checkData(io) {
     const exits = torExitList(io).catch(() => null);
     io.ctx.waitUntil(exits);
     try {
-      // proxycheck.io is asked every time here (not only when IPinfo is unsure): it can name the VPN.
-      const [d, privacy] = await Promise.all([ipData(io, ip, p), privacyData(io, ip)]);
-      network = { source: d.source || null, asn: d.asn || null, org: d.org || null, asType: d.asType || null, flags: d.flags || null, privacy: privacy || null };
+      // proxycheck.io is asked every time here (not only when IPinfo is unsure): it can name the VPN. Unless the address
+      // is on a VPN provider's own server list, which names it already: the visitor reaches sites from it, so whatever
+      // its role for others, they are on that provider's server (vpnServer).
+      const listing = vpnServerData(io, ip);
+      const [d, listed, privacy] = await Promise.all([ipData(io, ip, p), listing, listing.then(l => (l ? null : privacyData(io, ip)))]);
+      network = { source: d.source || null, asn: d.asn || null, org: d.org || null, asType: d.asType || null, flags: d.flags || null, privacy: privacy || null,
+        ...(listed ? { vpnServer: listed } : {}) };
     } catch (e) { if (e instanceof RateLimited) throw e; }   // classification is a bonus; the check still runs
     const list = await Promise.race([exits, sleep(1500).then(() => null)]);
     if (list && list.has(ip)) network = { ...(network || {}), tor: true };
@@ -2025,6 +2043,122 @@ async function privacyData(io, ip) {
     headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${d.anonymous ? 900 : 3600}` },
   })));
   return d;
+}
+
+/* ---------- known VPN servers: the providers' own lists ----------
+   src/vpn-lists.js reads each provider's published server list; this part keeps them. One Durable Object (VpnServers,
+   named "lists") downloads every list on the cron trigger (wrangler.toml [triggers], every 6 hours): one request per
+   provider, no retries, a time limit and a size cap on each, and a few tens of milliseconds of CPU for all of them. It
+   keeps each provider's last good list when a download fails or comes back broken, and stores them all packed into one
+   blob of sorted addresses (about 80 KB; packIndex). Each data center caches that blob for 30 minutes and each Worker
+   keeps it in memory for 10, so finding an address is a binary search in memory: no outside request and no budget, the
+   same for bots and people. A Durable Object rather than KV or D1: the deployment creates it (no namespace or database
+   to set up, on ipterm.net or a copy), the writes are one blob four times a day, and the reads come from the cache. */
+const VPN_WAIT = 1500;                   // a lookup waits this long at most for the index, then goes on without it
+let vpnIdx = null, vpnIdxUntil = 0, vpnIdxLoad = null;
+
+export class VpnServers extends DurableObject {
+  // The packed index, or null before the first good refresh. Asked while there is none, it starts a refresh (an
+  // alarm) at most once an hour, so a new deployment doesn't wait for the cron.
+  async blob(now = Date.now()) {
+    const s = this.ctx.storage, b = await s.get('blob');
+    if (!b && now - ((await s.get('tried')) || 0) > 3600_000 && !(await s.getAlarm())) await s.setAlarm(now + 1000);
+    return b || null;
+  }
+  async alarm() { await this.refresh(); }
+  // One refresh at a time: a cron run and an alarm that meet share it.
+  refresh(now = Date.now()) {
+    return (this.running ||= refreshVpnLists(this.ctx.storage, this.env, now).finally(() => { this.running = null; }));
+  }
+  // For /status: each provider's last good list (when, how many addresses) and last try (when, what went wrong).
+  async status() { return (await this.ctx.storage.get('meta')) || {}; }
+}
+
+// Downloads every provider's list (all at once) and keeps what passes: it parses, and has at least the provider's
+// minimum. One with less than half the addresses of the last good list is held back as a likely broken answer, and
+// taken when the next refresh brings about the same number again (a provider that really shrank). Otherwise the last
+// good list stays, until it is VPN_MAX_AGE old, when it is no longer used.
+async function refreshVpnLists(s, env, now) {
+  await s.put('tried', now);
+  const ua = `ipterm (${env.SOURCE_URL || 'https://github.com/GuardWiseSec/ipterm'}) refreshing its list of known VPN servers`;
+  const got = await Promise.all(VPN_PROVIDERS.map(async p => {
+    try {
+      const r = await fetch(p.url, { headers: { accept: 'application/json', 'user-agent': ua }, signal: AbortSignal.timeout(VPN_FETCH_TIMEOUT) });
+      if (!r.ok) { if (r.body) r.body.cancel(); throw new Error('HTTP ' + r.status); }
+      return { rec: toRecord(p.parse(await readBody(r, p.max))) };
+    } catch (e) {
+      return { error: String((e && e.message) || e).slice(0, 160) };
+    }
+  }));
+  const meta = (await s.get('meta')) || {}, put = {}, iso = new Date(now).toISOString();
+  VPN_PROVIDERS.forEach((p, i) => {
+    const { rec, error } = got[i], m = { ...meta[p.id], tried: iso };
+    const n = rec ? rec.four.length + rec.role6.length : 0;
+    const last = m.at && now - Date.parse(m.at) <= VPN_MAX_AGE ? m.n4 + m.n6 : 0;
+    let why = error || (n < p.min ? `only ${n} addresses (at least ${p.min} expected)` : null);
+    if (!why && n < last / 2 && !(m.held && Math.abs(n - m.held) <= m.held / 10)) {
+      why = `only ${n} addresses, down from ${last}: kept the last good list, and takes this one if the next refresh agrees`;
+      m.held = n;
+    }
+    if (why) m.error = why;
+    else {
+      put['list:' + p.id] = rec;
+      Object.assign(m, { at: iso, n4: rec.four.length, n6: rec.role6.length, error: null, held: null });
+    }
+    meta[p.id] = m;
+  });
+  const lists = [];
+  for (const p of VPN_PROVIDERS) {
+    const m = meta[p.id];
+    if (!m || !m.at || now - Date.parse(m.at) > VPN_MAX_AGE) continue;
+    const rec = put['list:' + p.id] || await s.get('list:' + p.id);
+    if (rec) lists.push({ id: p.id, name: p.name, at: Date.parse(m.at), rec });
+  }
+  put.meta = meta;
+  if (lists.length) put.blob = packIndex(lists, now);
+  await s.put(put);
+  if (!lists.length) await s.delete('blob');             // every list too old: lookups find none
+  console.log('[ipterm] VPN server lists: ' + VPN_PROVIDERS.map(p => p.id + ' ' + (meta[p.id].error ? `kept the last good list (${meta[p.id].error})` : meta[p.id].n4 + meta[p.id].n6)).join(', '));
+  return meta;
+}
+
+// The index for this Worker: from memory (10 minutes), this data center's cache (30 minutes) or the Durable Object.
+// Never rejects, and never holds a lookup up for more than VPN_WAIT: past it, or when nothing loads, the lookup goes on
+// with the last index this Worker had, or without one.
+function vpnIndex(io) {
+  if (vpnIdx && Date.now() < vpnIdxUntil) return Promise.resolve(vpnIdx);
+  if (!io.env.VPN_SERVERS) return Promise.resolve(null);
+  if (!vpnIdxLoad) {
+    vpnIdxLoad = loadVpnIndex(io).finally(() => { vpnIdxLoad = null; });
+    io.ctx.waitUntil(vpnIdxLoad);
+  }
+  return Promise.race([vpnIdxLoad, sleep(VPN_WAIT).then(() => vpnIdx)]);
+}
+async function loadVpnIndex(io) {
+  const req = cacheReq(io, 'vpn-servers'), ns = io.env.VPN_SERVERS;
+  let buf = null, fresh = false;
+  try { const hit = await caches.default.match(req); if (hit) buf = await hit.arrayBuffer(); } catch { /* cache trouble: ask the object */ }
+  if (!buf) {
+    try { buf = await ns.get(ns.idFromName('lists')).blob(); fresh = !!buf; } catch (e) {
+      console.error('[ipterm] VPN server lists unavailable:', String((e && e.message) || e));
+    }
+  }
+  try { if (buf) vpnIdx = unpackIndex(buf); } catch (e) { buf = null; console.error('[ipterm] VPN server lists unreadable:', String((e && e.message) || e)); }
+  if (buf && fresh) io.ctx.waitUntil(caches.default.put(req, new Response(buf, {
+    headers: { 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=1800' },
+  })).catch(() => {}));
+  vpnIdxUntil = Date.now() + (buf ? 600_000 : 60_000);   // nothing yet (a new deployment): ask again in a minute
+  return vpnIdx;
+}
+
+// The address's entry on a VPN provider's own server list, or null: { provider, role, listUpdated }. role "exit": the
+// provider's users reach sites from this address; "entry": they connect to it, and reach sites from another address.
+// Free and local, so a bot gets it too (isBot is about the paid budgets).
+async function vpnServerData(io, ip) {
+  try {
+    const hit = findServer(await vpnIndex(io), ip, Date.now());
+    return hit ? { provider: hit.provider, role: hit.role, listUpdated: hit.list } : null;
+  } catch { return null; }
 }
 
 /* ---------- RIPEstat: networks and routing ----------
@@ -4001,10 +4135,12 @@ function connectionText(d) {
   return out.length ? out.join(' · ') : null;
 }
 
-// VPN / proxy verdict. Only Core and proxycheck.io check for it, and a clean result is not proof:
-// VPN providers keep adding fresh addresses that no list knows yet. Kept in step with app.js
-// (pcKnown, pcFlag, vpnKind, vpnText there).
-// "yes" needs Core's flag or a specific proxycheck.io finding: VPN, proxy, Tor or a named service.
+// VPN / proxy verdict. Core, proxycheck.io and the VPN providers' own server lists check for it, and a clean result
+// is not proof: VPN providers keep adding fresh addresses that no list knows yet. Kept in step with app.js
+// (pcKnown, pcFlag, vpnKind, listedText, vpnText there).
+// "yes" needs Core's flag, a specific proxycheck.io finding (VPN, proxy, Tor or a named service), or the address on a
+// provider's own list (vpnServer). A listed exit is certain, so it comes first; an entry (the provider's users connect
+// to it, and reach sites from another address) is said as such, after Core's and proxycheck.io's findings.
 // proxycheck.io's own "anonymous" is a catch-all ("any kind of anonymising service (proxy, VPN,
 // TOR, etc.)" in its API reference) that is also set on addresses that are none of those, such as
 // Google Public DNS (8.8.8.8). Alone, it is reported as what it is (PC_CATCHALL), never as
@@ -4014,10 +4150,14 @@ const pcKnown = pc => !!(pc && pc.anonymous && (pc.vpn || pc.proxy || pc.tor || 
 const PC_CATCHALL = 'not a known VPN, proxy or Tor service (proxycheck.io sets its catch-all "anonymous" flag, which it also gives public DNS and CDN addresses)';
 const pcFlag = pc => (pc.compromised ? 'flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service' : PC_CATCHALL);
 const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
+const listedText = ls => (ls.role === 'exit' ? `yes: a known VPN server (on ${ls.provider}'s own server list, as an address its users reach sites from)`
+  : `yes: a known VPN server (on ${ls.provider}'s own server list, as an address its users connect to; sites may see them at a different address)`);
 function vpnText(d) {
-  const core = d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = d.privacy || null;
-  if (!core && !pc) return 'not checked (detailed data unavailable for this lookup)';
+  const core = d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = d.privacy || null, ls = d.vpnServer || null;
+  if (ls && ls.role === 'exit') return listedText(ls);
+  if (!core && !pc) return ls ? listedText(ls) : 'not checked (detailed data unavailable for this lookup)';
   if ((core && core.anonymous) || pcKnown(pc)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
+  if (ls) return listedText(ls);
   if (pc && pc.anonymous) return pcFlag(pc);
   const hosting = (core && core.hosting) || d.asType === 'hosting' || (pc && pc.hosting);
   return 'not on known VPN or proxy lists' + (hosting
@@ -4443,9 +4583,23 @@ async function statusRoute(io) {
   const coreOff = !env.IPINFO_TOKEN ? 'no IPINFO_TOKEN secret' : plan !== 'core' ? `IPINFO_PLAN is "${plan}", not "core"`
     : core.daily === 0 ? 'IPINFO_DAILY_BUDGET is 0' : null;
   const pcOff = !env.PROXYCHECK_KEY ? 'no PROXYCHECK_KEY secret' : pc.daily === 0 ? 'PROXYCHECK_DAILY_BUDGET is 0' : null;
-  const [ipinfoCore, proxycheck] = await Promise.all([budget('ipinfo-core', core, coreOff), budget('proxycheck', pc, pcOff)]);
+  // The VPN providers' server lists (VpnServers): each one's last good list and last try.
+  const vpnLists = async () => {
+    const ns = env.VPN_SERVERS;
+    if (!ns) return { error: 'no VPN_SERVERS binding, so no lists are kept' };
+    try {
+      const m = await ns.get(ns.idFromName('lists')).status();
+      return { providers: VPN_PROVIDERS.map(p => ({ id: p.id, name: p.name, addresses: m[p.id] && m[p.id].at ? m[p.id].n4 + m[p.id].n6 : 0,
+        ipv4: (m[p.id] && m[p.id].n4) || 0, ipv6: (m[p.id] && m[p.id].n6) || 0, updated: (m[p.id] && m[p.id].at) || null,
+        tried: (m[p.id] && m[p.id].tried) || null, error: (m[p.id] && m[p.id].error) || null,
+        stale: !!(m[p.id] && m[p.id].at && d.getTime() - Date.parse(m[p.id].at) > VPN_MAX_AGE) })) };
+    } catch (e) {
+      return { error: 'lists unreachable: ' + String((e && e.message) || e) };
+    }
+  };
+  const [ipinfoCore, proxycheck, vpnServers] = await Promise.all([budget('ipinfo-core', core, coreOff), budget('proxycheck', pc, pcOff), vpnLists()]);
   return reply(io, {
-    time: d.toISOString(), ipinfoCore, proxycheck, resets: { hour: at(d.getUTCHours() + 1), day: at(0, 1) },
+    time: d.toISOString(), ipinfoCore, proxycheck, vpnServers, resets: { hour: at(d.getUTCHours() + 1), day: at(0, 1) },
     note: "Counts of ipterm's own upstream lookups (limit 0 = none; hours are UTC). Nothing about visitors.",
   }, 200, { 'x-robots-tag': 'noindex, nofollow' }, statusText);
 }
@@ -4464,7 +4618,11 @@ function statusText(d, o) {
     ['  past days', b.pastDays.map(p => [p.day, String(p.used).padStart(6), runOut(p.hoursRunOut, p.ranOutAt)].join('  ').trimEnd())],
     ['  error', b.error],
   ];
-  return kvText([['time', d.time.slice(0, 16).replace('T', ' ') + ' UTC'], ...part('ipinfo core', d.ipinfoCore), ...part('proxycheck.io', d.proxycheck)],
+  const v = d.vpnServers || {}, when = iso => (iso ? iso.slice(0, 16).replace('T', ' ') + ' UTC' : 'never');
+  const lists = [['vpn server lists', v.error || 'refreshed every 6 hours'],
+    ...(v.providers || []).map(p => ['  ' + p.id, `${p.addresses} addresses, updated ${when(p.updated)}` + (p.stale ? ' (too old, not used)' : '') +
+      (p.error ? `; last try ${when(p.tried)} failed: ${p.error}` : '')])];
+  return kvText([['time', d.time.slice(0, 16).replace('T', ' ') + ' UTC'], ...part('ipinfo core', d.ipinfoCore), ...part('proxycheck.io', d.proxycheck), ...lists],
     ["Counts of ipterm's own upstream lookups (hours are UTC). Nothing about visitors."], o);
 }
 

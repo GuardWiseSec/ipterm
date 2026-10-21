@@ -108,6 +108,21 @@ class_name = "LookupBudget"
 tag = "v1"
 new_sqlite_classes = ["LookupBudget"]
 
+# Known VPN servers, from the server lists the VPN providers publish themselves (src/vpn-lists.js): one Durable Object
+# keeps each provider's last good list, packed into one small blob that lookups search in memory. Free for lookups;
+# the deployment creates it, so there is nothing to set up.
+[[durable_objects.bindings]]
+name = "VPN_SERVERS"
+class_name = "VpnServers"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["VpnServers"]
+
+# Refreshes those lists every 6 hours (at minute 17, away from the top of the hour): one request to each provider.
+[triggers]
+crons = ["17 */6 * * *"]
+
 # Per-visitor limit on lookups: 30 requests per 60 seconds.
 # namespace_id is any number you choose that is unique within your Cloudflare account.
 [[ratelimits]]

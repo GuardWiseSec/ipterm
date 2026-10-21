@@ -687,9 +687,12 @@
     return out.join(' · ');
   }
 
-  // VPN / proxy verdict for a lookup. Only Core and proxycheck.io check for it, and a clean result is
-  // not proof: VPN providers keep adding fresh addresses that no list knows yet. Matches worker.js.
-  // "yes" needs Core's flag or a specific proxycheck.io finding (VPN, proxy, Tor or a named service).
+  // VPN / proxy verdict for a lookup. Core, proxycheck.io and the VPN providers' own server lists check
+  // for it, and a clean result is not proof: VPN providers keep adding fresh addresses that no list knows
+  // yet. Matches worker.js.
+  // "yes" needs Core's flag, a specific proxycheck.io finding (VPN, proxy, Tor or a named service), or the
+  // address on a provider's own list (vpnServer): a listed exit first, as it is certain; an entry (users
+  // connect to it, and reach sites from another address) after Core's and proxycheck.io's findings.
   // proxycheck.io's own "anonymous" is a catch-all, also set on addresses that are none of those
   // (Google Public DNS, 8.8.8.8), so alone it is reported as what it is (PC_CATCHALL), never as
   // "anonymizing"; "compromised" means seen performing attacks and gets a hedged line. leaktest
@@ -701,10 +704,14 @@
   const pcWhy = pc => (pc.compromised ? `is ${pcFlag(pc)}`
     : 'has proxycheck.io\'s catch-all "anonymous" flag (which it also gives public DNS and CDN addresses) but is not a known VPN, proxy or Tor service');
   const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
+  const listedText = ls => (ls.role === 'exit' ? `yes: a known VPN server (on ${ls.provider}'s own server list, as an address its users reach sites from)`
+    : `yes: a known VPN server (on ${ls.provider}'s own server list, as an address its users connect to; sites may see them at a different address)`);
   function vpnText(d) {
-    const core = d && d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = (d && d.privacy) || null;
-    if (!core && !pc) return 'not checked (detailed data unavailable for this lookup)';
+    const core = d && d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = (d && d.privacy) || null, ls = (d && d.vpnServer) || null;
+    if (ls && ls.role === 'exit') return listedText(ls);
+    if (!core && !pc) return ls ? listedText(ls) : 'not checked (detailed data unavailable for this lookup)';
     if ((core && core.anonymous) || pcKnown(pc)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
+    if (ls) return listedText(ls);
     if (pc && pc.anonymous) return pcFlag(pc);
     const hosting = (core && core.hosting) || d.asType === 'hosting' || (pc && pc.hosting);
     return 'not on known VPN or proxy lists' + (hosting
@@ -990,8 +997,11 @@
     const warp = !!(trace && /^(on|plus)$/i.test(trace.warp || ''));
     const torListed = !!net.tor || d.countryCode === 'T1';
     const tor = torListed || !!(pcKnown(pc) && pc.tor);
-    const vpnKnown = net.source === 'ipinfo-core' || !!pc || warp || torListed;
-    const anon = !!(f.anonymous || pcKnown(pc) || warp || torListed);
+    // On a VPN provider's own server list (vpnServer): the visitor reaches sites from that provider's server, whether
+    // the list has it as an exit or as an entry, so either counts as a VPN here.
+    const listed = net.vpnServer || null;
+    const vpnKnown = net.source === 'ipinfo-core' || !!pc || warp || torListed || !!listed;
+    const anon = !!(f.anonymous || pcKnown(pc) || warp || torListed || listed);
     // proxycheck.io's catch-all flag alone (see vpnText) doesn't say a VPN is on, so it doesn't count
     // as one here. On a hosting network the hosting check below still counts it; anywhere else the
     // check is unsure, and treats it like an address it couldn't classify.
@@ -1033,6 +1043,8 @@
     // 2. VPN / proxy detection
     if (warp) add('vpn', 'ok', 'VPN detection', "you're on Cloudflare WARP (Cloudflare's edge says so): sites see a Cloudflare address, not your provider", { sum: 'Cloudflare WARP' });
     else if (torListed) add('vpn', 'ok', 'VPN detection', "your IP is a Tor exit (on the Tor Project's list): sites see the Tor network, not your provider", { sum: 'Tor' });
+    else if (listed) add('vpn', 'ok', 'VPN detection', `your IP is a known VPN server (on ${listed.provider}'s own server list): sites see that, not your provider`,
+      { sum: listed.provider });
     else if (!vpnKnown) add('vpn', 'info', 'VPN detection', "unavailable for this check, so the lines below can't tell whether you use a VPN", { sum: 'unavailable' });
     else if (anon) add('vpn', 'ok', 'VPN detection', `your IP is a known ${vpnKind(pc)} address${pc && pc.operator ? ' (' + pc.operator + ')' : ''}: sites see that, not your provider`,
       { sum: vpnKind(pc) + (pc && pc.operator ? ' (' + pc.operator + ')' : '') });
@@ -1168,7 +1180,7 @@
     // counts only when it names a country (en-US): a bare one (no, it, so) places no one, and as a whole word
     // it would hide ordinary words ("no vpn").
     const mine = [d.ip, other, ...rtc.ips, ...rtc.local, ...(dns && Array.isArray(dns.resolvers) ? dns.resolvers.map(r => r && r.ip) : [])].filter(Boolean);
-    const myTerms = [...placeTerms(d), net.org, net.asn, pc && pc.operator, ...placeTerms(otherInfo),
+    const myTerms = [...placeTerms(d), net.org, net.asn, pc && pc.operator, listed && listed.provider, ...placeTerms(otherInfo),
       ...(dns && Array.isArray(dns.resolvers) ? dns.resolvers.flatMap(r => (r ? [r.org, r.asn, r.service, r.countryCode] : [])) : []),
       devTz, ...(lr && lr.region ? [lr.tag, lr.region, regionName(lr.region)] : []), cc && regionName(cc), trace && trace.colo, trace && trace.loc];
     head.append(shareBar({ cmd: 'leaktest', value: verdict, what: 'the verdict', path: leakCode ? '/leaktest/r/' + leakCode : '/leaktest',
@@ -1196,8 +1208,8 @@
       ips: known, asns: new Set([d.asn, otherInfo && !otherInfo.error ? otherInfo.asn : null].filter(Boolean).map(up)), dnsAsns: new Set(dnsAsns) };
     if (lastLeak) await compareLeaks(lastLeak, run);
     lastLeak = run;
-    // The VPN offer follows a no-VPN verdict only: VPN detection ran (IPinfo Core or proxycheck.io answered) and
-    // found none. When it couldn't run (both budgets spent for the hour, say), the visitor may well be on a VPN
+    // The VPN offer follows a no-VPN verdict only: VPN detection ran (IPinfo Core or proxycheck.io answered, or a VPN
+    // provider's own list named the address, which is a VPN) and found none. When it couldn't run (both budgets spent for the hour, say), the visitor may well be on a VPN
     // already. proxycheck.io's catch-all flag alone still counts as found none (see flagged). And not even then once
     // this tab has seen a VPN on: someone who turned theirs off to compare already has one. (Memory only, like the
     // compare: a reload forgets it.)

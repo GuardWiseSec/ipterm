@@ -128,7 +128,8 @@ npx wrangler secret put PROXYCHECK_KEY
 ```
 
 - **When it's asked:** every `leaktest` (your own address), and lookups of other addresses that
-  IPinfo hasn't already flagged. Not for whoami, DNS, whois, the "hosted by" lines, the one-value
+  IPinfo hasn't already flagged. Not when a VPN provider's own list names the address (see "Known VPN
+  servers" below): in `leaktest` at all, in a lookup when the list has it as an exit. Not for whoami, DNS, whois, the "hosted by" lines, the one-value
   endpoints (`/8.8.8.8/org`) or a `?lite=1` lookup (`leaktest`'s of your other IP version), and never
   for a bot, which gets a cached answer or none (see "Bots never spend the budgets" below).
 - **Budget:** `PROXYCHECK_DAILY_BUDGET` (default 900) queries a day, paced to
@@ -146,12 +147,14 @@ npx wrangler secret put PROXYCHECK_KEY
   The page and the JSON API show only a few fields (VPN / proxy / Tor / hosting, the service's
   name, a risk score), as proxycheck.io's terms require, never the full response.
 
-The verdict on the **vpn / proxy** line combines both sources (`vpnText()` in `src/worker.js` and
-`public/app.js`, kept in step):
+The verdict on the **vpn / proxy** line combines these with the VPN providers' own server lists (`vpnText()` in
+`src/worker.js` and `public/app.js`, kept in step), in this order:
 
 | What the sources say | The line says |
 | --- | --- |
+| A VPN provider's own list names the address as one its users reach sites from (none of the lists does today) | `yes: a known VPN server (on Mullvad's own server list, as an address its users reach sites from)` |
 | Core flags it, or proxycheck.io finds a VPN, proxy or Tor exit, or names the service | `yes: a known VPN address (Proton VPN)` (or proxy, Tor, or "VPN, proxy or Tor" when it isn't specific) |
+| A VPN provider's own list names the address as one its users connect to, an entry (even when Core and proxycheck.io weren't asked) | `yes: a known VPN server (on Mullvad's own server list, as an address its users connect to; sites may see them at a different address)` |
 | proxycheck.io's `anonymous` flag alone, with no VPN, proxy, Tor or service name | `not a known VPN, proxy or Tor service (proxycheck.io sets its catch-all "anonymous" flag, which it also gives public DNS and CDN addresses)` |
 | proxycheck.io's `compromised` flag alone (seen performing attacks) | `flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service` |
 | Neither flags it | `not on known VPN or proxy lists`, plus the hosting-network note or the "not a guarantee" note |
@@ -160,6 +163,77 @@ proxycheck.io's API reference defines `anonymous` as "any kind of anonymising se
 TOR, etc.)", and it's also set on addresses that are none of those: Google Public DNS (8.8.8.8) has
 it, with only `hosting` besides. So on its own it isn't reported as a VPN, or as "anonymizing", here or in `leaktest`.
 The JSON still carries the flag (`"anonymous": true` under `privacy`).
+
+### Known VPN servers: the providers' own lists
+
+Some VPN providers publish the list of servers their apps connect to. ipterm downloads four of these lists and checks
+lookups against them, so an address on one is that provider's server, by the provider's own word rather than a
+third party's guess. Nobody adds addresses by hand. Checked on 2026-10-21 (provider docs, app code and terms; counts
+change from day to day):
+
+| Provider | List | Addresses | What the addresses are | Terms |
+| --- | --- | --- | --- | --- |
+| Mullvad | `api.mullvad.net/public/relays/wireguard/v2/`, from the documented "Mullvad Public API" | about 1,100: 553 WireGuard servers, IPv4 and IPv6 | Entries. Mullvad's app shows a server's entry (in) and exit (out) addresses apart, its blog says each server has several exit addresses, and an independent mapping of nine servers found none of their exits in the list | Silent: they cover customers. `api.mullvad.net/robots.txt` disallows all crawlers; ipterm reads one documented endpoint four times a day |
+| Private Internet Access | `serverlist.piaservers.net/vpninfo/servers/v6`, the list PIA's apps and its `manual-connections` scripts read | about 1,170 IPv4 | Entries. PIA's own app code says the listed address is not necessarily the exit, and asks PIA's API for the real one after connecting. The `meta` addresses (API proxies) are skipped | Silent |
+| IVPN | `api.ivpn.net/v5/servers/stats`, offered on IVPN's status page ("Live server list as JSON") | about 180 IPv4: WireGuard and OpenVPN | Entries. No field or document says which address traffic leaves from, and IVPN keeps a small pool of addresses per server | Silent; the feed is offered publicly |
+| AirVPN | `airvpn.org/api/status/`, a documented free API (at most 600 requests per 10 minutes) | about 2,000: 250 servers, four entry addresses each, IPv4 and IPv6 | Entries. Each server sends traffic out from a separate exit address, which AirVPN's own app reads apart from the entries | Allowed: a documented free API |
+
+Left out:
+
+- **NordVPN.** Its terms forbid using any "robot, spider, scraper, or other automated means" to reach its websites or
+  services without written permission. Its list is the one where the listed address is most likely the one sites see
+  (Nord's help center says your IP changes to that of your VPN server), so it is worth asking Nord.
+- **Proton VPN.** Its server list carries exit addresses, but its API answers only a request with a Proton app's
+  version header, and its terms allow automated access only when it can't be told from the app. ipterm won't fake
+  either.
+- **Surfshark.** Its public list encrypts the addresses.
+
+**What a match means.** None of the four lists names the addresses traffic leaves from, so every address in them is
+an entry: the provider's users connect to it, and sites see them at another address (always, for Mullvad and AirVPN;
+nobody says, for PIA and IVPN). So:
+
+- A lookup of a listed address says `yes: a known VPN server (on Mullvad's own server list, as an address its users
+  connect to; sites may see them at a different address)`. That answers "is this address a VPN?" for the
+  address itself, and "what are these connections my firewall sees?", but it doesn't make the addresses VPN users
+  browse from easier to spot: those are still for IPinfo Core and proxycheck.io to judge, and the line keeps their
+  "yes" first when they have one.
+- In `leaktest`, the visitor's own address on a list means they are on that provider's server, whatever the address
+  is for others: the VPN line says `your IP is a known VPN server (on Mullvad's own server list): sites see that,
+  not your provider`, it counts as a VPN, proxycheck.io isn't asked, and no sponsored line follows. The copied
+  Markdown hides the provider's name, as it hides proxycheck.io's.
+- The data also has a role for an exit, an address the provider says its users reach sites from. None of the four
+  lists has one today. A listed exit would come first on the line (`... on Mullvad's own server list, as an address
+  its users reach sites from`) and spare the proxycheck.io query in lookups too.
+- No guessing past the list: exact addresses only, never a neighbour or the /24 around one. (Mullvad's exit pools
+  often share a /24 with the server's listed address, but not always, and the /24 can hold other servers.) An address
+  on no list says nothing either way.
+
+The JSON carries it as `vpnServer`, only when a list names the address, beside the other fields, which are unchanged:
+`{ "provider": "Mullvad", "role": "entry", "listUpdated": "2026-10-21T06:17:02.000Z" }` (`role`: `entry` or `exit`;
+`listUpdated`: when that provider's list was last downloaded). Lookups (`/<ip>` and its `/text` and `/json` forms,
+`/api/lookup`) have it at the top level, and leaktest's `/api/check` under `network`. The text answer's `source` line
+adds `+ Mullvad's server list`.
+
+**How it's kept.** One Durable Object (`VpnServers`, named `lists`) downloads the four lists when the cron trigger
+fires (`[triggers]` in `wrangler.toml`: every 6 hours, at minute 17), and once by itself on a new deployment, when a
+lookup finds it empty (an alarm, at most once an hour). Its own small budget: one request per list and run, no
+retries (the next run is the retry), 20 seconds and a size cap (1 or 2 MB) per list, and a few tens of milliseconds
+of CPU to read all four (about 150, 180, 70 and 210 KB). `src/vpn-lists.js` reads each list field by field: only
+public IPv4 and global IPv6 addresses count, so a placeholder such as `2001:db8::1` is skipped. A list that
+fails to download, isn't JSON, has fewer addresses than the provider's minimum, or comes back with less than half of
+the last good one leaves the last good list in place, and the last try's error shows on `/status`. A list that keeps
+coming back halved is taken on the second run in a row (a provider that really shrank). A provider whose list hasn't
+been refreshed for 3 days (`VPN_MAX_AGE`) drops out, so an address it gave up doesn't stay "known".
+
+All the lists are packed into one blob of sorted addresses, about 40 KB (`packIndex()`). Each data center caches it
+for 30 minutes and each Worker keeps it in memory for 10, so a lookup is a binary search in memory: no outside
+request, no budget, no rate-limit count, and nothing about the lookup or the visitor leaves the Worker. That is why
+bots get the listing like anyone else: the bot rule is about the paid budgets, and this spends none. On a cold Worker
+a lookup waits at most 1.5 seconds for the blob, then goes on without it.
+
+Why a Durable Object rather than KV or D1: the deployment creates it, so neither ipterm.net nor a copy has a namespace
+or database to set up; the writes are one blob four times a day; and the reads come from the cache and memory, where
+an exact-match search of a sorted array is as fast as it gets.
 
 ### Bots never spend the budgets
 
@@ -193,6 +267,7 @@ What a bot gets, on every route that looks an address up (`/<ip>` and its `/text
   otherwise IPinfo Lite, which is free (`ipData()`).
 - proxycheck.io: a cached answer or none, never a new query, a budget count or a rate-limit count (`privacyData()`).
 - The registry date: from the cache only, as before (`blockData()`).
+- The VPN providers' own lists (`vpnServer`): the same as anyone's, since they are searched in memory and spend nothing.
 
 So a bot sees country and network where a person sees a city, on the same page with the same title, links and
 wording, the way a visitor past their hourly share does: less detail, never different content. Everything else the
@@ -255,7 +330,7 @@ curl -H "x-status-key: <your key>" "https://ipterm.net/status?format=text"
 `?key=<your key>` works too, for a quick look in a browser. Without the right key (and while no key of 16+
 characters is set), `/status` is an ordinary 404, the same answer as any unknown address, so scrapers can't
 watch the budgets run down. It isn't linked anywhere or listed in the sitemap, and the keyed answer is sent
-`no-store` with `X-Robots-Tag: noindex, nofollow`. Each look costs one Worker request and two Durable
+`no-store` with `X-Robots-Tag: noindex, nofollow`. Each look costs one Worker request and three Durable
 Object requests; it never touches IPinfo or proxycheck.io.
 
 | Field (per service) | Meaning |
@@ -267,6 +342,11 @@ Object requests; it never touches IPinfo or proxycheck.io.
 | `hoursRunOutToday` | UTC hours (`"14"`) whose hourly budget filled. After that, lookups used IPinfo Lite (or skipped proxycheck.io) until the hour ended |
 | `dayRanOutAt` | When the daily budget filled, if it did. After that, the fallback lasted until midnight UTC |
 | `pastDays` | The same per finished day, newest first: `used`, `hoursRunOut`, `ranOutAt`. A day with no lookups has no entry |
+
+`vpnServers` lists the VPN providers' own server lists (see "Known VPN servers"), one entry per provider: `addresses`
+(`ipv4`, `ipv6`) in its last good list, `updated` (when that list was downloaded), `tried` (the last try), `error`
+(why the last try's list wasn't taken, or null) and `stale` (older than 3 days, so no longer used). The text form has
+one line per provider: `mullvad  1106 addresses, updated 2026-10-21 06:17 UTC`, plus the last try's failure if any.
 
 Not counted: lookups that fell back because one visitor used up their own hourly share, or because Core
 errored or refused the token (those are logged; watch with `npx wrangler tail`).
@@ -288,6 +368,7 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | Routing of a prefix: route, origin, RPKI, visibility, AS paths | RIPEstat (`prefix-overview`, `routing-status`, `rpki-validation`, `bgp-state`) | Free, no key |
 | The ASN sitemap's ranking (offline, `tools/build_asn_sitemap.mjs`) | RIPE NCC RIS table dump and AS names list (or CAIDA's prefix-to-AS file) | Free, run by hand |
 | Which DNS resolvers a visitor uses (leaktest) | ipterm's own DNS server for `dl.ipterm.net` (`dnsleak-server/`), plus IPinfo Lite for the resolvers' networks | The VPS, about $4 to $6 a month |
+| Known VPN servers: whether a VPN provider's own list names an address (lookups, leaktest) | The lists Mullvad, Private Internet Access, IVPN and AirVPN publish, downloaded every 6 hours by a cron trigger (see "Known VPN servers") | Free; four subrequests a run. Lookups search a copy in memory, so bots get it too |
 | Whether the visitor's address is a Tor exit (leaktest) | The Tor Project's exit list, cached an hour per data center | Free; at most one subrequest an hour per data center |
 | Cloudflare WARP, TLS and HTTP versions, key exchange (leaktest) | Cloudflare's `/cdn-cgi/trace`, read by the browser | Free; the edge answers it, not the Worker |
 
@@ -311,6 +392,9 @@ ipterm is MIT-licensed, so you can run your own copy. Follow "Deploy" above, the
    `/api` and the terminal's copy of it use your own address automatically, on https.
 5. Optional: `npx wrangler secret put IPINFO_TOKEN` (and `PROXYCHECK_KEY`, `STATUS_KEY`), as described above. Your
    copy uses your own IPinfo and proxycheck.io allowances, and keeps IPinfo's attribution in the footer.
+
+The known VPN servers need no setup: the deployment creates their Durable Object and cron trigger, and the first
+lookup after it starts the first download. Their requests name `SOURCE_URL` in the user agent.
 
 Everything else (the budgets, the rate limits, the CSP) works the same. `workers_dev = false` means the copy only
 answers on a custom domain; set it to `true` to try it on `*.workers.dev` first.
@@ -968,7 +1052,10 @@ address, and grades the leaks A to F. Each line is marked OK, LEAK or INFO:
   grade is about leaks, not about whether someone uses a VPN.
 - **VPN detection:** IPinfo Core's classification of the visitor's IP (VPN/proxy/Tor, hosting
   flag, or a network whose type is hosting), plus proxycheck.io's when `PROXYCHECK_KEY` is set
-  (which can name the VPN service). Two services are named outright: **Cloudflare WARP**, when
+  (which can name the VPN service). An address on a VPN provider's own server list (see "Known VPN servers")
+  is that provider's server, entry or not, since the visitor's traffic reaches ipterm from it: the line names
+  it ("your IP is a known VPN server (on Mullvad's own server list)"), it counts as a VPN, and
+  proxycheck.io isn't asked. Two services are named outright: **Cloudflare WARP**, when
   Cloudflare's edge says the request came through it (`warp=on` or `warp=plus` in `/cdn-cgi/trace`, which
   the page reads itself), and **Tor**, when the address is on the Tor Project's exit list (see "Tor exits"
   below) or Cloudflare gives it the country code `T1`, or when proxycheck.io knows it as Tor (then this line
@@ -1019,7 +1106,8 @@ asks with `block=0` (see "Recently registered blocks"). That lookup also asks wi
 VPN check, so it spends neither paid budget and the other address never goes to proxycheck.io. Only its network
 is compared (the IPv6 / IPv4 line, and "your ISP" on the DNS line), and Lite names the same AS number and network as
 Core; VPN detection is about the address sites see, from `/api/check`, so the grade and the verdict come out the same.
-When VPN detection ran (IPinfo Core or proxycheck.io answered for the visitor's address) and found no VPN, the
+When VPN detection ran (IPinfo Core or proxycheck.io answered for the visitor's address, or a VPN provider's own list
+named it, which makes it a VPN) and found no VPN, the
 verdict is always followed by the sponsored line (any sponsor with `"check"` in its `on` list in `sponsors.json`,
 currently Proton VPN). When it couldn't run (both services' budgets spent for the hour, say, which on a busy day is
 most runs), the VPN line says "unavailable" and no sponsored line follows: the visitor may well be on a VPN
@@ -1480,7 +1568,9 @@ through `/go` is one request for the redirect plus the page it lands on (the red
 and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one
 (IPinfo Lite: no Core or proxycheck.io budget); its `/cdn-cgi/trace` read and a shared result page's images are free. A shared result page (`/leaktest/r/<code>`) is one request. A report card (`/grade/<domain>`) is one request, with 33 to 41 subrequests when it isn't cached (see "Domain report card"); each badge fetch is one request, and shields.io and GitHub's image proxy keep the image for as long as ipterm's copy has left (an hour at most; at least five minutes through shields.io, whose minimum that is, and a minute for the `.svg`). `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
 which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
-requests. `/me`, `/line` and `/expect/...` are one request each, with no other cost: no subrequest, no Durable
+requests. The known VPN servers' cron trigger runs four times a day: one invocation, four subrequests (one per list)
+and one Durable Object request each time. A lookup reads the lists from memory, and each Worker refreshes its copy
+at most every 10 minutes, from the data center's cache or with one Durable Object request. `/me`, `/line` and `/expect/...` are one request each, with no other cost: no subrequest, no Durable
 Object call, no rate-limiter call.
 
 **If you add a new static file** (an image, a script, like `cidr.js` was), add a `"!/<file>"` line to `run_worker_first`
@@ -1516,6 +1606,7 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | Bots never spend IPinfo Core or proxycheck.io: named crawlers and link previews, `BOT_UA`, and anything asking for HTML without a browser's `Sec-Fetch-*` get Core's answer only from the cache, otherwise IPinfo Lite, and a VPN check only from the cache; command-line tools and scripts asking for JSON keep full data | `isBot()`, `ipData()`, `privacyData()`, `blockData()` in `src/worker.js`; `tools/check_bots.mjs` | See "Bots never spend the budgets" |
 | Bots never start a RIPEstat routing lookup: a public `/cidr` page shows them the calculation, with the routing only when it is cached; `/route/<ip>` sends them to a cached route or the address's `/32`; JSON and text answer 403. The three public `/cidr` pages in `SITEMAP_PATHS` are the exception. People, the terminal, curl and scripts keep live routing | `routeData()`, `cidrRoute()`, `routeRoute()` in `src/worker.js`; `tools/check_bots.mjs` | `curatedRoutes()`; see "Bots never spend the budgets" |
 | A lookup's registry date (`block`): RDAP only, never IPinfo or proxycheck.io; never for the visitor's own address (`?block=0` from the terminal for their other IP version); bots (`isBot()`) only read the cache (shared with `whois <ip>`, a day); anyone else's registry request counts toward their rate limit, riding on the lookup's own count or sharing the VPN check's; 0.3 seconds at most once the rest of the answer is ready, then the answer goes without it and the request finishes in the background; lookups of one address share a request in flight; a registry that fails is left alone for a minute (ten after a 429) | `blockData()` in `src/worker.js`; `tools/check_block.mjs` | `BLOCK_RECENT_DAYS`, `BLOCK_GRACE`; see "Recently registered blocks" |
+| Known VPN servers: downloaded only by the cron trigger (and once by an alarm after a deployment), one request per provider, 20 seconds and a size cap each, no retries; read field by field, keeping only public IPv4 and global IPv6 addresses; a broken, short or halved list never replaces the last good one; a list older than 3 days isn't used; lookups match exact addresses only and send nothing anywhere | `src/vpn-lists.js`, `VpnServers` in `src/worker.js`; `tools/check_vpnlists.mjs` | `VPN_PROVIDERS`, `VPN_MAX_AGE`; see "Known VPN servers" |
 | Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
 | DNS leak test: `/api/dnsleak` only from the ipterm page or a command-line tool, well-formed tokens only, rate limited; the VPS's API needs the `DNSLEAK_KEY` secret (compared in constant time), listens on 127.0.0.1 behind Caddy, hands each token's resolvers over once and forgets them; non-public resolver addresses never go to IPinfo | `dnsleakRoute()` in `src/worker.js`, `dnsleak-server/` | See "DNS leak test server" |
 | Shared leak test results: the code is made in the browser and holds only the grade and per-check flags (no IP, provider, location or resolver); the Worker decodes it strictly (a letter that doesn't match its checks is a 404); the page never runs the test, and isn't indexed | `public/leakgrade.js`, `leakShareRoute()` in `src/worker.js` | See "Shared results" |
@@ -1576,8 +1667,12 @@ npx wrangler dev
 
 `sh tools/check_previews.sh` (link previews and crawlers get pages, scripts get JSON), `sh tools/check_go.sh`
 (address-bar search, hostile inputs included) and `node tools/check_block.mjs` (a lookup's registry date) run
-against it. `node tools/check_bots.mjs` (bots never spend the budgets) and `node tools/check_https.mjs` (plain http)
-need no server (Node 22.15 or later).
+against it. `node tools/check_bots.mjs` (bots never spend the budgets), `node tools/check_https.mjs` (plain http) and
+`node tools/check_vpnlists.mjs` (the known VPN servers) need no server (Node 22.15 or later).
+
+Under `wrangler dev` the first lookup starts the VPN lists' first download (the Durable Object's alarm), from the
+providers' real lists. To run the cron trigger itself, start it with `npx wrangler dev --test-scheduled` and ask
+`curl "http://localhost:8787/__scheduled?cron=17+*/6+*+*+*"`.
 
 Note that `request.cf` location data is limited when running locally, and `ping` says it can't run there:
 it needs Cloudflare's edge, which answers `/cdn-cgi/trace` on the deployed site. The port check sees
@@ -1647,6 +1742,21 @@ still get the 429. Last, proxycheck.io's catch-all `anonymous` flag on an anycas
 the text answer, the IP page and the terminal say "not a known VPN, proxy or Tor service" and name the flag, and the
 terminal's map caption (`geoNote()`) gives the anycast address no radius.
 
+`node tools/check_vpnlists.mjs` (Node 22.15 or later) checks the known VPN servers (see "Known VPN servers"), with no
+server and no network. First the parsers, on a few real entries of each provider's list saved in
+`tools/fixtures/vpn-lists/` (2026-10-21) plus odd ones: every address an entry, and what isn't a VPN entry skipped
+(Mullvad's in-tunnel gateways, PIA's API proxies and signature lines, private, documentation and malformed
+addresses). Then the packed index: exact addresses only, IPv6 in any spelling, an exit before an entry, a list older
+than 3 days passed over, a damaged blob refused. Then the refresh, on a stand-in for the Durable Object's storage:
+one request per provider with ipterm's user agent; a download that fails, an HTML page, a list under the minimum or
+over the size cap each keep the last good list and say why; a halved list is held back once and taken when the next
+run agrees; lists that keep failing for 3 days drop out; an empty object sets one alarm an hour; two refreshes at
+once share one set of requests; the cron trigger runs one. Last, the whole Worker in Node: a listed address's JSON,
+text answer (with `?color=1`), IP page and terminal lookup (IPv4 and IPv6), a neighbour and an unlisted address
+unchanged, Googlebot getting the listing without spending a budget, leaktest's `/api/check` from a listed address
+skipping proxycheck.io, a made-up provider's exit skipping it in a lookup too, `/status`, the Worker without the
+binding, and leaktest's logic in `public/app.js`: a listing counts as a VPN, so the sponsored line never follows it.
+
 `node tools/check_https.mjs` (Node 22.15 or later) checks plain http (see "One copy of the site, on https"), also
 with no server and no network: the whole Worker in Node, its static files read from `public/`, and `fetch` stubbed. Over
 `http://ipterm.net`, Googlebot, a link preview and a browser navigation get a 301 to the same path and query on https
@@ -1671,6 +1781,11 @@ the map outlines in `public/land.js` (and the land mask made from them) are from
 IPinfo's data comes with its own attribution condition (see "Recommended: add a free IPinfo token").
 
 ## Next steps worth considering
+
+- Exits for the known VPN servers. AirVPN's servers each answer a public DNS name, `<server>_exit.airservers.org`,
+  with their exit address (AirVPN's app builds the same name), but it is undocumented, AirVPN says resolving by server
+  name is limited, and it would take 250 DNS queries a refresh. NordVPN's list, likely exits, needs Nord's written
+  permission. Either would turn many entries into exits, which also show up in `leaktest`.
 
 - City-level data for every lookup: upgrade to IPinfo Core, or swap the provider function for another API.
 - Bulk lookups.
