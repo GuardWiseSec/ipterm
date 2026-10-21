@@ -94,13 +94,13 @@ export function v6words(s) {
   const n = g.map(x => parseInt(x, 16));
   return [0, 2, 4, 6].map(i => n[i] * 65536 + n[i + 1]);
 }
-function publicV4(n) {
+export function publicV4(n) {
   const a = n >>> 24, b = (n >>> 16) & 255, c = (n >>> 8) & 255;
   return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0 && (c === 0 || c === 2)) ||
     (a === 198 && (b === 18 || b === 19)) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113));
 }
-const globalV6 = w => w[0] >>> 29 === 1 && w[0] !== 0x20010db8;      // 2000::/3, but not 2001:db8::/32
+export const globalV6 = w => w[0] >>> 29 === 1 && w[0] !== 0x20010db8;      // 2000::/3, but not 2001:db8::/32
 
 // A provider's parsed [address, role] pairs as one downloaded list: each address once (exit wins over entry), sorted,
 // in typed arrays. role arrays: 0 = exit, 1 = entry.

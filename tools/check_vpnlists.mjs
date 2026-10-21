@@ -25,12 +25,21 @@
 //    real one lists exits) skips proxycheck.io in a lookup too; /status shows each list; without the binding nothing
 //    changes. Then leaktest in public/app.js: a listing counts as a VPN, so the sponsored line (shown only after a
 //    no-VPN verdict from a check that ran) stays away, and the copied Markdown's masking hides the provider's name.
-// 5. The docs name the feature, the providers and this check.
+// 6. iCloud Private Relay (src/relay-list.js, refreshRelay and relayData in src/worker.js): Apple's own list of its
+//    relays' addresses, saved lines plus junk (tools/fixtures/vpn-lists/icloud-relay.csv): ranges read and merged,
+//    and their edges in IPv4 and IPv6 (first and last address in, the neighbours out, adjacent ranges merged, also
+//    across a 32-bit word); the refresh: no If-None-Match the first time, Apple's ETag the next, a 304 keeping the
+//    ranges and dating them, a failure or a short list keeping the last good copy, a copy 3 days old unused, an old
+//    format refreshed; then lookups: JSON (relay), text, page and terminal in both IP versions, ?lite=1, a bot,
+//    leaktest's check, /status, no proxycheck.io query for a relay address, and leaktest's verdict (a relay, with no
+//    sponsored line).
+// 7. The docs name the feature, the providers and this check.
 //
 //   node tools/check_vpnlists.mjs        (Node 22.15 or later: it loads the Worker through module.registerHooks)
 import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import * as L from '../src/vpn-lists.js';
+import * as A from '../src/relay-list.js';
 
 const root = new URL('..', import.meta.url);
 const read = f => readFileSync(new URL(f, root), 'utf8').replace(/\r\n/g, '\n');   // a Windows checkout has CRLF
@@ -179,8 +188,11 @@ let serve = {};
 const reply = (body, status = 200, headers = {}) => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
 const providerOf = u => Object.keys(P).find(id => P[id].url === u) || (extra && u === extra.url ? extra.id : null);
 let extra = null;                                        // a made-up provider that lists exits (no real one does)
+const relayCalls = [];                                   // Apple's list: the If-None-Match each request sent
+let serveRelay = () => new Response('busy', { status: 503 });
 globalThis.fetch = async (input, init = {}) => {
   const u = typeof input === 'string' ? input : input.url;
+  if (u === A.RELAY.url) { calls.push(['relay', u]); relayCalls.push((init.headers || {})['if-none-match'] || null); return serveRelay(init); }
   const id = providerOf(u);
   let m;
   if (id) {
@@ -417,7 +429,7 @@ ok(Array.isArray(sv.providers) && sv.providers.map(p => p.id).join() === 'mullva
 // that has never had an index (a second copy of the module: a fresh isolate): it asks again a minute later, not on
 // every lookup.
 let blobCalls = 0;
-env.VPN_SERVERS = { idFromName: n => n, get: () => ({ blob: async () => { blobCalls++; return null; } }) };
+env.VPN_SERVERS = { idFromName: n => n, get: () => ({ blob: async () => { blobCalls++; return null; }, relayBlob: async () => null }) };
 const { default: fresh } = await import('../src/worker.js?fresh-isolate');
 later(11 * 60_000);
 await run('/46.1.2.4/json', { ua: CURL, accept: '*/*', worker: fresh }); await run('/46.1.2.5/json', { ua: CURL, accept: '*/*', worker: fresh });
@@ -428,7 +440,7 @@ ok(callsSoon === 1 && blobCalls === 2, `with no lists in the object, two lookups
 // An object that never answers (its requester's context gone, say): each lookup waits VPN_WAIT at most, and after 30
 // seconds the next lookup starts a new load instead of waiting on the dead one forever.
 let hangs = 0;
-env.VPN_SERVERS = { idFromName: n => n, get: () => ({ blob: () => { hangs++; return new Promise(() => {}); } }) };
+env.VPN_SERVERS = { idFromName: n => n, get: () => ({ blob: () => { hangs++; return new Promise(() => {}); }, relayBlob: () => new Promise(() => {}) }) };
 const { default: fresh2 } = await import('../src/worker.js?fresh-isolate-2');
 const h0 = realNow(), h1 = await run('/46.1.2.7/json', { ua: CURL, accept: '*/*', worker: fresh2, settle: false }), waited = realNow() - h0;
 await run('/46.1.2.8/json', { ua: CURL, accept: '*/*', worker: fresh2, settle: false });
@@ -448,7 +460,7 @@ env.VPN_SERVERS = binding;
 
 console.log('-- 4. leaktest in public/app.js: a listing is a VPN, so no sponsored line');
 const leak = slice(app, '    const net = d.network || {}, f = net.flags || {}, pc = net.privacy || null;', '    const tunnel =');
-const decide = Function('trace', 'd', 'pcKnown', leak + 'return { listed, vpnKnown, anon, vpn, homeNet };');
+const decide = Function('trace', 'd', 'pcKnown', 'otherInfo', leak + 'return { listed, relay, otherRelay, vpnKnown, anon, vpn, homeNet };');
 const pcKnown = pc => !!(pc && pc.anonymous && (pc.vpn || pc.proxy || pc.tor || pc.operator));
 const listedRun = decide(null, { countryCode: 'NL', network: { source: 'ipinfo-core', asType: 'isp', flags: {}, privacy: null, vpnServer: { provider: 'IVPN', role: 'entry' } } }, pcKnown);
 const lite = decide(null, { network: { source: 'ipinfo-lite', flags: null, privacy: null, vpnServer: { provider: 'IVPN', role: 'entry' } } }, pcKnown);
@@ -469,7 +481,119 @@ const hid = L.VPN_PROVIDERS.map(p => p.name).map(name => {
 ok(hid.every(t => t === "your IP is a known VPN server (on [hidden]'s own server list): sites see that, not your provider"),
   `the copied Markdown's own masking (termRe, mdTerms in public/app.js) hides every provider's name in that line: ${JSON.stringify(hid[1])}`);
 
-console.log('-- 5. the docs');
+console.log("-- 6. iCloud Private Relay: Apple's own list of its relays' addresses (src/relay-list.js, refreshRelay in src/worker.js)");
+const csv = read('tools/fixtures/vpn-lists/icloud-relay.csv');
+const rr = A.parseRelay(csv);
+ok(rr.count === 20 && rr.four.length === 4 && rr.six.length === 3,
+  `the saved lines: 20 ranges read and 9 junk lines skipped (blank, a header, not an address, private, wider than a /8, documentation, narrower than a /64, a bad length, no length), merged into ${rr.four.length} IPv4 and ${rr.six.length} IPv6 ranges`);
+const ri = A.unpackRelay(A.packRelay(rr, NOW)), rf = ip => !!A.findRelay(ri, ip, NOW);
+const edges = [
+  ['172.224.226.0', true, 'the first address of a /27'], ['172.224.226.45', true, 'the last address of the /31s adjacent to it'],
+  ['172.224.226.46', false, 'the next address'], ['172.224.225.255', false, 'the address before the first'],
+  ['172.225.7.16', true, 'a /32'], ['172.225.7.18', true, 'the last of three adjacent /32s'], ['172.225.7.15', false, 'just below them'], ['172.225.7.19', false, 'just above them'],
+  ['172.225.76.255', true, 'the last address of two adjacent /24s'], ['172.225.77.0', false, 'the next /24'], ['172.225.74.255', false, 'the /24 before'],
+  ['172.226.1.7', true, 'a line ending in CRLF'],
+  ['2606:54c0::', true, 'the first address of three adjacent IPv6 /45s'], ['2606:54c0:17:ffff:ffff:ffff:ffff:ffff', true, 'their last address'],
+  ['2606:54c0:18::', false, 'the next /64'], ['2606:54bf:ffff:ffff:ffff:ffff:ffff:ffff', false, 'the address before the first'],
+  ['2a02:26f7:b000:4000::', true, "an isolated /64's first address"], ['2A02:26F7:B000:4000:FFFF:FFFF:FFFF:FFFF', true, 'its last address, in capitals'],
+  ['2a02:26f7:b000:4001::', false, 'the next /64'], ['2a02:26f7:b000:3fff:ffff:ffff:ffff:ffff', false, 'the address before'],
+  ['2a02:26f7:ffff:ffff:1::', true, 'a /64 that ends a 32-bit word'], ['2a02:26f8::ffff', true, 'the adjacent /64 after the carry, merged with it'],
+  ['2a02:26f8:0:1::', false, 'the /64 after that'],
+  ['10.0.0.1', false, 'a private range on a junk line'], ['16.1.2.3', false, 'a range wider than a /8'], ['2a02:26f7:b000:5000::1', false, 'a /128 (narrower than a /64)'],
+  ['8.8.8.8', false, 'an unrelated address'], ['not-an-ip', false, 'junk'],
+];
+const wrongEdges = edges.filter(([ip, want]) => rf(ip) !== want);
+ok(!wrongEdges.length, `range edges in IPv4 and IPv6 (${edges.length} addresses): ` + (wrongEdges.length ? 'wrong: ' + wrongEdges.map(e => `${e[0]} (${e[2]})`).join(', ')
+  : 'first and last addresses in, their neighbours out, adjacent ranges merged, also across a 32-bit word'));
+ok(A.findRelay(ri, '172.224.226.0', NOW + L.VPN_MAX_AGE) && !A.findRelay(ri, '172.224.226.0', NOW + L.VPN_MAX_AGE + 1), 'a copy of the list 3 days old (VPN_MAX_AGE) is not used');
+const rs1 = A.unpackRelay(A.restampRelay(A.packRelay(rr, NOW), NOW + HOUR));
+ok(rs1.at === new Date(NOW + HOUR).toISOString() && rs1.count === 20 && [...rs1.first6].join() === [...ri.first6].join() && [...rs1.last4].join() === [...ri.last4].join(),
+  'restampRelay (after a 304) keeps every range and changes only the date');
+const rgood = A.packRelay(rr, NOW), rbad = new Uint8Array(rgood.slice(0)); rbad[3] = 50;
+let rrefused = 0;
+for (const b of [rbad.buffer, rgood.slice(0, rgood.byteLength - 4), L.packIndex([], NOW)]) { try { A.unpackRelay(b); } catch { rrefused++; } }
+ok(rrefused === 3 && A.isRelay(rgood) && !A.isRelay(L.packIndex([], NOW)), "a blob that isn't the relay format, is cut short, or is the VPN index is refused");
+
+// The refresh. Apple's list made full-sized: the saved lines plus 12,000 /32s in a row (they merge into one range).
+const bigRelay = n => csv + '\n' + Array.from({ length: n }, (_, i) => `17.100.${i >> 8}.${i & 255}/32,US,US-CA,Cupertino,`).join('\n');
+const TR = Date.now();
+serveRelay = () => new Response(bigRelay(12000), { status: 200, headers: { etag: '"e1"' } });
+relayCalls.length = 0;
+await vs.refresh(TR);
+let rm = await vs.relayStatus();
+ok(relayCalls.length === 1 && relayCalls[0] === null && rm.count === 12020 && rm.etag === '"e1"' && !rm.error && rm.n4 === 5 && rm.n6 === 3 &&
+  A.findRelay(A.unpackRelay(await vs.relayBlob(TR)), '17.100.46.223', TR),
+  `the first download asks with no If-None-Match and keeps ${rm.count} ranges (${rm.n4} IPv4 and ${rm.n6} IPv6 merged) and Apple's ETag`);
+serveRelay = init => ((init.headers || {})['if-none-match'] === '"e1"' ? new Response(null, { status: 304 }) : new Response('unexpected', { status: 200 }));
+await vs.refresh(TR + 6 * HOUR);
+rm = await vs.relayStatus();
+const r6 = A.unpackRelay(await vs.relayBlob(TR + 6 * HOUR));
+ok(relayCalls[1] === '"e1"' && rm.unchanged && !rm.error && rm.at === new Date(TR + 6 * HOUR).toISOString() && r6.at === rm.at && A.findRelay(r6, '17.100.0.0', TR + 6 * HOUR),
+  'the next asks with that ETag, and a 304 keeps the ranges, dated now');
+serveRelay = () => new Response('busy', { status: 503 });
+await vs.refresh(TR + 12 * HOUR);
+rm = await vs.relayStatus();
+ok(/HTTP 503/.test(rm.error) && rm.at === new Date(TR + 6 * HOUR).toISOString() && rm.count === 12020 && A.findRelay(A.unpackRelay(await vs.relayBlob(TR + 12 * HOUR)), '172.224.226.0', TR + 12 * HOUR),
+  `a failed download keeps the last good copy and says why: ${rm.error}`);
+serveRelay = () => new Response(csv, { status: 200, headers: { etag: '"e2"' } });
+await vs.refresh(TR + 18 * HOUR);
+rm = await vs.relayStatus();
+ok(/only 20 ranges \(at least 10000 expected\)/.test(rm.error) && rm.etag === '"e1"' && rm.count === 12020 && relayCalls[3] === '"e1"',
+  `a list far too short is refused and the last good copy kept: ${rm.error}`);
+ok(!A.findRelay(A.unpackRelay(await vs.relayBlob(TR + 7 * HOUR + L.VPN_MAX_AGE)), '172.224.226.0', TR + 7 * HOUR + L.VPN_MAX_AGE),
+  'with no good download or 304 for 3 days, lookups stop using it');
+const oldRelay = new Uint8Array(16); oldRelay.set([65, 80, 82, 48]);              // "APR0": an older format
+const keepRelay = await storage.get('relay');
+await storage.put('relay', oldRelay.buffer); storage.alarm = null;
+ok((await vs.relayBlob(TR + 30 * HOUR)) === null && storage.alarm === TR + 30 * HOUR + 1000, 'a stored copy in an older format counts as none: the lookup gets null and an alarm refreshes it');
+await storage.put('relay', keepRelay); storage.alarm = null;
+
+// Lookups
+const RELAY_LINE = "yes: Apple's iCloud Private Relay (on Apple's own list of its relay addresses: sites see Apple's address, not the user's)";
+later(11 * 60_000);
+await run('/8.8.4.4/json', { ua: CURL, accept: '*/*' });                         // loads this Worker's copy
+const rj = await run('/172.224.226.45/json', { ua: CURL, accept: '*/*' }), rjd = rj.data || {};
+ok(JSON.stringify(rjd.relay) === JSON.stringify({ service: 'iCloud Private Relay', operator: 'Apple', listUpdated: new Date(TR + 6 * HOUR).toISOString() }) &&
+  !rjd.privacy && !rj.kinds.includes('proxycheck') && !('vpnServer' in rjd),
+  `curl /172.224.226.45/json (the last address of a merged range): relay ${JSON.stringify(rjd.relay)}, and no proxycheck.io query`);
+const rn = await run('/172.224.226.46/json', { ua: CURL, accept: '*/*' });
+ok(rn.data && !('relay' in rn.data) && rn.kinds.includes('proxycheck'), 'the next address (172.224.226.46) has no relay field, and proxycheck.io is asked as before');
+const rt6 = await run('/2a02:26f7:b000:4000:ffff:ffff:ffff:ffff/text', { ua: CURL, accept: '*/*' }), rt4 = await run('/172.225.7.18/text', { ua: CURL, accept: '*/*' });
+ok(vpnLine(rt6.body) === RELAY_LINE && vpnLine(rt4.body) === RELAY_LINE && /^source +IPinfo Core \+ Apple's iCloud Private Relay list$/m.test(rt6.body),
+  `the text answer, IPv6 (the last address of a /64) and IPv4: ${JSON.stringify(vpnLine(rt6.body))}, and the source line names Apple's list`);
+const rp6 = await run('/2606:54c0:17:ffff:ffff:ffff:ffff:ffff', { ua: CHROME, ...NAV }), rp6n = await run('/2606:54c0:18::', { ua: CHROME, ...NAV });
+const rp4 = await run('/172.225.76.255', { ua: CHROME, ...NAV });
+ok(unesc(dd(rp6.body)) === RELAY_LINE && unesc(dd(rp4.body)) === RELAY_LINE && unesc(dd(rp6n.body)) !== RELAY_LINE,
+  "the IP page at a range's last address, IPv6 and IPv4, and not at the next IPv6 /64");
+const ra4 = await run('/api/lookup?ip=172.225.7.16', { ua: CHROME, ...TERMINAL }), ra6 = await run('/api/lookup?ip=2606:54c0::', { ua: CHROME, ...TERMINAL });
+ok(V.vpnText(ra4.data || {}) === RELAY_LINE && V.vpnText(ra6.data || {}) === RELAY_LINE, "the terminal's lookup (vpnText in public/app.js) says the same, IPv4 and IPv6");
+const rlite = await run('/api/lookup?ip=172.225.7.17&block=0&lite=1', { ua: CHROME, ...TERMINAL }), rld = rlite.data || {};
+ok(rld.relay && rld.source === 'ipinfo-lite' && !rld.privacy && !rlite.kinds.some(k => k === 'core' || k === 'proxycheck'),
+  "?lite=1 (leaktest's lookup of the other IP version) carries the free listing, and still spends no budget");
+mayTake = false;
+const rg = await run('/172.225.75.9', { ua: GOOG }), rgd = rg.data || {};
+ok(rgd.relay && rgd.source === 'ipinfo-lite' && !rg.taken.length && unesc(dd(rg.body)) === RELAY_LINE, 'Googlebot gets the listing, which is free, and no budget');
+mayTake = true;
+const rc = await run('/api/check', { ua: CHROME, me: '172.224.226.0', ...TERMINAL }), rcn = (rc.data || {}).network || {};
+ok(rcn.relay && rcn.relay.service === 'iCloud Private Relay' && rcn.privacy === null && !rc.kinds.includes('proxycheck'),
+  `leaktest's check from a relay address: network.relay ${JSON.stringify(rcn.relay)}, no proxycheck.io query`);
+const rsj = await run('/status', { ua: CURL, accept: '*/*', 'x-status-key': env.STATUS_KEY }), rst = await run('/status?format=text', { ua: CURL, accept: '*/*', 'x-status-key': env.STATUS_KEY });
+const pr = (rsj.data || {}).privateRelay || {};
+ok(pr.ranges === 12020 && pr.ipv4 === 5 && pr.ipv6 === 3 && pr.updated && !pr.stale && /^icloud relay +12020 ranges \(5 IPv4 and 3 IPv6 merged\), updated .*; last try .* failed: only 20 ranges/m.test(rst.body),
+  `/status shows Apple's list: ${JSON.stringify((/^icloud relay.*$/m.exec(rst.body) || [''])[0])}`);
+
+// leaktest (public/app.js): a relay, named, graded as a tunnel the way WARP and Tor are, and never followed by the sponsored line
+const relayNet = { source: 'ipinfo-core', asn: 'AS36183', asType: 'hosting', flags: { hosting: true }, privacy: null, relay: { service: 'iCloud Private Relay' } };
+const rv = decide(null, { network: relayNet }, pcKnown, { asn: 'AS13335', relay: { service: 'iCloud Private Relay' } });
+const rv2 = decide(null, { network: relayNet }, pcKnown, { asn: 'AS7922' });
+ok(rv.relay && rv.vpn && rv.anon && rv.vpnKnown && rv.otherRelay && rv2.vpn && !rv2.otherRelay,
+  "a visitor on Apple's list is on a relay (vpn and vpnKnown true, so no sponsored line); their other IP version counts as relayed only when Apple lists it too");
+ok(app.includes("else if (relay) add('vpn', 'ok', 'VPN detection', \"you're on Apple's iCloud Private Relay (your IP is on Apple's own list of its relay addresses): sites see Apple's address, not yours. It covers Safari, not your other apps\"") &&
+  app.includes("relay ? 'relay on' : vpn ? 'vpn on'") && app.includes("(g.kind === 'other' && !tor && !relay)") && app.includes("else if (otherRelay) add('ipv6', 'ok', otherV") &&
+  app.includes("const offer = vpnKnown && !vpn && !vpnSeen;"),
+  "leaktest names it (tag \"relay on\"), lets the relay pick the DNS resolver as a Tor exit does, accepts the other IP version through the relay, and the sponsored line's rule is unchanged");
+
+console.log('-- 7. the docs');
 const hb = read('docs/handbook.md'), readme = read('README.md'), llms = read('public/llms.txt'), api = JSON.parse(read('public/openapi.json'));
 const worker = read('src/worker.js'), toml = read('wrangler.toml');
 ok(hb.includes('Known VPN servers') && hb.includes('tools/check_vpnlists.mjs') && ['Mullvad', 'Private Internet Access', 'IVPN', 'AirVPN', 'NordVPN', 'Proton', 'Surfshark'].every(n => hb.includes(n)),
@@ -478,8 +602,11 @@ ok(/Mullvad/.test(readme) && /vpnServer/.test(llms) && JSON.stringify(api).inclu
   'README.md, public/llms.txt, public/openapi.json (vpnServer) and the Worker\'s notes mention it');
 ok(/\[triggers\]\s*\ncrons = \["17 \*\/6 \* \* \*"\]/.test(toml) && /class_name = "VpnServers"/.test(toml) && /new_sqlite_classes = \["VpnServers"\]/.test(toml),
   'wrangler.toml binds VpnServers, adds its migration and the 6-hourly cron');
+ok(hb.includes("### iCloud Private Relay: Apple's own list") && /Residential proxy networks/.test(hb) && /iCloud Private Relay/.test(readme) && /`relay`/.test(llms) &&
+  api.components.schemas && JSON.stringify(api).includes('"relay"') && read('public/privacy.html').includes('iCloud Private Relay'),
+  'the handbook (iCloud Private Relay, and what no list covers: residential and commercial proxy networks), README, llms.txt, openapi.json (relay) and the privacy page describe Private Relay');
 const helpBody = (await run('/help', { ua: CURL, accept: '*/*' })).body;
-ok(/own server lists/.test(helpBody), '/help mentions the providers\' own server lists');
+ok(/own server lists/.test(helpBody) && /iCloud Private Relay/.test(helpBody), "/help mentions the providers' own server lists and iCloud Private Relay");
 
 Date.now = realNow;
 console.log(`${pass} passed, ${fail} failed`);

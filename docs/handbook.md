@@ -152,6 +152,7 @@ The verdict on the **vpn / proxy** line combines these with the VPN providers' o
 
 | What the sources say | The line says |
 | --- | --- |
+| Apple's iCloud Private Relay list has it (see "iCloud Private Relay") | `yes: Apple's iCloud Private Relay (on Apple's own list of its relay addresses: sites see Apple's address, not the user's)` |
 | A VPN provider's own list names the address as one its users reach sites from (none of the lists does today) | `yes: a known VPN server (on Mullvad's own server list, as an address its users reach sites from)` |
 | Core flags it, or proxycheck.io finds a VPN, proxy or Tor exit, or names the service | `yes: a known VPN address (Proton VPN)` (or proxy, Tor, or "VPN, proxy or Tor" when it isn't specific) |
 | A VPN provider's own list names the address as one its users connect to, an entry (even when Core and proxycheck.io weren't asked) | `yes: a known VPN server (on Mullvad's own server list, as an address its users connect to; sites may see them at a different address)` |
@@ -241,6 +242,45 @@ a lookup waits at most 1.5 seconds for the blob, then goes on without it.
 Why a Durable Object rather than KV or D1: the deployment creates it, so neither ipterm.net nor a copy has a namespace
 or database to set up; the writes are one blob four times a day; and the reads come from the cache and memory, where
 an exact-match search of a sorted array is as fast as it gets.
+
+### iCloud Private Relay: Apple's own list
+
+Apple publishes the addresses its iCloud Private Relay sends traffic out from
+(`mask-api.icloud.com/egress-ip-ranges.csv`, made for location databases: one range a line with the place it stands
+for). Private Relay is a relay, not a VPN: for Safari (and some unencrypted app traffic) on Apple devices with iCloud+,
+sites see one of these addresses instead of the user's. Unlike the VPN lists, these are the addresses traffic leaves
+from, so a match is certain in the way that matters to a site.
+
+- **The list:** about 12 MB, 285,105 ranges on 2026-10-21 (41,747 IPv4, mostly /31 and /32; 243,359 IPv6, mostly
+  /64, none narrower). `src/relay-list.js` merges overlapping and adjacent ranges, since only whether an address is in
+  one matters here, not the place each line names: 1,011 IPv4 and 5,903 IPv6 ranges, packed into about 100 KB
+  (IPv4 as first and last address, IPv6 by its first 64 bits). A lookup is a binary search for the last range starting
+  at or before the address. Lines that aren't ranges, private or documentation ranges, IPv4 ranges wider than a /8
+  and IPv6 ones wider than a /16 or narrower than a /64 are skipped.
+- **The refresh:** the same Durable Object and cron trigger as the VPN lists (every 6 hours), one request, 60 seconds
+  and a 40 MB cap, asked with the last copy's ETag: an unchanged list is a `304` with no body, and the stored ranges
+  are dated again. A new list replaces the stored one when it parses and has at least 10,000 ranges; otherwise (a
+  failure, an error page, a list far too short) the last good copy stays, and lookups stop using it once nothing has
+  confirmed it for 3 days. Parsing a changed list takes well under a second of CPU (about 0.4 s in Node on a laptop).
+- **Lookups:** the JSON carries `relay: { "service": "iCloud Private Relay", "operator": "Apple", "listUpdated":
+  "<when the list was last downloaded or confirmed>" }`, only for an address in a range, on the same routes as
+  `vpnServer`, and on `?lite=1` lookups too, since it is free. The **vpn / proxy** line says `yes: Apple's iCloud
+  Private Relay (on Apple's own list of its relay addresses: sites see Apple's address, not the user's)`, before any
+  other finding, and proxycheck.io isn't asked about it. The text answer's `source` line adds `+ Apple's iCloud Private
+  Relay list`.
+- **`leaktest`:** a visitor whose address Apple lists is on Private Relay. Like Cloudflare WARP and Tor it is named
+  (`you're on Apple's iCloud Private Relay ...: sites see Apple's address, not yours. It covers Safari, not your other
+  apps`; tag `relay on`) and graded the way they are, so no sponsored line follows it. As with a Tor exit, the relay
+  picks the DNS resolver, so only the visitor's own provider's resolver is a DNS LEAK; and the other IP version may
+  leave through another relay network, which is fine when Apple lists that address too (`also through iCloud Private
+  Relay`). (How it should count is the owner's call; this is the default until then.)
+- `/status` shows it as `privateRelay`: `ranges` (as read), `ipv4` and `ipv6` (merged), `updated`, `unchanged` (the
+  last good answer was a 304), `tried`, `error` and `stale`.
+
+**What no list covers.** Residential proxy networks and commercial proxy services (the kind sold by the gigabyte,
+which route through home and mobile connections) publish no list of their addresses, and their addresses belong to
+ordinary home and mobile providers. They stay with proxycheck.io's and IPinfo Core's flags and the hosting-network
+hint, and an address on no list proves nothing. Tor exits come from the Tor Project's own list (see "Tor exits").
 
 ### Bots never spend the budgets
 
@@ -357,6 +397,8 @@ try), `error` (why the last try's list wasn't taken, or null) and `stale` (no go
 addresses is used); or `{ "error": "..." }` when there is no `VPN_SERVERS` binding or the object can't be reached.
 The text form has one line per provider:
 `pia  1724 addresses (1157 on the latest list), updated 2026-10-21 06:17 UTC`, plus the last try's failure if any.
+`privateRelay` covers Apple's iCloud Private Relay list the same way (see "iCloud Private Relay"), as one line:
+`icloud relay  285105 ranges (1011 IPv4 and 5903 IPv6 merged), updated 2026-10-21 06:17 UTC`.
 
 Not counted: lookups that fell back because one visitor used up their own hourly share, or because Core
 errored or refused the token (those are logged; watch with `npx wrangler tail`).
@@ -379,6 +421,7 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | The ASN sitemap's ranking (offline, `tools/build_asn_sitemap.mjs`) | RIPE NCC RIS table dump and AS names list (or CAIDA's prefix-to-AS file) | Free, run by hand |
 | Which DNS resolvers a visitor uses (leaktest) | ipterm's own DNS server for `dl.ipterm.net` (`dnsleak-server/`), plus IPinfo Lite for the resolvers' networks | The VPS, about $4 to $6 a month |
 | Known VPN servers: whether a VPN provider's own list names an address (lookups, leaktest) | The lists Mullvad, Private Internet Access, IVPN and AirVPN publish, downloaded every 6 hours by a cron trigger (see "Known VPN servers") | Free; four subrequests a run. Lookups search a copy in memory, so bots get it too |
+| iCloud Private Relay: whether an address is one of Apple's relay addresses (lookups, leaktest) | Apple's list (`mask-api.icloud.com/egress-ip-ranges.csv`), asked every 6 hours with its ETag (see "iCloud Private Relay") | Free; one subrequest a run, usually a 304 |
 | Whether the visitor's address is a Tor exit (leaktest) | The Tor Project's exit list, cached an hour per data center | Free; at most one subrequest an hour per data center |
 | Cloudflare WARP, TLS and HTTP versions, key exchange (leaktest) | Cloudflare's `/cdn-cgi/trace`, read by the browser | Free; the edge answers it, not the Worker |
 
@@ -1065,7 +1108,9 @@ address, and grades the leaks A to F. Each line is marked OK, LEAK or INFO:
   (which can name the VPN service). An address on a VPN provider's own server list (see "Known VPN servers")
   is that provider's server, entry or not, since the visitor's traffic reaches ipterm from it: the line names
   it ("your IP is a known VPN server (on Mullvad's own server list)"), it counts as a VPN, and
-  proxycheck.io isn't asked. Two services are named outright: **Cloudflare WARP**, when
+  proxycheck.io isn't asked. An address on Apple's iCloud Private Relay list is named as the relay it is,
+  counted the way WARP and Tor are (see "iCloud Private Relay"), and proxycheck.io isn't asked either.
+  Two services are named outright: **Cloudflare WARP**, when
   Cloudflare's edge says the request came through it (`warp=on` or `warp=plus` in `/cdn-cgi/trace`, which
   the page reads itself), and **Tor**, when the address is on the Tor Project's exit list (see "Tor exits"
   below) or Cloudflare gives it the country code `T1`, or when proxycheck.io knows it as Tor (then this line
@@ -1578,8 +1623,8 @@ through `/go` is one request for the redirect plus the page it lands on (the red
 and, once the DNS leak test is set up, `/api/dnsleak`), plus one for the other IP version's lookup when there is one
 (IPinfo Lite: no Core or proxycheck.io budget); its `/cdn-cgi/trace` read and a shared result page's images are free. A shared result page (`/leaktest/r/<code>`) is one request. A report card (`/grade/<domain>`) is one request, with 33 to 41 subrequests when it isn't cached (see "Domain report card"); each badge fetch is one request, and shields.io and GitHub's image proxy keep the image for as long as ipterm's copy has left (an hour at most; at least five minutes through shields.io, whose minimum that is, and a minute for the `.svg`). `ping` costs nothing: it times requests to `/cdn-cgi/trace`,
 which Cloudflare's edge answers before the Worker runs. The Workers Paid plan ($5/month) includes 10 million
-requests. The known VPN servers' cron trigger runs four times a day: one invocation, four subrequests (one per list)
-and one Durable Object request each time. A lookup reads the lists from memory, and each Worker refreshes its copy
+requests. The known VPN servers' cron trigger runs four times a day: one invocation, five subrequests (one per VPN
+list, and Apple's iCloud Private Relay list, usually a 304) and one Durable Object request each time. A lookup reads the lists from memory, and each Worker refreshes its copy
 at most every 10 minutes, from the data center's cache or with one Durable Object request; while the object has no
 lists yet (a new deployment before its first good download), every minute, and a lookup then also starts a download
 by an alarm at most once an hour. `/me`, `/line` and `/expect/...` are one request each, with no other cost: no subrequest, no Durable
@@ -1618,6 +1663,7 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | Bots never spend IPinfo Core or proxycheck.io: named crawlers and link previews, `BOT_UA`, and anything asking for HTML without a browser's `Sec-Fetch-*` get Core's answer only from the cache, otherwise IPinfo Lite, and a VPN check only from the cache; command-line tools and scripts asking for JSON keep full data | `isBot()`, `ipData()`, `privacyData()`, `blockData()` in `src/worker.js`; `tools/check_bots.mjs` | See "Bots never spend the budgets" |
 | Bots never start a RIPEstat routing lookup: a public `/cidr` page shows them the calculation, with the routing only when it is cached; `/route/<ip>` sends them to a cached route or the address's `/32`; JSON and text answer 403. The three public `/cidr` pages in `SITEMAP_PATHS` are the exception. People, the terminal, curl and scripts keep live routing | `routeData()`, `cidrRoute()`, `routeRoute()` in `src/worker.js`; `tools/check_bots.mjs` | `curatedRoutes()`; see "Bots never spend the budgets" |
 | A lookup's registry date (`block`): RDAP only, never IPinfo or proxycheck.io; never for the visitor's own address (`?block=0` from the terminal for their other IP version); bots (`isBot()`) only read the cache (shared with `whois <ip>`, a day); anyone else's registry request counts toward their rate limit, riding on the lookup's own count or sharing the VPN check's; 0.3 seconds at most once the rest of the answer is ready, then the answer goes without it and the request finishes in the background; lookups of one address share a request in flight; a registry that fails is left alone for a minute (ten after a 429) | `blockData()` in `src/worker.js`; `tools/check_block.mjs` | `BLOCK_RECENT_DAYS`, `BLOCK_GRACE`; see "Recently registered blocks" |
+| iCloud Private Relay: Apple's list asked with its ETag (a 304 when unchanged), 60 seconds and a 40 MB cap; a list that fails, isn't ranges or has fewer than 10,000 never replaces the last good one, which isn't used once 3 days old; ranges read field by field (public only, IPv4 /8 or narrower, IPv6 /16 to /64) | `src/relay-list.js`, `refreshRelay()` in `src/worker.js`; `tools/check_vpnlists.mjs` | `RELAY`; see "iCloud Private Relay" |
 | Known VPN servers: downloaded by the cron trigger, and by an alarm at most hourly while the object has no lists (after a deployment, until the first good download), one request per provider, 20 seconds and a size cap each, no retries; read field by field, keeping only public IPv4 and global IPv6 addresses; a broken or short list removes nothing; an address is dropped 3 days after it was last listed, and a provider taken out of the code at once; lookups match exact addresses only and send nothing anywhere | `src/vpn-lists.js`, `VpnServers` in `src/worker.js`; `tools/check_vpnlists.mjs` | `VPN_PROVIDERS`, `VPN_MAX_AGE`; see "Known VPN servers" |
 | Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
 | DNS leak test: `/api/dnsleak` only from the ipterm page or a command-line tool, well-formed tokens only, rate limited; the VPS's API needs the `DNSLEAK_KEY` secret (compared in constant time), listens on 127.0.0.1 behind Caddy, hands each token's resolvers over once and forgets them; non-public resolver addresses never go to IPinfo | `dnsleakRoute()` in `src/worker.js`, `dnsleak-server/` | See "DNS leak test server" |
@@ -1772,7 +1818,11 @@ too, a Worker's index past its 10 minutes answering at once while the next loads
 object once a minute rather than every lookup and never waiting long on a load that doesn't settle, a provider taken
 out of the code answering nothing, `/status`, the Worker without the binding, and leaktest in `public/app.js`: a
 listing counts as a VPN, so the sponsored line never follows it, and the copied Markdown's masking hides each
-provider's name.
+provider's name. Then iCloud Private Relay: a few of Apple's real lines plus junk (`icloud-relay.csv`), read and merged,
+with 28 addresses at range edges in both IP versions (first and last addresses in, neighbours out, adjacent ranges
+merged, also across a 32-bit word); the refresh (no If-None-Match the first time, Apple's ETag the next, a 304, a
+failure, a list far too short, a copy 3 days old, an old format); and lookups (JSON, text, page and terminal in both
+versions, `?lite=1`, a bot, leaktest's check, `/status`, no proxycheck.io query) and leaktest's verdict.
 
 `node tools/check_https.mjs` (Node 22.15 or later) checks plain http (see "One copy of the site, on https"), also
 with no server and no network: the whole Worker in Node, its static files read from `public/`, and `fetch` stubbed. Over
