@@ -114,7 +114,7 @@ import { meCard, ME_WIDTH, ANSI, ansi } from './me.js';   // the /me card and it
 import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
 import { holderOf, personReason } from './holder-heuristic.js';     // whether a network's holder may be a private person
 import { VPN_PROVIDERS, VPN_MAX_AGE, VPN_FETCH_TIMEOUT, toRecord, mergeRecord, packIndex, unpackIndex, isIndex, findServer } from './vpn-lists.js';
-import { RELAY, parseRelay, packRelay, restampRelay, unpackRelay, isRelay, findRelay } from './relay-list.js';   // Apple's iCloud Private Relay list   // VPN providers' own server lists
+import { RELAY, parseRelayStream, packRelay, restampRelay, unpackRelay, isRelay, findRelay } from './relay-list.js';   // Apple's iCloud Private Relay list   // VPN providers' own server lists
 // Pages that name a network holder who may be a private person are "noindex, follow" (GDPR caution; the rules are
 // in src/holder-heuristic.js). personHeld takes an AS name as RIPEstat gives it, with its handle ("JDOE-AS Jane Doe",
 // "CLOUDFLARENET - Cloudflare, Inc."); personName takes a name on its own ("Jane Doe").
@@ -2060,8 +2060,8 @@ async function privacyData(io, ip) {
    size cap on each. It keeps every address seen on a VPN provider's list in the last 3 days (mergeRecord), so a
    download that fails or comes back broken changes nothing, and packs them into one blob of sorted addresses
    (packIndex: about 70 KB in October 2026). Apple's list (about 12 MB of CSV, 285,000 ranges) is asked for with the
-   last copy's ETag, so an unchanged list costs a 304; a new one is merged into about 7,000 ranges (packRelay: about
-   100 KB) and replaces the last good copy. Both are well under a Durable Object's 2 MB per value. Each data center
+   last copy's ETag, so an unchanged list costs a 304; a new one is read a chunk at a time and merged into about 7,000
+   ranges (packRelay: about 100 KB), and replaces the last good copy. Both are well under a Durable Object's 2 MB per value. Each data center
    caches each blob for 30 minutes and each Worker keeps it in memory for 10, so a lookup is a binary search in memory:
    no outside request and no budget, the same for bots and people. A Durable Object rather than KV or D1: the
    deployment creates it (no namespace or database to set up, on ipterm.net or a copy), the writes are a few blobs four
@@ -2078,24 +2078,33 @@ const listAgent = env => `ipterm (${env.SOURCE_URL || 'https://github.com/GuardW
 
 export class VpnServers extends DurableObject {
   // The packed VPN index (blob) or Private Relay ranges (relayBlob), or null before the first good download. Asked
-  // while one is missing, the object starts a refresh (an alarm) at most once an hour, so a new deployment doesn't
-  // wait for the cron. One stored in an older format counts as none, so a deployment that changes the format refreshes
+  // while one is missing, the object starts a refresh of that list (an alarm) at most once an hour after its last try,
+  // so a new deployment doesn't wait for the cron, and a missing relay list never sends the VPN lists' requests again
+  // (or the reverse). One stored in an older format counts as none, so a deployment that changes the format refreshes
   // too.
-  blob(now = Date.now()) { return this.#stored('blob', isIndex, now); }
-  relayBlob(now = Date.now()) { return this.#stored('relay', isRelay, now); }
-  async #stored(key, valid, now) {
+  blob(now = Date.now()) { return this.#stored('blob', isIndex, 'vpn', now); }
+  relayBlob(now = Date.now()) { return this.#stored('relay', isRelay, 'relay', now); }
+  async #stored(key, valid, list, now) {
     const s = this.ctx.storage, v = await s.get(key), b = valid(v) ? v : null;
-    if (!b && now - ((await s.get('tried')) || 0) > 3600_000 && !(await s.getAlarm())) await s.setAlarm(now + 1000);
+    if (!b && now - ((await s.get(list === 'vpn' ? 'tried' : 'relayTried')) || 0) > 3600_000) {
+      await s.put('want:' + list, true);
+      if (!(await s.getAlarm())) await s.setAlarm(now + 1000);
+    }
     return b;
   }
-  async alarm() { await this.refresh(); }
-  // One refresh at a time: a cron run and an alarm that meet share it. Both kinds of list, side by side; it resolves to
-  // the VPN lists' status (relayStatus() has Apple's).
-  refresh(now = Date.now()) {
+  // The lists a lookup found missing (want:), or both when it was set some other way.
+  async alarm() {
+    const s = this.ctx.storage, vpn = !!(await s.get('want:vpn')), relay = !!(await s.get('want:relay'));
+    await s.delete(['want:vpn', 'want:relay']);
+    await this.refresh(Date.now(), vpn || relay ? { vpn, relay } : undefined);
+  }
+  // One refresh of each list at a time: a cron run and an alarm that meet share it. It resolves to the VPN lists'
+  // status, or null when only Apple's was refreshed (relayStatus() has that one).
+  refresh(now = Date.now(), only = { vpn: true, relay: true }) {
     const s = this.ctx.storage;
-    return (this.running ||= s.put('tried', now)
-      .then(() => Promise.all([refreshVpnLists(s, this.env, now), refreshRelay(s, this.env, now)]))
-      .then(([meta]) => meta).finally(() => { this.running = null; }));
+    const vpn = only.vpn ? (this.vpnRun ||= refreshVpnLists(s, this.env, now).finally(() => { this.vpnRun = null; })) : null;
+    const relay = only.relay ? (this.relayRun ||= refreshRelay(s, this.env, now).finally(() => { this.relayRun = null; })) : null;
+    return Promise.all([vpn, relay]).then(([meta]) => meta);
   }
   // For /status: each provider's addresses kept, its last good download (when, how many on it) and last try; and the
   // same for Apple's list.
@@ -2108,6 +2117,7 @@ export class VpnServers extends DurableObject {
 // that fails or comes back short removes nothing seen lately, and a provider that stops answering drops out after
 // that long. The last try's trouble, if any, shows on /status.
 async function refreshVpnLists(s, env, now) {
+  await s.put('tried', now);
   const got = await Promise.all(VPN_PROVIDERS.map(async p => {
     try {
       const r = await fetch(p.url, { headers: { accept: 'application/json', 'user-agent': listAgent(env) }, signal: AbortSignal.timeout(VPN_FETCH_TIMEOUT) });
@@ -2140,28 +2150,34 @@ async function refreshVpnLists(s, env, now) {
 }
 
 // Downloads Apple's iCloud Private Relay list (src/relay-list.js), asking with the stored copy's ETag, so an unchanged
-// list is a 304 with no body: the stored ranges are then dated now. A new list replaces the stored one when it parses
-// and has at least RELAY.min ranges; otherwise the last good copy stays, and lookups stop using it once it is
-// VPN_MAX_AGE old (no good download or 304 in 3 days). Parsing the 12 MB list takes well under a second of CPU, and
-// only when it changed.
+// list is a 304 with no body: the stored ranges are then dated now. A new list is read a chunk at a time
+// (parseRelayStream: the 12 MB never sits in memory whole) and replaces the stored one when it has at least RELAY.min
+// ranges; otherwise the last good copy stays, and lookups stop using it once it is VPN_MAX_AGE old (no good download
+// or 304 in 3 days). The meta changes only once the ranges are stored, so it never names a list that isn't. Parsing
+// takes well under a second of CPU, and only when the list changed.
 async function refreshRelay(s, env, now) {
-  const iso = new Date(now).toISOString(), m = { ...(await s.get('relayMeta')), tried: iso }, old = await s.get('relay');
-  const etag = isRelay(old) && m.etag ? m.etag : null;
+  await s.put('relayTried', now);
+  const iso = new Date(now).toISOString(), prev = (await s.get('relayMeta')) || {}, old = await s.get('relay');
+  const etag = isRelay(old) && prev.etag ? prev.etag : null;
+  let m;
   try {
     const r = await fetch(RELAY.url, { headers: { 'user-agent': listAgent(env), ...(etag ? { 'if-none-match': etag } : {}) }, signal: AbortSignal.timeout(RELAY.timeout) });
     if (r.status === 304 && etag) {
       if (r.body) r.body.cancel();
-      Object.assign(m, { at: iso, error: null, unchanged: true });
-      await s.put({ relay: restampRelay(old, now), relayMeta: m });
+      const next = { ...prev, tried: iso, at: iso, error: null, unchanged: true };
+      await s.put({ relay: restampRelay(old, now), relayMeta: next });
+      m = next;
     } else {
-      if (!r.ok) { if (r.body) r.body.cancel(); throw new Error('HTTP ' + r.status); }
-      const rec = parseRelay(await readBody(r, RELAY.max));
+      if (!r.ok || !r.body) { if (r.body) r.body.cancel(); throw new Error('HTTP ' + r.status); }
+      if (Number(r.headers.get('content-length')) > RELAY.max) { r.body.cancel(); throw new Error('response too large'); }
+      const rec = await parseRelayStream(r.body, RELAY.max);
       if (rec.count < RELAY.min) throw new Error(`only ${rec.count} ranges (at least ${RELAY.min} expected)`);
-      Object.assign(m, { at: iso, error: null, unchanged: false, etag: r.headers.get('etag') || null, count: rec.count, n4: rec.four.length, n6: rec.six.length });
-      await s.put({ relay: packRelay(rec, now), relayMeta: m });
+      const next = { ...prev, tried: iso, at: iso, error: null, unchanged: false, etag: r.headers.get('etag') || null, count: rec.count, n4: rec.four.length, n6: rec.six.length };
+      await s.put({ relay: packRelay(rec, now), relayMeta: next });
+      m = next;
     }
   } catch (e) {
-    m.error = String((e && e.message) || e).slice(0, 160);
+    m = { ...prev, tried: iso, error: String((e && e.message) || e).slice(0, 160) };
     await s.put('relayMeta', m);
   }
   console.log(`[ipterm] iCloud Private Relay list: ${m.count || 0} ranges` + (m.error ? ` (kept; this try: ${m.error})` : m.unchanged ? ' (unchanged)' : ''));

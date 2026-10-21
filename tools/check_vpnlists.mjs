@@ -157,7 +157,7 @@ class Storage {                                           // a Durable Object's 
   constructor() { this.m = new Map(); this.alarm = null; this.alarms = 0; }
   async get(k) { return this.m.has(k) ? structuredClone(this.m.get(k)) : undefined; }
   async put(k, v) { if (typeof k === 'object') for (const [a, b] of Object.entries(k)) this.m.set(a, structuredClone(b)); else this.m.set(k, structuredClone(v)); }
-  async delete(k) { return this.m.delete(k); }
+  async delete(k) { return Array.isArray(k) ? k.filter(x => this.m.delete(x)).length : this.m.delete(k); }
   async getAlarm() { return this.alarm; }
   async setAlarm(t) { this.alarm = t; this.alarms++; }
 }
@@ -511,6 +511,22 @@ ok(crlf.count === 2 && crlf.four[0][1] === L.v4num('172.226.1.255') && crlf.six.
 const rs1 = A.unpackRelay(A.restampRelay(A.packRelay(rr, NOW), NOW + HOUR));
 ok(rs1.at === new Date(NOW + HOUR).toISOString() && rs1.count === 20 && [...rs1.first6].join() === [...ri.first6].join() && [...rs1.last4].join() === [...ri.last4].join(),
   'restampRelay (after a 304) keeps every range and changes only the date');
+// Read as a stream, a chunk at a time (as the refresh does): the same ranges, whatever the chunks split, a line or a
+// multi-byte character; refused past its cap; and linear in the number of lines even with no commas at all.
+const utf = csv + '\n172.227.0.0/24,BR,BR-SP,S' + String.fromCharCode(0xe3) + 'o Paulo,\n';   // a city name with a two-byte character
+const bytes = new TextEncoder().encode(utf);
+const chunked = size => new ReadableStream({ start(c) { for (let i = 0; i < bytes.length; i += size) c.enqueue(bytes.slice(i, i + size)); c.close(); } });
+const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+const whole = A.parseRelay(utf);
+ok(same(await A.parseRelayStream(new Response(utf).body, 1e6), whole) && same(await A.parseRelayStream(chunked(3), 1e6), whole) &&
+  same(await A.parseRelayStream(chunked(7), 1e6), whole) && whole.count === 21,
+  'read as a stream, in chunks of 3 and 7 bytes (splitting lines and a multi-byte city name), the ranges come out the same');
+let capped = '';
+try { await A.parseRelayStream(chunked(64), 100); } catch (e) { capped = e.message; }
+ok(capped === 'response too large', `a stream past its cap is refused: ${capped}`);
+const bare = Array.from({ length: 100_000 }, (_, i) => `17.${100 + (i >> 16)}.${(i >> 8) & 255}.${i & 255}/32`).join('\n');
+const tb = realNow(), bareRec = A.parseRelay(bare), tookBare = realNow() - tb;
+ok(bareRec.count === 100_000 && bareRec.four.length === 1 && tookBare < 3000, `100,000 lines with no comma parse in ${tookBare} ms (each line's comma is looked for in that line only)`);
 const rgood = A.packRelay(rr, NOW), rbad = new Uint8Array(rgood.slice(0)); rbad[3] = 50;
 let rrefused = 0;
 for (const b of [rbad.buffer, rgood.slice(0, rgood.byteLength - 4), L.packIndex([], NOW)]) { try { A.unpackRelay(b); } catch { rrefused++; } }
@@ -594,6 +610,25 @@ ok(app.includes("else if (relay) add('vpn', 'ok', 'VPN detection', \"you're on A
   app.includes("relay ? 'relay on' : vpn ? 'vpn on'") && app.includes("(g.kind === 'other' && !tor && !relay)") && app.includes("else if (otherRelay) add('ipv6', 'ok', otherV") &&
   app.includes("const offer = vpnKnown && !vpn && !vpnSeen;"),
   "leaktest names it (tag \"relay on\"), lets the relay pick the DNS resolver as a Tor exit does, accepts the other IP version through the relay, and the sponsored line's rule is unchanged");
+
+// Each list's alarm refreshes that list only: a missing relay list doesn't send the VPN lists' requests again.
+await storage.delete(['want:vpn', 'want:relay']);
+await storage.put('relay', oldRelay.buffer); await storage.put('relayTried', TR - 2 * HOUR);
+await vs.relayBlob(TR);
+calls.length = 0; relayCalls.length = 0;
+serveRelay = () => new Response(bigRelay(12000), { status: 200, headers: { etag: '"e3"' } });
+await vs.alarm();
+ok(relayCalls.length === 1 && lists0().length === 0 && (await vs.relayStatus()).etag === '"e3"' && A.isRelay(await storage.get('relay')),
+  `a lookup that finds the relay list missing sets an alarm that downloads Apple's list only: ${relayCalls.length} request to Apple, ${lists0().length} to the VPN providers`);
+const keepBlob = await storage.get('blob');
+await storage.delete('blob'); await storage.put('tried', TR - 2 * HOUR); storage.alarm = null;
+await vs.blob(TR);
+calls.length = 0; relayCalls.length = 0; serve = { ...full };
+await vs.alarm();
+ok(relayCalls.length === 0 && lists0().length === 4 && (await storage.get('blob')) instanceof ArrayBuffer,
+  `and one that finds the VPN index missing downloads the VPN lists only: ${lists0().length} requests, ${relayCalls.length} to Apple`);
+if (keepBlob) await storage.put('blob', keepBlob);
+storage.alarm = null;
 
 console.log('-- 7. the docs');
 const hb = read('docs/handbook.md'), readme = read('README.md'), llms = read('public/llms.txt'), api = JSON.parse(read('public/openapi.json'));

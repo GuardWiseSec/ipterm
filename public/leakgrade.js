@@ -27,7 +27,7 @@
     ['F', 'WebRTC or IPv6 leaks and DNS does too, or WebRTC and IPv6 both leak'],
   ];
   const RULES = [
-    'Only four checks count: DNS, WebRTC, IPv6 (your other IP version) and the time zone, and only when a VPN is detected: a known VPN, proxy or Tor address, a hosting network, or Cloudflare WARP.',
+    'Only four checks count: DNS, WebRTC, IPv6 (your other IP version) and the time zone, and only when a VPN is detected: a known VPN, proxy or Tor address, a hosting network, Cloudflare WARP, or iCloud Private Relay (a relay, counted the same way).',
     'No VPN detected: nothing can leak past one, so the grade is A. What sites see without one (your provider and rough location) gets its own line and is never graded.',
     "Can't tell whether you use a VPN: no grade if a line would be a leak with one, A if none would.",
     "Checks that couldn't run don't count. INFO lines (connection security, browser language, a local address) never count.",

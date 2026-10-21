@@ -8,55 +8,88 @@
 // Pure functions only: tools/check_vpnlists.mjs runs them in Node.
 import { VPN_MAX_AGE, v4num, v6words, publicV4, globalV6 } from './vpn-lists.js';
 
-// min: fewer ranges than this means a broken download (there were 285,105 on 2026-10-21).
-// timeout: the list is about 12 MB.
-export const RELAY = { id: 'icloud', name: 'iCloud Private Relay', url: 'https://mask-api.icloud.com/egress-ip-ranges.csv', max: 40_000_000, min: 10_000, timeout: 60_000 };
+// min: fewer ranges than this means a broken download (there were 285,106 on 2026-10-21).
+// timeout and max: the list is about 12 MB, read a chunk at a time (parseRelayStream), so a few times that still fits a
+// Durable Object's 128 MB.
+export const RELAY = { id: 'icloud', name: 'iCloud Private Relay', url: 'https://mask-api.icloud.com/egress-ip-ranges.csv', max: 32_000_000, min: 10_000, timeout: 60_000 };
 
-// The CSV's ranges, merged: overlapping and adjacent ranges become one (285,105 lines came to 1,011 IPv4 and 5,903
+// The CSV's ranges, merged: overlapping and adjacent ranges become one (285,106 lines came to 1,011 IPv4 and 5,903
 // IPv6 ranges), since only whether an address is in one matters here, not the place each line names. IPv4 as
 // [first, last] numbers; IPv6 by its first 64 bits, as [first high, first low, last high, last low] 32-bit words: every
 // IPv6 range on the list is a /64 or wider. Skipped: a line that isn't a range, an IPv4 range wider than a /8, an IPv6
 // one wider than a /16 or narrower than a /64, and anything not public. count: the ranges read before merging.
-export function parseRelay(text) {
-  const four = [], six = [];
+// relayParser takes one line at a time into flat number arrays (no object per line), so the whole list costs a few MB
+// beyond its text, and parseRelayStream never holds that text whole.
+function relayParser() {
+  const f4 = [], f6 = [];                                // [first, last, ...] and [first hi, first lo, last hi, last lo, ...]
   let count = 0;
+  return {
+    line(line) {
+      const comma = line.indexOf(','), cell = (comma >= 0 ? line.slice(0, comma) : line).trim();
+      const slash = cell.indexOf('/'), len = slash > 0 && /^\d{1,3}$/.test(cell.slice(slash + 1)) ? Number(cell.slice(slash + 1)) : -1;
+      if (len < 0) return;
+      const addr = cell.slice(0, slash), n = v4num(addr);
+      if (n != null) {
+        if (len < 8 || len > 32) return;
+        const size = 2 ** (32 - len), first = n - (n % size);
+        if (publicV4(first)) { f4.push(first, first + size - 1); count++; }
+        return;
+      }
+      const w = v6words(addr.toLowerCase());
+      if (!w || len < 16 || len > 64 || !globalV6(w)) return;
+      const hiMask = len <= 32 ? (0xffffffff << (32 - len)) >>> 0 : 0xffffffff, loMask = len <= 32 ? 0 : (0xffffffff << (64 - len)) >>> 0;
+      const hi = (w[0] & hiMask) >>> 0, lo = (w[1] & loMask) >>> 0;
+      f6.push(hi, lo, (hi | ~hiMask) >>> 0, (lo | ~loMask) >>> 0); count++;
+    },
+    done() {
+      const o4 = Uint32Array.from({ length: f4.length / 2 }, (_, i) => i).sort((a, b) => f4[a * 2] - f4[b * 2]);
+      const o6 = Uint32Array.from({ length: f6.length / 4 }, (_, i) => i).sort((a, b) => f6[a * 4] - f6[b * 4] || f6[a * 4 + 1] - f6[b * 4 + 1]);
+      const m4 = [], m6 = [];
+      for (const i of o4) {
+        const first = f4[i * 2], end = f4[i * 2 + 1], last = m4[m4.length - 1];
+        if (last && first <= last[1] + 1) { if (end > last[1]) last[1] = end; } else m4.push([first, end]);
+      }
+      for (const i of o6) {
+        const r = [f6[i * 4], f6[i * 4 + 1], f6[i * 4 + 2], f6[i * 4 + 3]], last = m6[m6.length - 1];
+        // adjacent: r starts at last's end + 1 (with the carry from the low word into the high one)
+        const next = last ? (last[3] === 0xffffffff ? [last[2] + 1, 0] : [last[2], last[3] + 1]) : null;
+        if (last && (r[0] < next[0] || (r[0] === next[0] && r[1] <= next[1]))) {
+          if (r[2] > last[2] || (r[2] === last[2] && r[3] > last[3])) { last[2] = r[2]; last[3] = r[3]; }
+        } else m6.push(r);
+      }
+      return { four: m4, six: m6, count };
+    },
+  };
+}
+
+export function parseRelay(text) {
+  const p = relayParser();
   for (let i = 0; i < text.length;) {
     let j = text.indexOf('\n', i);
     if (j < 0) j = text.length;
-    const comma = text.indexOf(',', i), cell = text.slice(i, comma >= 0 && comma < j ? comma : j).trim();
+    p.line(text.slice(i, j));
     i = j + 1;
-    const slash = cell.indexOf('/'), len = slash > 0 && /^\d{1,3}$/.test(cell.slice(slash + 1)) ? Number(cell.slice(slash + 1)) : -1;
-    if (len < 0) continue;
-    const addr = cell.slice(0, slash), n = v4num(addr);
-    if (n != null) {
-      if (len < 8 || len > 32) continue;
-      const size = 2 ** (32 - len), first = n - (n % size);
-      if (!publicV4(first)) continue;
-      four.push([first, first + size - 1]); count++;
-      continue;
-    }
-    const w = v6words(addr.toLowerCase());
-    if (!w || len < 16 || len > 64 || !globalV6(w)) continue;
-    const [hiMask, loMask] = len <= 32 ? [len ? (0xffffffff << (32 - len)) >>> 0 : 0, 0] : [0xffffffff, (0xffffffff << (64 - len)) >>> 0];
-    const hi = (w[0] & hiMask) >>> 0, lo = (w[1] & loMask) >>> 0;
-    six.push([hi, lo, (hi | ~hiMask) >>> 0, (lo | ~loMask) >>> 0]); count++;
   }
-  four.sort((a, b) => a[0] - b[0]);
-  six.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const m4 = [], m6 = [];
-  for (const r of four) {
-    const last = m4[m4.length - 1];
-    if (last && r[0] <= last[1] + 1) { if (r[1] > last[1]) last[1] = r[1]; } else m4.push([r[0], r[1]]);
+  return p.done();
+}
+
+// The same from a response body, a chunk at a time, refused past max bytes.
+export async function parseRelayStream(body, max) {
+  const p = relayParser(), dec = new TextDecoder(), reader = body.getReader();
+  let rest = '', n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > max) { reader.cancel(); throw new Error('response too large'); }
+    rest += dec.decode(value, { stream: true });
+    let i = 0;
+    for (let j; (j = rest.indexOf('\n', i)) >= 0; i = j + 1) p.line(rest.slice(i, j));
+    rest = rest.slice(i);
   }
-  for (const r of six) {
-    const last = m6[m6.length - 1];
-    // adjacent: r starts at last's end + 1 (with the carry from the low word into the high one)
-    const next = last ? (last[3] === 0xffffffff ? [last[2] + 1, 0] : [last[2], last[3] + 1]) : null;
-    if (last && (r[0] < next[0] || (r[0] === next[0] && r[1] <= next[1]))) {
-      if (r[2] > last[2] || (r[2] === last[2] && r[3] > last[3])) { last[2] = r[2]; last[3] = r[3]; }
-    } else m6.push([...r]);
-  }
-  return { four: m4, six: m6, count };
+  rest += dec.decode();
+  if (rest) p.line(rest);
+  return p.done();
 }
 
 /* ---------- the packed ranges ----------

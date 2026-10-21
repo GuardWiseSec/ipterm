@@ -1095,7 +1095,8 @@
       dnsAsns = all.map(g => g.asn).filter(Boolean);
       const o = { sum: all.map(label).join('; '), data: { leakAsns: outside.map(g => g.asn).filter(Boolean) }, ran: !unsure };
       if (vpn && outside.length) add('dns', 'warn', 'DNS', frag('sites you visit are looked up by ', ...named(outside), `, outside ${tunnelNet}${!warp && !tor && !relay && d.org ? ' (' + d.org + ')' : ''}`), { ...o,
-        fix: "turn on DNS leak protection in your VPN app, so lookups go through the tunnel to the VPN's own DNS servers. Also check your browser's secure DNS setting (Chrome and Edge: Settings › Privacy and security › Security › Use secure DNS; Firefox: Settings › Privacy & Security › DNS over HTTPS): when it names a provider, lookups go there instead of to your VPN" });
+        fix: relay ? "check that iCloud Private Relay is on for this network (it can be turned off for one Wi-Fi or cellular network): it covers Safari's lookups"
+          : "turn on DNS leak protection in your VPN app, so lookups go through the tunnel to the VPN's own DNS servers. Also check your browser's secure DNS setting (Chrome and Edge: Settings › Privacy and security › Security › Use secure DNS; Firefox: Settings › Privacy & Security › DNS over HTTPS): when it names a provider, lookups go there instead of to your VPN" });
       else if (vpn && (tor || relay || all.every(g => g.kind === 'vpn'))) add('dns', 'ok', 'DNS', frag('sites you visit are looked up by ', ...named(all),
         tor ? ", which the Tor exit chose, so your internet provider can't see them" : relay ? ", which iCloud Private Relay chose, so your internet provider can't see them"
           : ", so your internet provider can't see them"), o);
@@ -1109,7 +1110,8 @@
     const rtcData = { extra: extra.map(canonIp) };
     if (!rtc.supported) add('webrtc', 'ok', 'WebRTC', 'turned off in this browser, so it cannot leak', { sum: 'turned off', data: rtcData });
     else if (extra.length && strict) add('webrtc', 'warn', 'WebRTC', frag('reveals ', ...ipList(extra), vpn ? `, an address outside ${tunnel}` : ', a second public address' + ifVpn), { sum: 'shows ' + extra.join(', '), data: rtcData,
-      fix: 'turn on WebRTC leak protection in your VPN app, or block WebRTC in your browser (Firefox: set media.peerconnection.enabled to false in about:config)' });
+      fix: relay ? "iCloud Private Relay doesn't cover WebRTC here: block WebRTC in your browser if it lets you"
+        : 'turn on WebRTC leak protection in your VPN app, or block WebRTC in your browser (Firefox: set media.peerconnection.enabled to false in about:config)' });
     else if (extra.length) add('webrtc', 'info', 'WebRTC', frag('also shows ', ...ipList(extra), ' (a second public address; common on some networks)' + ifVpn), { sum: 'also shows ' + extra.join(', '), data: rtcData });
     else if (rtc.ips.length) add('webrtc', 'ok', 'WebRTC', 'only shows the IP above, so nothing extra leaks', { sum: 'nothing extra', data: rtcData });
     else add('webrtc', 'ok', 'WebRTC', 'no public address exposed', { sum: 'nothing exposed', data: rtcData });
@@ -1130,7 +1132,8 @@
       else add('ipv6', strict ? 'warn' : 'info', otherV, frag(ipLink(other), vpn
         ? `  goes through ${oOrg || oAsn}, not ${tunnel}`
         : `  through ${oOrg || oAsn}, a different network than your ${'IPv' + p.v}` + ifVpn), { ...o, sum: 'through ' + (oOrg || oAsn),
-        fix: `turn on your VPN app's ${otherV} leak protection (sometimes called "block ${otherV}"), or turn off ${otherV} on this device` });
+        fix: relay ? `check that iCloud Private Relay is on for this network: this ${otherV} address goes around it`
+          : `turn on your VPN app's ${otherV} leak protection (sometimes called "block ${otherV}"), or turn off ${otherV} on this device` });
     }
 
     // 6. time zone. A device that reports UTC (Tor Browser, Firefox's resistFingerprinting) gives nothing away.
@@ -1140,7 +1143,7 @@
       if (same) add('tz', 'ok', 'time zone', `your device (${devTz}) matches your IP's location`, { sum: 'matches (' + devTz + ')' });
       else if (/^(Etc\/)?(UTC|UCT|GMT|Universal|Zulu)$/i.test(devTz)) add('tz', 'ok', 'time zone', "your device reports UTC, which doesn't give away your region", { sum: 'reports UTC' });
       else add('tz', strict ? 'warn' : 'info', 'time zone', `your device says ${devTz}, your IP says ${d.timezone}` + (vpn ? ': sites can tell your real region from your clock' : ifVpn), { sum: `${devTz} vs ${d.timezone}`,
-        fix: "set your device's time zone to match the VPN location, or use a browser that reports UTC (Tor Browser, or Firefox with privacy.resistFingerprinting turned on)" });
+        fix: `set your device's time zone to match the ${relay ? "relay address's" : 'VPN'} location, or use a browser that reports UTC (Tor Browser, or Firefox with privacy.resistFingerprinting turned on)` });
     } else skipped.push('time zone');
 
     // 7. browser language vs the IP's country: INFO only, since expats and travelers differ for good reasons
@@ -1212,7 +1215,7 @@
     if (!dnsRan) {
       const why = !d.dnsleak ? '' : dns && !dns.error ? ": none of the test lookups reached ipterm's DNS server (a blocker or proxy may have stopped them)"
         : ": ipterm's DNS test server didn't answer this time";
-      line(`Not tested: DNS leaks (which DNS servers answer for you)${why}. Your VPN app usually has a setting for this.`, 'sys');
+      line(`Not tested: DNS leaks (which DNS servers answer for you)${why}.${relay ? '' : ' Your VPN app usually has a setting for this.'}`, 'sys');
     }
 
     // Compare with the previous run in this tab, then keep this one (in memory only) for the next.
@@ -1229,7 +1232,7 @@
     vpnSeen = vpnSeen || vpn;
 
     if (offer) await sponsor('check');
-    next(['leaktest', 'leaktest', n ? 'run it again after a fix, to compare' : 'turn your VPN on or off, then run it again to compare'],
+    next(['leaktest', 'leaktest', n ? 'run it again after a fix, to compare' : `turn ${relay ? 'iCloud Private Relay' : 'your VPN'} on or off, then run it again to compare`],
       ['share', 'share', leakCode ? 'copy a link to your grade (no IP address or location in it)' : 'copy a link to this check, so others can run it'],
       ['man leaktest', 'man leaktest', 'what each check means and how the grade works'], ['whoami', 'whoami', 'your IP, network and location']);
   }
@@ -2257,7 +2260,7 @@
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
       ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/me', '/json', '/text', '/city', '/line']],
     // The sixth entry: the grading rubric, from leakgrade.js (also on the /leaktest page and in docs/handbook.md).
-    leaktest: ['leaktest   or   leaktest --result <code>', "VPN and DNS leak test, graded A to F: is your IP a known VPN (Cloudflare WARP and Tor by name), which DNS servers look up sites for you, and does WebRTC, IPv6 or your time zone give away more than your IP? For DNS, your browser looks up a few random names under ipterm's own DNS server (which answers \"no such name\"), and the check shows which resolvers asked: on a VPN, any outside the VPN's network is a DNS leak. Runs in your browser in a few seconds; nothing is stored. --result <code> shows a shared result without testing anything.",
+    leaktest: ['leaktest   or   leaktest --result <code>', "VPN and DNS leak test, graded A to F: is your IP a known VPN (Cloudflare WARP, Tor and iCloud Private Relay by name), which DNS servers look up sites for you, and does WebRTC, IPv6 or your time zone give away more than your IP? For DNS, your browser looks up a few random names under ipterm's own DNS server (which answers \"no such name\"), and the check shows which resolvers asked: on a VPN, any outside the VPN's network is a DNS leak. Runs in your browser in a few seconds; nothing is stored. --result <code> shows a shared result without testing anything.",
       ['leaktest'], ['whoami', 'share'], ['/leaktest/r/1bjp', '/leaktest/r/1bjp?format=text'], [
         ...(LEAKLIB ? LEAKLIB.GRADES.map(([g, t], i) => [i ? '' : 'GRADE', `${g}: ${t}`]) : []),
         ...(LEAKLIB ? LEAKLIB.RULES.map((t, i) => [i ? '' : 'COUNTS', t]) : []),
