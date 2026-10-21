@@ -184,6 +184,9 @@ export function packIndex(lists, built) {
   return buf;
 }
 
+// Whether a stored value is an index in this format (VpnServers.blob() treats one in an older format as none).
+export const isIndex = b => !!(b && b.byteLength >= 8 && String.fromCharCode(...new Uint8Array(b, 0, 4)) === 'VPN2');
+
 export function unpackIndex(buf) {
   const u8 = new Uint8Array(buf);
   if (u8.length < 8 || String.fromCharCode(...u8.subarray(0, 4)) !== 'VPN2') throw new Error('not a VPN server index');
@@ -202,8 +205,9 @@ export function unpackIndex(buf) {
 
 // The listing for one address (a string), or null: { provider, role, seen } (seen: when it was last on that
 // provider's list, as an ISO date). Exact address only, never its network. A listing older than VPN_MAX_AGE at `now`
-// is passed over, and when two lists name the address, an exit beats an entry, then the provider listed first.
-export function findServer(idx, ip, now) {
+// is passed over, and so is a provider whose id isn't in `ids` (a Set), when given. When two lists name the address,
+// an exit beats an entry, then the provider listed first.
+export function findServer(idx, ip, now, ids = null) {
   if (!idx || typeof ip !== 'string') return null;
   const hits = [];
   const n = v4num(ip.trim());
@@ -219,7 +223,7 @@ export function findServer(idx, ip, now) {
     while (lo < hi) { const m = (lo + hi) >>> 1; if (cmp6(at(m), w) < 0) lo = m + 1; else hi = m; }
     for (let i = lo; i < idx.tag6.length && cmp6(at(i), w) === 0; i++) hits.push([idx.tag6[i], idx.seen6[i]]);
   }
-  const fresh = hits.filter(([t, seen]) => idx.providers[t >> 1] && now - seen * 1000 <= VPN_MAX_AGE);
+  const fresh = hits.filter(([t, seen]) => idx.providers[t >> 1] && (!ids || ids.has(idx.providers[t >> 1].id)) && now - seen * 1000 <= VPN_MAX_AGE);
   if (!fresh.length) return null;
   const [t, seen] = fresh.sort((a, b) => (a[0] & 1) - (b[0] & 1) || a[0] - b[0])[0];
   return { provider: idx.providers[t >> 1].name, role: t & 1 ? 'entry' : 'exit', seen: new Date(seen * 1000).toISOString() };

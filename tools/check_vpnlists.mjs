@@ -17,12 +17,14 @@
 //    left, so does the blob; then a lookup's request for the blob sets an alarm to refresh, at most once an hour; two
 //    refreshes at once share one set of requests; the cron trigger (scheduled) runs one.
 // 4. Lookups: the JSON (vpnServer), the text answer (/<ip>/text, with ?color=1), the IP page and the terminal's lookup
-//    (/api/lookup, vpnText in public/app.js, which must say the same) for a listed address, in IPv4 and in IPv6; a
-//    neighbour and an unlisted address unchanged; a bot gets the listing (it is free) and still spends no budget;
+//    (/api/lookup, vpnText in public/app.js, which must say the same) for a listed address, IPv4 and IPv6; a
+//    neighbour and an unlisted address unchanged; a Worker's index past its 10 minutes answering at once while the
+//    next loads; a Worker with none asking the object once a minute, not every lookup, and never waiting on a load
+//    that doesn't settle; a provider taken out of the code answering nothing; a bot gets the listing (it is free) and still spends no budget;
 //    leaktest's check of a listed visitor carries it and skips proxycheck.io; a listed exit (a made-up provider, as no
 //    real one lists exits) skips proxycheck.io in a lookup too; /status shows each list; without the binding nothing
 //    changes. Then leaktest in public/app.js: a listing counts as a VPN, so the sponsored line (shown only after a
-//    no-VPN verdict from a check that ran) stays away, and the copied Markdown hides the provider's name.
+//    no-VPN verdict from a check that ran) stays away, and the copied Markdown's masking hides the provider's name.
 // 5. The docs name the feature, the providers and this check.
 //
 //   node tools/check_vpnlists.mjs        (Node 22.15 or later: it loads the Worker through module.registerHooks)
@@ -119,6 +121,8 @@ ok(f('45.142.26.2').role === 'exit' && f('45.142.26.2').provider === 'ExampleVPN
   'an address two lists name: the exit wins over the entry');
 ok(!f('5.6.7.8') && L.findServer(idx, '5.6.7.8', NOW - L.VPN_MAX_AGE) !== null, 'an address last listed more than VPN_MAX_AGE ago is passed over');
 ok(!f('8.8.8.8') && !f('not-an-ip') && !f('') && !L.findServer(null, '45.142.26.2', NOW), 'an unlisted address, junk, or no index: no match');
+ok(L.findServer(idx, '45.142.26.2', NOW, new Set(['mullvad', 'pia'])).provider === 'Mullvad' && !L.findServer(idx, '203.0.114.9', NOW, new Set(['mullvad', 'pia'])),
+  'given the providers still in use, a listing of any other is passed over (here ExampleVPN, so Mullvad answers for 45.142.26.2)');
 const bad = new Uint8Array(blob.slice(0)); bad[0] = 0;
 let refused = 0;
 for (const b of [bad.buffer, blob.slice(0, blob.byteLength - 1), new ArrayBuffer(4)]) { try { L.unpackIndex(b); } catch { refused++; } }
@@ -297,6 +301,10 @@ const alarms = storage.alarms;
 ok((await vs.blob(T4 + 10 * 60_000)) === null && storage.alarms === alarms, 'with no blob, a lookup asking within the hour of the last try starts nothing');
 await vs.blob(T4 + 2 * HOUR); await vs.blob(T4 + 2 * HOUR + 1);
 ok(storage.alarms === alarms + 1 && storage.alarm === T4 + 2 * HOUR + 1000, 'an hour later it sets one alarm to refresh in a second, and a second lookup adds none');
+const old = new Uint8Array(16); old.set([86, 80, 78, 49]);                    // "VPN1": a blob in an older format
+await storage.put('blob', old.buffer); storage.alarm = null;
+ok((await vs.blob(T4 + 4 * HOUR)) === null && storage.alarm === T4 + 4 * HOUR + 1000 && !L.isIndex(old.buffer) && L.isIndex(L.packIndex([], T4)),
+  'a stored blob in an older format counts as none: the lookup gets null and an alarm refreshes it');
 serve = { ...full };
 calls.length = 0;
 await vs.alarm();
@@ -314,13 +322,13 @@ try { await W.scheduled({}, { ...env }, { waitUntil: () => { quiet = false; } })
 ok(quiet, 'without the VPN_SERVERS binding the cron does nothing, and fails nothing');
 
 // One request, as the Worker sees it on ipterm.net (from tools/check_bots.mjs).
-async function run(path, { ua, me = '81.2.69.142', ...headers }) {
+async function run(path, { ua, me = '81.2.69.142', worker = W, settle = true, ...headers }) {
   calls.length = 0; taken.length = 0;
   const pending = [];
-  const res = await W.fetch(new Request('https://ipterm.net' + path, { headers: { 'user-agent': ua, 'cf-connecting-ip': me, ...headers } }), env,
+  const res = await worker.fetch(new Request('https://ipterm.net' + path, { headers: { 'user-agent': ua, 'cf-connecting-ip': me, ...headers } }), env,
     { waitUntil: p => pending.push(p) });
   const body = await res.text();
-  for (let n = 0; n < pending.length;) { const m = pending.length; await Promise.allSettled(pending.slice(n, m)); n = m; }
+  for (let n = 0; settle && n < pending.length;) { const m = pending.length; await Promise.allSettled(pending.slice(n, m)); n = m; }
   const init = /<script type="application\/json" id="ipterm-initial">([\s\S]*?)<\/script>/.exec(body);
   let data = null;
   try { data = init ? JSON.parse(init[1]).data : JSON.parse(body); } catch {}
@@ -353,6 +361,9 @@ const c = await run(`/${MV}/text?color=1`, { ua: CURL, accept: '*/*' });
 ok(c.body.includes("\x1b[1;33myes\x1b[0m: a known VPN server (on Mullvad's own server list"), '... and with ?color=1 its "yes" is bold yellow, as a known VPN address was');
 const pg = await run(`/${MV}`, { ua: CHROME, ...NAV });
 ok(unesc(dd(pg.body)) === ENTRY('Mullvad'), `the IP page: ${JSON.stringify(unesc(dd(pg.body)))}`);
+const t6 = await run(`/${MV6}/text`, { ua: CURL, accept: '*/*' }), pg6 = await run(`/${MV6}`, { ua: CHROME, ...NAV }), tl4 = await run(`/api/lookup?ip=${MV}`, { ua: CHROME, ...TERMINAL });
+ok(vpnLine(t6.body) === ENTRY('Mullvad') && unesc(dd(pg6.body)) === ENTRY('Mullvad') && tl4.data && V.vpnText(tl4.data) === ENTRY('Mullvad'),
+  `the same in IPv6 (${MV6}: text answer and page) and for the terminal's lookup of ${MV}`);
 const tl = await run(`/api/lookup?ip=${MV6}`, { ua: CHROME, ...TERMINAL }), td = tl.data || {};
 const tl2 = await run('/api/lookup?ip=2A04:27C0:0000:000E:0000:0000:0000:F001', { ua: CHROME, ...TERMINAL });
 ok(td.vpnServer && td.vpnServer.provider === 'Mullvad' && V.vpnText(td) === ENTRY('Mullvad') && tl2.data && tl2.data.vpnServer && tl2.data.vpnServer.provider === 'Mullvad',
@@ -381,6 +392,8 @@ L.VPN_PROVIDERS.push(extra);
 serve = { ...full, examplevpn: JSON.stringify(['203.0.114.10', '2a0f:1234::10']) };
 await vs.refresh(Date.now());
 later(11 * 60_000);
+const stale = await run('/203.0.114.10/json', { ua: CURL, accept: '*/*' });
+ok(stale.data && !stale.data.vpnServer, "past its 10 minutes, a Worker's index still answers at once (without the newly refreshed provider) while the next one loads");
 const ex = await run('/203.0.114.10/text', { ua: CURL, accept: '*/*' }), exj = await run('/2a0f:1234::10/json', { ua: CURL, accept: '*/*' });
 ok(vpnLine(ex.body) === EXIT('ExampleVPN') && !ex.kinds.includes('proxycheck') && exj.data && exj.data.vpnServer && exj.data.vpnServer.role === 'exit' &&
   !exj.data.privacy && V.vpnText(exj.data) === EXIT('ExampleVPN'),
@@ -391,12 +404,40 @@ ok(V.vpnText({ source: 'ipinfo-core', flags: { anonymous: true }, vpnServer: { p
   V.vpnText({ source: 'ipinfo-lite' }).startsWith('not checked'),
   "the order: a listed exit first; IPinfo's or proxycheck.io's \"yes\" before an entry; a listing even where nothing else checked");
 L.VPN_PROVIDERS.pop(); extra = null;
+const gone = await run('/203.0.114.10/json', { ua: CURL, accept: '*/*' });
+ok(gone.data && !gone.data.vpnServer, 'a provider taken out of VPN_PROVIDERS answers nothing at once, though the stored lists hold it until the next refresh');
 
 const st = await run('/status?format=text', { ua: CURL, accept: '*/*', 'x-status-key': env.STATUS_KEY });
 const sj = await run('/status', { ua: CURL, accept: '*/*', 'x-status-key': env.STATUS_KEY }), sv = (sj.data || {}).vpnServers || {};
 ok(Array.isArray(sv.providers) && sv.providers.map(p => p.id).join() === 'mullvad,pia,ivpn,airvpn' && sv.providers.every(p => p.addresses > 0 && p.latestList > 0 && p.updated && !p.stale) &&
   /^ {2}mullvad +\d+ addresses \(\d+ on the latest list\), updated \d{4}-\d\d-\d\d \d\d:\d\d UTC$/m.test(st.body),
   `/status shows each list: ${sv.providers ? sv.providers.map(p => `${p.id} ${p.addresses}`).join(', ') : 'nothing'}; text ${JSON.stringify((/^ {2}mullvad.*$/m.exec(st.body) || [''])[0])}`);
+
+// An object with no lists yet (a new deployment before its first download, or every list expired), seen by a Worker
+// that has never had an index (a second copy of the module: a fresh isolate): it asks again a minute later, not on
+// every lookup.
+let blobCalls = 0;
+env.VPN_SERVERS = { idFromName: n => n, get: () => ({ blob: async () => { blobCalls++; return null; } }) };
+const { default: fresh } = await import('../src/worker.js?fresh-isolate');
+later(11 * 60_000);
+await run('/46.1.2.4/json', { ua: CURL, accept: '*/*', worker: fresh }); await run('/46.1.2.5/json', { ua: CURL, accept: '*/*', worker: fresh });
+const callsSoon = blobCalls;
+later(61_000);
+await run('/46.1.2.6/json', { ua: CURL, accept: '*/*', worker: fresh });
+ok(callsSoon === 1 && blobCalls === 2, `with no lists in the object, two lookups within a minute ask it once, and the next minute once more: ${callsSoon}, then ${blobCalls}`);
+// An object that never answers (its requester's context gone, say): each lookup waits VPN_WAIT at most, and after 30
+// seconds the next lookup starts a new load instead of waiting on the dead one forever.
+let hangs = 0;
+env.VPN_SERVERS = { idFromName: n => n, get: () => ({ blob: () => { hangs++; return new Promise(() => {}); } }) };
+const { default: fresh2 } = await import('../src/worker.js?fresh-isolate-2');
+const h0 = realNow(), h1 = await run('/46.1.2.7/json', { ua: CURL, accept: '*/*', worker: fresh2, settle: false }), waited = realNow() - h0;
+await run('/46.1.2.8/json', { ua: CURL, accept: '*/*', worker: fresh2, settle: false });
+const hangsSoon = hangs;
+later(31_000);
+await run('/46.1.2.9/json', { ua: CURL, accept: '*/*', worker: fresh2, settle: false });
+ok(h1.status === 200 && waited >= 1400 && waited < 4000 && hangsSoon === 1 && hangs === 2,
+  `an object that never answers: the lookup goes on after ${waited} ms, a second shares the same load (${hangsSoon} call), and 30 seconds on a new one starts (${hangs} calls)`);
+env.VPN_SERVERS = binding;
 
 delete env.VPN_SERVERS;
 later(11 * 60_000);
@@ -419,6 +460,14 @@ ok(app.includes('    const offer = vpnKnown && !vpn && !vpnSeen;') && app.includ
 ok(app.includes("else if (listed) add('vpn', 'ok', 'VPN detection', `your IP is a known VPN server (on ${listed.provider}'s own server list): sites see that, not your provider`") &&
   app.includes("pc && pc.operator, listed && listed.provider, ...placeTerms(otherInfo)"),
   "leaktest's VPN line names the list, and its copied Markdown hides the provider's name with the visitor's other details");
+
+const MD = Function(slice(app, '  const reEsc =', '  function markdown(') + 'return { termRe, mdTerms };')();
+const hid = L.VPN_PROVIDERS.map(p => p.name).map(name => {
+  const line = `your IP is a known VPN server (on ${name}'s own server list): sites see that, not your provider`;
+  return MD.mdTerms(['Example ISP', name]).map(MD.termRe).reduce((t, re) => t.replace(re, '[hidden]'), line);
+});
+ok(hid.every(t => t === "your IP is a known VPN server (on [hidden]'s own server list): sites see that, not your provider"),
+  `the copied Markdown's own masking (termRe, mdTerms in public/app.js) hides every provider's name in that line: ${JSON.stringify(hid[1])}`);
 
 console.log('-- 5. the docs');
 const hb = read('docs/handbook.md'), readme = read('README.md'), llms = read('public/llms.txt'), api = JSON.parse(read('public/openapi.json'));

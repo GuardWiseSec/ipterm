@@ -109,8 +109,8 @@ tag = "v1"
 new_sqlite_classes = ["LookupBudget"]
 
 # Known VPN servers, from the server lists the VPN providers publish themselves (src/vpn-lists.js): one Durable Object
-# keeps each provider's last good list, packed into one small blob that lookups search in memory. Free for lookups;
-# the deployment creates it, so there is nothing to set up.
+# keeps every address seen on a provider's list in the last 3 days, packed into one small blob that lookups search in
+# memory. Free for lookups; the deployment creates it, so there is nothing to set up.
 [[durable_objects.bindings]]
 name = "VPN_SERVERS"
 class_name = "VpnServers"

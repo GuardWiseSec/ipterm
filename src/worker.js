@@ -112,7 +112,7 @@ import '../public/leakgrade.js';                  // the leak test's grade and s
 import { meCard, ME_WIDTH, ANSI, ansi } from './me.js';   // the /me card and its world map, and its colors
 import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
 import { holderOf, personReason } from './holder-heuristic.js';     // whether a network's holder may be a private person
-import { VPN_PROVIDERS, VPN_MAX_AGE, VPN_FETCH_TIMEOUT, toRecord, mergeRecord, packIndex, unpackIndex, findServer } from './vpn-lists.js';   // VPN providers' own server lists
+import { VPN_PROVIDERS, VPN_MAX_AGE, VPN_FETCH_TIMEOUT, toRecord, mergeRecord, packIndex, unpackIndex, isIndex, findServer } from './vpn-lists.js';   // VPN providers' own server lists
 // Pages that name a network holder who may be a private person are "noindex, follow" (GDPR caution; the rules are
 // in src/holder-heuristic.js). personHeld takes an AS name as RIPEstat gives it, with its handle ("JDOE-AS Jane Doe",
 // "CLOUDFLARENET - Cloudflare, Inc."); personName takes a name on its own ("Jane Doe").
@@ -2056,13 +2056,14 @@ async function privacyData(io, ip) {
    budget, the same for bots and people. A Durable Object rather than KV or D1: the deployment creates it (no namespace or database
    to set up, on ipterm.net or a copy), the writes are one blob four times a day, and the reads come from the cache. */
 const VPN_WAIT = 1500;                   // a lookup waits this long at most for the index, then goes on without it
-let vpnIdx = null, vpnIdxUntil = 0, vpnIdxLoad = null;
+let vpnIdx = null, vpnIdxUntil = 0, vpnIdxLoad = null, vpnIdxLoadAt = 0;
 
 export class VpnServers extends DurableObject {
   // The packed index, or null before the first good refresh. Asked while there is none, it starts a refresh (an
-  // alarm) at most once an hour, so a new deployment doesn't wait for the cron.
+  // alarm) at most once an hour, so a new deployment doesn't wait for the cron. One stored in an older format counts
+  // as none, so a deployment that changes the format refreshes too.
   async blob(now = Date.now()) {
-    const s = this.ctx.storage, b = await s.get('blob');
+    const s = this.ctx.storage, stored = await s.get('blob'), b = isIndex(stored) ? stored : null;
     if (!b && now - ((await s.get('tried')) || 0) > 3600_000 && !(await s.getAlarm())) await s.setAlarm(now + 1000);
     return b || null;
   }
@@ -2114,19 +2115,25 @@ async function refreshVpnLists(s, env, now) {
 }
 
 // The index for this Worker: from memory (10 minutes), this data center's cache (30 minutes) or the Durable Object.
-// Never rejects, and never holds a lookup up for more than VPN_WAIT: past it, or when nothing loads, the lookup goes on
-// with the last index this Worker had, or without one.
+// Never rejects. Past its 10 minutes an index still answers at once while the next one loads in the background, and
+// each address in it expires on its own (findServer), so only a Worker that has none waits, for VPN_WAIT at most, then
+// goes on without. When nothing loaded, it asks again a minute later, not on every lookup (vpnIdxUntil applies with
+// or without an index). Requests share one load in flight, and one older than 30 seconds counts as gone: its
+// requester may have left before it settled (as gradeFor's cards), and a promise that never settles mustn't hold up
+// every later lookup.
 function vpnIndex(io) {
-  if (vpnIdx && Date.now() < vpnIdxUntil) return Promise.resolve(vpnIdx);
+  const now = Date.now();
+  if (now < vpnIdxUntil) return Promise.resolve(vpnIdx);
   if (!io.env.VPN_SERVERS) return Promise.resolve(null);
-  if (!vpnIdxLoad) {
-    vpnIdxLoad = loadVpnIndex(io).finally(() => { vpnIdxLoad = null; });
-    io.ctx.waitUntil(vpnIdxLoad);
+  if (!vpnIdxLoad || now - vpnIdxLoadAt > 30_000) {
+    const load = loadVpnIndex(io).finally(() => { if (vpnIdxLoad === load) vpnIdxLoad = null; });
+    vpnIdxLoad = load; vpnIdxLoadAt = now;
+    io.ctx.waitUntil(load);
   }
-  return Promise.race([vpnIdxLoad, sleep(VPN_WAIT).then(() => vpnIdx)]);
+  return vpnIdx ? Promise.resolve(vpnIdx) : Promise.race([vpnIdxLoad, sleep(VPN_WAIT).then(() => vpnIdx)]);
 }
 async function loadVpnIndex(io) {
-  const req = cacheReq(io, 'vpn-servers/2'), ns = io.env.VPN_SERVERS;   // the blob's format (VPN2), so a new one never meets an old copy
+  const req = cacheReq(io, 'vpn-servers/2'), ns = io.env.VPN_SERVERS;   // the blob's format (VPN2): a new one never meets an old cached copy
   let buf = null, fresh = false;
   try { const hit = await caches.default.match(req); if (hit) buf = await hit.arrayBuffer(); } catch { /* cache trouble: ask the object */ }
   if (!buf) {
@@ -2148,7 +2155,9 @@ async function loadVpnIndex(io) {
 // about the paid budgets).
 async function vpnServerData(io, ip) {
   try {
-    const hit = findServer(await vpnIndex(io), ip, Date.now());
+    // Only providers still in VPN_PROVIDERS: one taken out answers nothing from the next deployment on, not from the
+    // next refresh.
+    const hit = findServer(await vpnIndex(io), ip, Date.now(), new Set(VPN_PROVIDERS.map(p => p.id)));
     return hit ? { provider: hit.provider, role: hit.role, lastSeen: hit.seen } : null;
   } catch { return null; }
 }
