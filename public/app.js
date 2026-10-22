@@ -692,8 +692,8 @@
   // yet. Matches worker.js.
   // "yes" needs Core's flag, a specific proxycheck.io finding (VPN, proxy, Tor or a named service), or the
   // address on a provider's own list (vpnServer) or Apple's iCloud Private Relay list (relay): Apple's list
-  // and a listed exit first, as they are certain; an entry (users connect to it, and reach sites from another
-  // address) after Core's and proxycheck.io's findings. Private Relay is named as a relay, not a VPN.
+  // first, then a listed address, exit or entry, named by its provider even where Core or proxycheck.io also
+  // say yes (an entry is said as such). Private Relay is named as a relay, not a VPN.
   // proxycheck.io's own "anonymous" is a catch-all, also set on addresses that are none of those
   // (Google Public DNS, 8.8.8.8), so alone it is reported as what it is (PC_CATCHALL), never as
   // "anonymizing"; "compromised" means seen performing attacks and gets a hedged line. leaktest
@@ -714,10 +714,9 @@
   function vpnText(d) {
     const core = d && d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = (d && d.privacy) || null, ls = (d && d.vpnServer) || null;
     if (d && d.relay) return RELAY_TEXT;
-    if (ls && ls.role === 'exit') return listedText(ls);
-    if (!core && !pc) return ls ? listedText(ls) : 'not checked (detailed data unavailable for this lookup)';
-    if ((core && core.anonymous) || pcKnown(pc)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
     if (ls) return listedText(ls);
+    if (!core && !pc) return 'not checked (detailed data unavailable for this lookup)';
+    if ((core && core.anonymous) || pcKnown(pc)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
     if (pc && pc.anonymous) return pcFlag(pc);
     const hosting = (core && core.hosting) || d.asType === 'hosting' || (pc && pc.hosting);
     return 'not on known VPN or proxy lists' + (hosting

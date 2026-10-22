@@ -155,8 +155,8 @@ The verdict on the **vpn / proxy** line combines these with the VPN providers' o
 | --- | --- |
 | Apple's iCloud Private Relay list has it (see "iCloud Private Relay") | `yes: Apple's iCloud Private Relay (on Apple's own list of its relay addresses: sites see a Private Relay address, not the user's)` |
 | A VPN provider's own list names the address as one its users reach sites from (none of the lists does today) | `yes: a known Mullvad VPN server (on Mullvad's own server list, as an address its users reach sites from)` |
+| A VPN provider's own list names the address as one its users connect to, an entry (even when Core or proxycheck.io also flag it, or weren't asked: the provider's own word is the most specific) | `yes: a known Mullvad VPN server (on Mullvad's own server list, as an address its users connect to; sites may see them at a different address)`; a name that already says VPN gets just "server" (`a known IVPN server`, `a known AirVPN server`) |
 | Core flags it, or proxycheck.io finds a VPN, proxy or Tor exit, or names the service | `yes: a known VPN address (Proton VPN)` (or proxy, Tor, or "VPN, proxy or Tor" when it isn't specific) |
-| A VPN provider's own list names the address as one its users connect to, an entry (even when Core and proxycheck.io weren't asked) | `yes: a known Mullvad VPN server (on Mullvad's own server list, as an address its users connect to; sites may see them at a different address)`; a name that already says VPN gets just "server" (`a known IVPN server`, `a known AirVPN server`) |
 | proxycheck.io's `anonymous` flag alone, with no VPN, proxy, Tor or service name | `not a known VPN, proxy or Tor service (proxycheck.io sets its catch-all "anonymous" flag, which it also gives public DNS and CDN addresses)` |
 | proxycheck.io's `compromised` flag alone (seen performing attacks) | `flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service` |
 | Neither flags it | `not on known VPN or proxy lists`, plus the hosting-network note or the "not a guarantee" note |
@@ -199,8 +199,8 @@ own code says its listed address is not necessarily the exit, and IVPN doesn't s
   users connect to; sites may see them at a different address)`: the provider first, as the owner chose, in the text
   and in the JSON (`vpnServer.provider`). That answers "is this address a VPN?" for the
   address itself, and "what are these connections my firewall sees?", but it doesn't make the addresses VPN users
-  browse from easier to spot: those are still for IPinfo Core and proxycheck.io to judge, and the line keeps their
-  "yes" first when they have one.
+  browse from easier to spot: those are still for IPinfo Core and proxycheck.io to judge. A listed address leads with
+  its provider's line even when they say yes too, since the provider's own word is the most specific.
 - In `leaktest`, the visitor's own address on a list means they are on that provider's server, whatever the address
   is for others: the VPN line says `your IP is a known Mullvad VPN server (on Mullvad's own server list): sites see
   that, not your provider`, it counts as a VPN, proxycheck.io isn't asked (unless the Worker couldn't read its copy of

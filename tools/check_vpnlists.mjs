@@ -460,11 +460,25 @@ ok(V.vpnText({ source: 'ipinfo-lite', vpnServer: { provider: 'IVPN', role: 'entr
   V.vpnText({ source: 'ipinfo-lite', vpnServer: { provider: 'AirVPN', role: 'entry' } }).startsWith('yes: a known AirVPN server (') &&
   V.vpnText({ source: 'ipinfo-lite', vpnServer: { provider: 'Private Internet Access', role: 'entry' } }).startsWith('yes: a known Private Internet Access VPN server ('),
   'the provider comes first (the owner\'s wording), and a name that already says VPN gets just "server": IVPN, AirVPN, Private Internet Access VPN');
-ok(V.vpnText({ source: 'ipinfo-core', flags: { anonymous: true }, vpnServer: { provider: 'Mullvad', role: 'entry' } }) === 'yes: a known VPN, proxy or Tor address' &&
+ok(V.vpnText({ source: 'ipinfo-core', flags: { anonymous: true }, vpnServer: { provider: 'Mullvad', role: 'entry' } }) === ENTRY('Mullvad') &&
+  V.vpnText({ source: 'ipinfo-core', flags: {}, privacy: { anonymous: true, vpn: true, operator: 'Mullvad' }, vpnServer: { provider: 'Mullvad', role: 'entry' } }) === ENTRY('Mullvad') &&
+  V.vpnText({ source: 'ipinfo-core', flags: { anonymous: true } }) === 'yes: a known VPN, proxy or Tor address' &&
   V.vpnText({ source: 'ipinfo-core', flags: { anonymous: true }, vpnServer: { provider: 'ExampleVPN', role: 'exit' } }) === EXIT('ExampleVPN') &&
   V.vpnText({ source: 'ipinfo-lite', vpnServer: { provider: 'Mullvad', role: 'entry' } }) === ENTRY('Mullvad') &&
   V.vpnText({ source: 'ipinfo-lite' }).startsWith('not checked'),
-  "the order: a listed exit first; IPinfo's or proxycheck.io's \"yes\" before an entry; a listing even where nothing else checked");
+  "the order: a listed address names its provider first, exit or entry, even where IPinfo or proxycheck.io also say yes; a listing even where nothing else checked");
+// The same order in src/worker.js, which writes the IP page and the text answers (kept in step with app.js's vpnText).
+const WV = Function(slice(read('src/worker.js'), 'const pcKnown =', 'function ipPage(') + 'return { vpnText };')();
+const ORDER = [
+  { source: 'ipinfo-core', flags: { anonymous: true }, vpnServer: { provider: 'Mullvad', role: 'entry' } },
+  { source: 'ipinfo-core', flags: {}, privacy: { anonymous: true, vpn: true, operator: 'Proton VPN' }, vpnServer: { provider: 'Mullvad', role: 'entry' } },
+  { source: 'ipinfo-core', flags: { anonymous: true }, vpnServer: { provider: 'ExampleVPN', role: 'exit' } },
+  { source: 'ipinfo-core', flags: { anonymous: true }, relay: { operator: 'Apple' }, vpnServer: { provider: 'Mullvad', role: 'entry' } },
+  { source: 'ipinfo-core', flags: { anonymous: true } }, { source: 'ipinfo-core', flags: { hosting: true } },
+  { source: 'ipinfo-core', flags: {}, privacy: { anonymous: true } }, { source: 'ipinfo-lite', vpnServer: { provider: 'IVPN', role: 'entry' } },
+  { source: 'ipinfo-lite' }];
+ok(WV.vpnText(ORDER[0]) === ENTRY('Mullvad') && WV.vpnText(ORDER[1]) === ENTRY('Mullvad') && ORDER.every(d => WV.vpnText(d) === V.vpnText(d)),
+  "src/worker.js's vpnText (the IP page and the text answers) has the same order: a listed entry leads even where Core or proxycheck.io say yes");
 L.VPN_PROVIDERS.pop(); extra = null;
 const gone = await run('/203.0.114.10/json', { ua: CURL, accept: '*/*' });
 ok(gone.data && !gone.data.vpnServer, 'a provider taken out of VPN_PROVIDERS answers nothing at once, though the stored lists hold it until the next refresh');

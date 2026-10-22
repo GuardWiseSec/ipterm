@@ -4238,9 +4238,10 @@ function connectionText(d) {
 // is not proof: VPN providers keep adding fresh addresses that no list knows yet. Kept in step with app.js
 // (pcKnown, pcFlag, vpnKind, listedText, vpnText there).
 // "yes" needs Core's flag, a specific proxycheck.io finding (VPN, proxy, Tor or a named service), the address on a
-// provider's own list (vpnServer), or on Apple's iCloud Private Relay list (relay). Apple's list and a listed exit are
-// certain, so they come first; an entry (the provider's users connect to it, and reach sites from another address) is
-// said as such, after Core's and proxycheck.io's findings. Private Relay is a relay, not a VPN, and is named as one.
+// provider's own list (vpnServer), or on Apple's iCloud Private Relay list (relay). Apple's list comes first, then a
+// listed address, exit or entry, named by its provider even where Core or proxycheck.io also say yes: the provider's
+// own word is the most specific (an entry is said as such: its users connect to it, and reach sites from another
+// address). Private Relay is a relay, not a VPN, and is named as one.
 // proxycheck.io's own "anonymous" is a catch-all ("any kind of anonymising service (proxy, VPN,
 // TOR, etc.)" in its API reference) that is also set on addresses that are none of those, such as
 // Google Public DNS (8.8.8.8). Alone, it is reported as what it is (PC_CATCHALL), never as
@@ -4259,10 +4260,9 @@ const listedText = ls => (ls.role === 'exit' ? `yes: a known ${vpnLabel(ls.provi
 function vpnText(d) {
   const core = d.source === 'ipinfo-core' && d.flags ? d.flags : null, pc = d.privacy || null, ls = d.vpnServer || null;
   if (d.relay) return RELAY_TEXT;
-  if (ls && ls.role === 'exit') return listedText(ls);
-  if (!core && !pc) return ls ? listedText(ls) : 'not checked (detailed data unavailable for this lookup)';
-  if ((core && core.anonymous) || pcKnown(pc)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
   if (ls) return listedText(ls);
+  if (!core && !pc) return 'not checked (detailed data unavailable for this lookup)';
+  if ((core && core.anonymous) || pcKnown(pc)) return `yes: a known ${vpnKind(pc)} address` + (pc && pc.operator ? ` (${pc.operator})` : '');
   if (pc && pc.anonymous) return pcFlag(pc);
   const hosting = (core && core.hosting) || d.asType === 'hosting' || (pc && pc.hosting);
   return 'not on known VPN or proxy lists' + (hosting
