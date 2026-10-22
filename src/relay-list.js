@@ -1,10 +1,12 @@
 // Apple's iCloud Private Relay: the addresses its relays send traffic out from, from the list Apple publishes itself
 // (https://mask-api.icloud.com/egress-ip-ranges.csv: one range a line, "prefix,country,region,city,"). Unlike the VPN
 // lists (src/vpn-lists.js) these are ranges, and they are exits: Private Relay sends a Safari user's traffic out from
-// one of them, so sites see that address instead of the user's. A relay, not a VPN: it covers Safari (and some
-// unencrypted app traffic), not the rest of the device. The VpnServers Durable Object in src/worker.js downloads the
-// list on the same cron trigger as the VPN lists, asking with the last copy's ETag so an unchanged list costs a 304,
-// keeps the last good copy when a download fails, and packs the ranges into one blob that lookups search in memory.
+// one of them, so sites see that address instead of the user's. A relay, not a VPN: it covers Safari, DNS lookups and
+// unencrypted app traffic, not other browsers or the rest of the device. Apple runs the service and publishes the list;
+// partner networks (Akamai, Cloudflare, Fastly) run the relays that traffic leaves from. The VpnServers Durable Object
+// in src/worker.js downloads the list on the same cron trigger as the VPN lists, asking with the last copy's ETag so an
+// unchanged list costs a 304, keeps the last good copy when a download fails, and packs the ranges into one blob that
+// lookups search in memory.
 // Pure functions only: tools/check_vpnlists.mjs runs them in Node.
 import { VPN_MAX_AGE, v4num, v6words, publicV4, globalV6 } from './vpn-lists.js';
 
@@ -73,7 +75,10 @@ export function parseRelay(text) {
   return p.done();
 }
 
-// The same from a response body, a chunk at a time, refused past max bytes.
+// The same from a response body, a chunk at a time, refused past max bytes, or at a line longer than RELAY_LINE_MAX
+// characters: Apple's are under 100, and an unfinished line is searched again with every chunk, so a body with few or
+// no line breaks (an error page, a binary file) would cost CPU time that grows with the square of its size.
+export const RELAY_LINE_MAX = 4096;
 export async function parseRelayStream(body, max) {
   const p = relayParser(), dec = new TextDecoder(), reader = body.getReader();
   let rest = '', n = 0;
@@ -86,6 +91,7 @@ export async function parseRelayStream(body, max) {
     let i = 0;
     for (let j; (j = rest.indexOf('\n', i)) >= 0; i = j + 1) p.line(rest.slice(i, j));
     rest = rest.slice(i);
+    if (rest.length > RELAY_LINE_MAX) { reader.cancel(); throw new Error(`a line over ${RELAY_LINE_MAX} characters`); }
   }
   rest += dec.decode();
   if (rest) p.line(rest);

@@ -108,9 +108,11 @@ class_name = "LookupBudget"
 tag = "v1"
 new_sqlite_classes = ["LookupBudget"]
 
-# Known VPN servers, from the server lists the VPN providers publish themselves (src/vpn-lists.js): one Durable Object
-# keeps every address seen on a provider's list in the last 3 days, packed into one small blob that lookups search in
-# memory. Free for lookups; the deployment creates it, so there is nothing to set up.
+# Known VPN servers, from the server lists the VPN providers publish themselves (src/vpn-lists.js), and Apple's iCloud
+# Private Relay list (src/relay-list.js): one Durable Object keeps them, packed into small blobs that lookups search in
+# memory. Free for lookups, but the refresh needs Workers Paid (about 0.5 s of CPU to read a changed Apple list; the
+# Free plan's 10 ms applies to Durable Objects too); the deployment creates it. On a Free account, delete this binding
+# and [triggers] below to switch the lists off (see "Self-hosting" in docs/handbook.md).
 [[durable_objects.bindings]]
 name = "VPN_SERVERS"
 class_name = "VpnServers"
@@ -119,7 +121,8 @@ class_name = "VpnServers"
 tag = "v2"
 new_sqlite_classes = ["VpnServers"]
 
-# Refreshes those lists every 6 hours (at minute 17, away from the top of the hour): one request to each provider.
+# Refreshes those lists every 6 hours (at minute 17, away from the top of the hour): one request to each provider and
+# to Apple.
 [triggers]
 crons = ["17 */6 * * *"]
 

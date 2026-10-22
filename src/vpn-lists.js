@@ -14,6 +14,12 @@
 
 export const VPN_MAX_AGE = 3 * 86400_000;      // an address not on its provider's list for this long is dropped
 export const VPN_FETCH_TIMEOUT = 20_000;       // per list; the next cron run tries again (no retries in between)
+// The most addresses kept per provider: a list that would take one past it counts as broken, so the last good one stays.
+// 4 providers x 20,000 x 21 bytes is about 1.7 MB even all IPv6, under a Durable Object's 2 MiB per value, so neither a
+// provider's record nor the packed blob can outgrow storage (one write holds them all, so that would stop every
+// provider's update). Lower it if a provider is added. PIA's, which add up, would reach about 14,000 if each of the 12
+// downloads in 3 days named 1,200 new ones.
+export const VPN_MAX_KEPT = 20_000;
 
 // The providers, in the order lookups prefer when two lists name one address. url: one request per refresh.
 // max: the most bytes read from it. min: fewer addresses than this means the list is broken, not shrunk.

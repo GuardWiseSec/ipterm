@@ -113,7 +113,7 @@ import '../public/leakgrade.js';                  // the leak test's grade and s
 import { meCard, ME_WIDTH, ANSI, ansi } from './me.js';   // the /me card and its world map, and its colors
 import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
 import { holderOf, personReason } from './holder-heuristic.js';     // whether a network's holder may be a private person
-import { VPN_PROVIDERS, VPN_MAX_AGE, VPN_FETCH_TIMEOUT, toRecord, mergeRecord, packIndex, unpackIndex, isIndex, findServer } from './vpn-lists.js';
+import { VPN_PROVIDERS, VPN_MAX_AGE, VPN_FETCH_TIMEOUT, VPN_MAX_KEPT, toRecord, mergeRecord, packIndex, unpackIndex, isIndex, findServer } from './vpn-lists.js';
 import { RELAY, parseRelayStream, packRelay, restampRelay, unpackRelay, isRelay, findRelay } from './relay-list.js';   // Apple's iCloud Private Relay list   // VPN providers' own server lists
 // Pages that name a network holder who may be a private person are "noindex, follow" (GDPR caution; the rules are
 // in src/holder-heuristic.js). personHeld takes an AS name as RIPEstat gives it, with its handle ("JDOE-AS Jane Doe",
@@ -692,7 +692,7 @@ async function cidrRoute(io, q, html) {
   let route = null;
   if (t && !t.error) {
     try { route = (await routeData(io, t)) || { error: ROUTE_BOT + ' Open the page in a browser to see it.', bot: true }; } catch (e) {
-      if (!(e instanceof RateLimited)) console.error('[ipterm] routing lookup failed:', String((e && e.message) || e));
+      if (!(e instanceof RateLimited)) console.error('[ipterm] routing lookup failed:', plain(String((e && e.message) || e)));
       route = { error: e instanceof RateLimited ? 'Routing data skipped: too many lookups from your address. Wait a minute and reload.'
         : "Routing data didn't load: RIPEstat didn't answer. Try again in a moment." };
     }
@@ -1608,7 +1608,7 @@ async function guard(step, ok, fail = (msg, status) => json({ error: msg }, stat
       return r;
     }
     // Visible with `npx wrangler tail` (or Workers Logs if enabled). Never logs the visitor's IP or the API token.
-    console.error('[ipterm] upstream failure:', String((e && e.message) || e).replace(/token=[^&\s]+/g, 'token=***'));
+    console.error('[ipterm] upstream failure:', plain(String((e && e.message) || e)).replace(/token=[^&\s]+/g, 'token=***'));
     return fail('A data source didn\'t respond. Try again in a moment.', 502);
   }
 }
@@ -1690,7 +1690,7 @@ async function torExitList(io) {
       })));
     } catch (e) {
       // Don't hold up every check while it's unavailable: leaktest still runs, without the Tor line.
-      console.error(`[ipterm] Tor exit list unavailable (${String((e && e.message) || e)}); trying again in 10 minutes`);
+      console.error(`[ipterm] Tor exit list unavailable (${plain(String((e && e.message) || e))}); trying again in 10 minutes`);
       torExits = null; torExitsUntil = now + 600_000;
       return null;
     }
@@ -1717,12 +1717,14 @@ async function checkData(io) {
       // proxycheck.io is asked every time here (not only when IPinfo is unsure): it can name the VPN. Unless the address
       // is on a VPN provider's own server list, which names it already: the visitor reaches sites from it, so whatever
       // its role for others, they are on that provider's server (vpnServer). Or on Apple's iCloud Private Relay list
-      // (relay): then the visitor is on the relay.
+      // (relay): then the visitor is on the relay. Both are free and local, so like the Tor line below they outlive an
+      // IPinfo failure (not the rate limit).
       const listing = vpnServerData(io, ip), relaying = relayData(io, ip);
-      const [d, listed, relay, privacy] = await Promise.all([ipData(io, ip, p), listing, relaying,
-        Promise.all([listing, relaying]).then(([l, r]) => (l || r ? null : privacyData(io, ip)))]);
-      network = { source: d.source || null, asn: d.asn || null, org: d.org || null, asType: d.asType || null, flags: d.flags || null, privacy: privacy || null,
-        ...(listed ? { vpnServer: listed } : {}), ...(relay ? { relay } : {}) };
+      const [d, listed, relay, privacy] = await Promise.all([ipData(io, ip, p).catch(e => { if (e instanceof RateLimited) throw e; return null; }),
+        listing, relaying, Promise.all([listing, relaying]).then(([l, r]) => (l || r ? null : privacyData(io, ip)))]);
+      const n = d || {};
+      if (d || listed || relay) network = { source: n.source || null, asn: n.asn || null, org: n.org || null, asType: n.asType || null, flags: n.flags || null,
+        privacy: privacy || null, ...(listed ? { vpnServer: listed } : {}), ...(relay ? { relay } : {}) };
     } catch (e) { if (e instanceof RateLimited) throw e; }   // classification is a bonus; the check still runs
     const list = await Promise.race([exits, sleep(1500).then(() => null)]);
     if (list && list.has(ip)) network = { ...(network || {}), tor: true };
@@ -1907,7 +1909,7 @@ async function provider(ip, env, opts = {}) {
         console.error(`[ipterm] IPinfo Core refused the request (HTTP ${core && core.refused}): quota used up or token not on Core; using IPinfo Lite for 10 minutes`);
       } catch (e) {
         coreRefusedUntil = now + 60 * 1000;               // outage or timeout: pause Core for a minute
-        console.error('[ipterm] IPinfo Core unavailable, using IPinfo Lite for a minute:', String((e && e.message) || e));
+        console.error('[ipterm] IPinfo Core unavailable, using IPinfo Lite for a minute:', plain(String((e && e.message) || e)));
       }
     } else if (allowed === 'visitor') fallback = 'visitor';
   }
@@ -2112,10 +2114,11 @@ export class VpnServers extends DurableObject {
   async relayStatus() { return (await this.ctx.storage.get('relayMeta')) || {}; }
 }
 
-// Downloads every provider's list (all at once) and keeps what passes: it parses, and has at least the provider's
-// minimum. Each address stays until it has been off its provider's list for VPN_MAX_AGE (mergeRecord), so a download
-// that fails or comes back short removes nothing seen lately, and a provider that stops answering drops out after
-// that long. The last try's trouble, if any, shows on /status.
+// Downloads every provider's list (all at once) and keeps what passes: it parses, has at least the provider's minimum,
+// and leaves the provider with at most VPN_MAX_KEPT addresses (so one provider's list can't make the shared write too
+// big for storage and stop everyone's update). Each address stays until it has been off its provider's list for
+// VPN_MAX_AGE (mergeRecord), so a download that fails or comes back short removes nothing seen lately, and a provider
+// that stops answering drops out after that long. The last try's trouble, if any, shows on /status.
 async function refreshVpnLists(s, env, now) {
   await s.put('tried', now);
   const got = await Promise.all(VPN_PROVIDERS.map(async p => {
@@ -2124,15 +2127,18 @@ async function refreshVpnLists(s, env, now) {
       if (!r.ok) { if (r.body) r.body.cancel(); throw new Error('HTTP ' + r.status); }
       return { rec: toRecord(p.parse(await readBody(r, p.max))) };
     } catch (e) {
-      return { error: String((e && e.message) || e).slice(0, 160) };
+      // A parse error quotes the provider's text, which could carry terminal escapes into the logs.
+      return { error: plain(String((e && e.message) || e)).slice(0, 160) };
     }
   }));
   const meta = (await s.get('meta')) || {}, put = {}, lists = [], iso = new Date(now).toISOString();
   for (const [i, p] of VPN_PROVIDERS.entries()) {
-    const { rec, error } = got[i], m = { ...meta[p.id], tried: iso };
+    const { rec, error } = got[i], m = { ...meta[p.id], tried: iso }, old = await s.get('list:' + p.id);
     const n = rec ? rec.four.length + rec.role6.length : 0;
-    const why = error || (n < p.min ? `only ${n} addresses (at least ${p.min} expected)` : null);
-    const kept = mergeRecord(await s.get('list:' + p.id), why ? null : rec, now);
+    let why = error || (n < p.min ? `only ${n} addresses (at least ${p.min} expected)` : null);
+    let kept = mergeRecord(old, why ? null : rec, now);
+    const total = kept.four.length + kept.role6.length;
+    if (!why && total > VPN_MAX_KEPT) { why = `${total} addresses with this list (at most ${VPN_MAX_KEPT} kept)`; kept = mergeRecord(old, null, now); }
     if (why) m.error = why;
     else Object.assign(m, { at: iso, listed: n, error: null });
     Object.assign(m, { n4: kept.four.length, n6: kept.role6.length });
@@ -2177,7 +2183,7 @@ async function refreshRelay(s, env, now) {
       m = next;
     }
   } catch (e) {
-    m = { ...prev, tried: iso, error: String((e && e.message) || e).slice(0, 160) };
+    m = { ...prev, tried: iso, error: plain(String((e && e.message) || e)).slice(0, 160) };
     await s.put('relayMeta', m);
   }
   console.log(`[ipterm] iCloud Private Relay list: ${m.count || 0} ranges` + (m.error ? ` (kept; this try: ${m.error})` : m.unchanged ? ' (unchanged)' : ''));
@@ -2188,9 +2194,11 @@ async function refreshRelay(s, env, now) {
 // Object. Never rejects. Past its 10 minutes a list still answers at once while the next copy loads in the background
 // (each address in the VPN index expires on its own, and the relay list once it is 3 days old), so only a Worker that
 // has none waits, for VPN_WAIT at most, then goes on without. When nothing loaded, it asks again a minute later, not on
-// every lookup (until applies with or without a list). Requests share one load in flight, and one older than 30
-// seconds counts as gone: its requester may have left before it settled (as gradeFor's cards), and a promise that
-// never settles mustn't hold up every later lookup.
+// every lookup (until applies with or without a list), and the same once a load has taken longer than VPN_WAIT: the
+// lookups after it go on without for a minute instead of each waiting again (a load that settles meanwhile still
+// installs its list). Requests share one load in flight, and one older than 30 seconds counts as gone: its requester
+// may have left before it settled (as gradeFor's cards), and a promise that never settles mustn't hold up every later
+// lookup.
 function listIndex(io, which) {
   const st = listState[which], now = Date.now();
   if (now < st.until) return Promise.resolve(st.idx);
@@ -2200,7 +2208,10 @@ function listIndex(io, which) {
     st.load = load; st.loadAt = now;
     io.ctx.waitUntil(load);
   }
-  return st.idx ? Promise.resolve(st.idx) : Promise.race([st.load, sleep(VPN_WAIT).then(() => st.idx)]);
+  return st.idx ? Promise.resolve(st.idx) : Promise.race([st.load, sleep(VPN_WAIT).then(() => {
+    if (!st.idx) st.until = Math.max(st.until, Date.now() + 60_000);
+    return st.idx;
+  })]);
 }
 async function loadListIndex(io, which) {
   const L = LISTS[which], st = listState[which], req = cacheReq(io, L.key), ns = io.env.VPN_SERVERS;
@@ -2208,10 +2219,10 @@ async function loadListIndex(io, which) {
   try { const hit = await caches.default.match(req); if (hit) buf = await hit.arrayBuffer(); } catch { /* cache trouble: ask the object */ }
   if (!buf) {
     try { buf = await ns.get(ns.idFromName('lists'))[L.method](); fresh = !!buf; } catch (e) {
-      console.error(`[ipterm] ${L.what} unavailable:`, String((e && e.message) || e));
+      console.error(`[ipterm] ${L.what} unavailable:`, plain(String((e && e.message) || e)));
     }
   }
-  try { if (buf) st.idx = L.unpack(buf); } catch (e) { buf = null; console.error(`[ipterm] ${L.what} unreadable:`, String((e && e.message) || e)); }
+  try { if (buf) st.idx = L.unpack(buf); } catch (e) { buf = null; console.error(`[ipterm] ${L.what} unreadable:`, plain(String((e && e.message) || e))); }
   if (buf && fresh) io.ctx.waitUntil(caches.default.put(req, new Response(buf, {
     headers: { 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=1800' },
   })).catch(() => {}));
@@ -3739,7 +3750,7 @@ async function rdapBase(target, origin) {
   let list;
   try { list = await bootstrap(target.asn ? 'asn' : target.p.v === 4 ? 'ipv4' : 'ipv6', origin); }
   catch (e) {
-    console.error('[ipterm] IANA bootstrap unavailable, using rdap.org:', String((e && e.message) || e));
+    console.error('[ipterm] IANA bootstrap unavailable, using rdap.org:', plain(String((e && e.message) || e)));
     return 'https://rdap.org/';
   }
   if (target.asn) {
@@ -3907,7 +3918,7 @@ function blockAsk(io, ip, p, base, key) {
     const why = String((e && e.message) || e), down = /^rdap (?:(429)|5\d\d)$|^rdap: /.exec(why);
     const minutes = !down ? 0 : down[1] ? 10 : 1, at = (e && e.origin) || originOf(base);
     if (minutes) blockPause[at] = Date.now() + minutes * 60_000;
-    console.error(`[ipterm] registry date skipped (${why})` + (minutes ? `; ${at} left alone for ${minutes} minute${minutes > 1 ? 's' : ''}` : ''));
+    console.error(`[ipterm] registry date skipped (${plain(why)})` + (minutes ? `; ${at} left alone for ${minutes} minute${minutes > 1 ? 's' : ''}` : ''));
     throw e;
   });
   blockFlight.set(ip, f);
@@ -3995,7 +4006,7 @@ async function domainLookup(name, origin) {
   let base, viaFallback = false;
   try { base = await domainBase(name, origin); }
   catch (e) {
-    console.error('[ipterm] IANA bootstrap unavailable, using rdap.org:', String((e && e.message) || e));
+    console.error('[ipterm] IANA bootstrap unavailable, using rdap.org:', plain(String((e && e.message) || e)));
     base = 'https://rdap.org/'; viaFallback = true;
   }
   if (!base) {
@@ -4239,7 +4250,7 @@ const pcKnown = pc => !!(pc && pc.anonymous && (pc.vpn || pc.proxy || pc.tor || 
 const PC_CATCHALL = 'not a known VPN, proxy or Tor service (proxycheck.io sets its catch-all "anonymous" flag, which it also gives public DNS and CDN addresses)';
 const pcFlag = pc => (pc.compromised ? 'flagged by proxycheck.io as compromised (seen performing attacks), but not as a known VPN, proxy or Tor service' : PC_CATCHALL);
 const vpnKind = pc => (pcKnown(pc) ? (pc.tor ? 'Tor' : pc.vpn ? 'VPN' : pc.proxy ? 'proxy' : 'VPN, proxy or Tor') : 'VPN, proxy or Tor');
-const RELAY_TEXT = "yes: Apple's iCloud Private Relay (on Apple's own list of its relay addresses: sites see Apple's address, not the user's)";
+const RELAY_TEXT = "yes: Apple's iCloud Private Relay (on Apple's own list of its relay addresses: sites see a Private Relay address, not the user's)";
 // The provider first, as the owner chose ("a known Mullvad VPN server"); a name that already says VPN (IVPN, AirVPN)
 // just gets "server".
 const vpnLabel = p => (/vpn/i.test(p) ? `${p} server` : `${p} VPN server`);
