@@ -413,32 +413,15 @@
     if (V4.test(s)) return { v: 4, o: s.split('.').map(Number) };
     const g = v6groups(s); return g ? { v: 6, g } : null;
   }
+  // What kind of address p is, from the special-purpose table in cidr.js that the IP pages and the subnet calculator
+  // use too, with a word of the terminal's own for the addresses people meet most. Without cidr.js every address
+  // counts as public here, and the Worker, which has the same table, still answers a non-public one as such.
   function classify(p) {
-    if (p.v === 4) {
-      const [a, b, c] = p.o;
-      if (a === 0) return ['reserved', '"this network" block, 0.0.0.0/8'];
-      if (a === 10) return ['private', 'RFC 1918 private range, 10.0.0.0/8'];
-      if (a === 100 && b >= 64 && b <= 127) return ['cgnat', 'carrier-grade NAT, RFC 6598 (100.64.0.0/10)'];
-      if (a === 127) return ['loopback', 'loopback, 127.0.0.0/8. This is your own machine.'];
-      if (a === 169 && b === 254) return ['link-local', 'link-local, 169.254.0.0/16. Usually means DHCP failed.'];
-      if (a === 172 && b >= 16 && b <= 31) return ['private', 'RFC 1918 private range, 172.16.0.0/12'];
-      if (a === 192 && b === 0 && c === 2) return ['docs', 'TEST-NET-1 documentation range, RFC 5737'];
-      if (a === 192 && b === 168) return ['private', 'RFC 1918 private range, 192.168.0.0/16. Typical home router.'];
-      if (a === 198 && (b === 18 || b === 19)) return ['benchmark', 'benchmarking range, RFC 2544 (198.18.0.0/15)'];
-      if (a === 198 && b === 51 && c === 100) return ['docs', 'TEST-NET-2 documentation range, RFC 5737'];
-      if (a === 203 && b === 0 && c === 113) return ['docs', 'TEST-NET-3 documentation range, RFC 5737'];
-      if (a >= 224 && a <= 239) return ['multicast', 'multicast, 224.0.0.0/4'];
-      if (a >= 240) return ['reserved', p.o.every(x => x === 255) ? 'limited broadcast address' : 'reserved, 240.0.0.0/4'];
-      return ['public', null];
-    }
-    const g = p.g;
-    if (g.every(x => x === 0)) return ['unspecified', 'unspecified address, ::'];
-    if (g.slice(0, 7).every(x => x === 0) && g[7] === 1) return ['loopback', 'loopback, ::1'];
-    if ((g[0] & 0xffc0) === 0xfe80) return ['link-local', 'link-local, fe80::/10'];
-    if ((g[0] & 0xfe00) === 0xfc00) return ['ula', 'unique local address, fc00::/7 (IPv6 private range)'];
-    if ((g[0] & 0xff00) === 0xff00) return ['multicast', 'multicast, ff00::/8'];
-    if (g[0] === 0x2001 && g[1] === 0x0db8) return ['docs', 'documentation range, RFC 3849 (2001:db8::/32)'];
-    return ['public', null];
+    const [kind, note] = window.IPTERM_CIDR ? window.IPTERM_CIDR.special(p) : ['public', null];
+    if (kind === 'public') return ['public', null];
+    const hint = kind === 'loopback' ? 'This is your own machine.' : kind === 'link-local' && p.v === 4 ? 'Usually means DHCP failed.'
+      : kind === 'private' && p.o[0] === 192 ? 'Typical home router.' : kind === 'ula' ? "IPv6's private range." : '';
+    return [kind, hint ? `${note}. ${hint}` : note];
   }
   function computed(p) {
     if (p.v === 4) {
@@ -653,7 +636,15 @@
     if (typeof addr !== 'string' || addr.length > 254 || !MAIL_RE.test(addr)) return document.createTextNode(String(addr));
     const a = el('a', '', addr); a.href = 'mailto:' + addr; return a;
   }
-  const ipTitle = (ip, d) => [ip, d.hostname, d.org ? d.org + (d.asn ? ` (${d.asn})` : '') : d.asn].filter(Boolean).join(' · ') + ' | ipterm';
+  // "<ip> IP lookup: <org> (<ASN>), <hostname>", without the parts the lookup doesn't have, as ipPage() in worker.js,
+  // or what IPinfo says of an address it calls a bogon (IPINFO_BOGON)
+  const ipTitle = (ip, d) => {
+    if (d.bogon) return `${ip} IP lookup: IPinfo lists it as a bogon | ipterm`;
+    const named = [d.org ? d.org + (d.asn ? ` (${d.asn})` : '') : d.asn, d.hostname].filter(Boolean).join(', ');
+    return `${ip} IP lookup${named ? ': ' + named : ''} | ipterm`;
+  };
+  // A lookup's answer for an address cidr.js calls public that IPinfo calls a bogon, with no data (IPINFO_BOGON in worker.js)
+  const IPINFO_BOGON = 'IPinfo lists it as a bogon: an address not expected on the public internet';
 
   function localTime(tz) {
     try {
@@ -735,9 +726,10 @@
   }
 
   async function render(p, ipText, d, isSelf) {
-    const [cls, why] = classify(p);
+    const [cls, why] = classify(p), bogon = Boolean(d && d.bogon);   // bogon: IPinfo's (IPINFO_BOGON)
     const head = el('div', 'head');
-    head.append(el('span', 'hip', isSelf ? 'whoami' : ipText), el('span', 'tag', 'IPv' + p.v), el('span', 'tag ' + (cls === 'public' ? 'pub' : 'priv'), cls));
+    head.append(el('span', 'hip', isSelf ? 'whoami' : ipText), el('span', 'tag', 'IPv' + p.v),
+      el('span', 'tag ' + (cls === 'public' && !bogon ? 'pub' : 'priv'), bogon ? 'bogon' : cls));
     if (d && d.source) head.append(el('span', 'tag', SRC[d.source] || d.source));
     const res = isSelf ? { cmd: 'whoami', value: ipText, what: 'your IP address', path: '/', self: true, hide: [own(ipText)], terms: placeTerms(d), drop: SELF_DROP }
       : { cmd: 'lookup ' + ipText, value: ipText, what: 'the address ' + ipText, path: '/' + ipText };
@@ -799,9 +791,14 @@
         const f = document.createDocumentFragment();
         f.append('run ', cmdLink('leaktest', 'leaktest', '/leaktest'), ' to check yours (and what else your browser gives away)');
         rows.push(['vpn / proxy', f]);
-      } else if (!isSelf && cls === 'public' && d.source && d.source !== 'demo') rows.push(['vpn / proxy', vpnText(d)]);
+      } else if (!isSelf && cls === 'public' && !bogon && d.source && d.source !== 'demo') rows.push(['vpn / proxy', vpnText(d)]);
       if (d.colo) rows.push(['edge', d.colo + '  (the Cloudflare data center that answered you)']);
       if (d.note) rows.push(['note', d.note]);
+      if (bogon) {                               // what cidr.js says of it, if anything, then IPinfo's word, as ipPage() in worker.js
+        const [, words, listed] = window.IPTERM_CIDR ? window.IPTERM_CIDR.special(p) : [];
+        if (listed) rows.push(['range', words]);
+        rows.push(['bogon', IPINFO_BOGON]);
+      }
     }
     if (why) rows.push(['range', why]);
     rows.push('sep');
@@ -810,7 +807,7 @@
     const where = d ? [d.city, d.region, d.country || d.countryCode].filter(Boolean).join(', ') : '';
     announce(isSelf
       ? `Your IP address is ${ipText}` + (where ? `, near ${where}` : '') + (d && d.org ? `, network ${d.org}` : '') + '.'
-      : `${ipText}: ` + (d ? [d.org, d.asn, where].filter(Boolean).join(', ') || 'no details' : (why || cls)) + '.');
+      : `${ipText}: ` + (bogon ? IPINFO_BOGON : d ? [d.org, d.asn, where].filter(Boolean).join(', ') || 'no details' : (why || cls)) + '.');
   }
 
   /* ---------- sponsored line ----------
@@ -1343,7 +1340,9 @@
     const ipText = p.v === 4 ? p.o.join('.') : raw.toLowerCase();
     const [cls] = classify(p);
     if (cls !== 'public') {
-      setUrl('/' + ipText, `${ipText} · non-public IPv${p.v} address | ipterm`);
+      // titled with the kind's word, as ipPage() in worker.js titles the page ("private IPv4 address": kindWord() in
+      // cidr.js, there whenever classify() says non-public)
+      setUrl('/' + ipText, `${ipText} · ${CIDRLIB.kindWord(cls)} IPv${p.v} address | ipterm`);
       await render(p, ipText, null, false);
       line('This address is not routable on the public internet, so it has no owner or location to look up.', 'sys');
       const local = cls === 'private' || cls === 'ula';
@@ -1367,7 +1366,7 @@
     }
     if (d) setUrl(ipPath(ipText), ipTitle(ipText, d));
     await render(p, ipText, d, false);
-    if (d) await sponsor('ip');
+    if (d && !d.bogon) await sponsor('ip');      // none for IPinfo's bogon, as for a non-public address
     if (!d && live) return;                      // the lookup failed: retry is offered instead
     const block = `${ipText}/${p.v === 4 ? 24 : 64}`;
     next(d && [`whois ${ipText}`, `whois ${ipText}`, 'registry record: owner and abuse contact'],
@@ -1396,7 +1395,8 @@
       if (!d) return line('Preview mode has sample data for AS15169 and AS13335 only. Other networks appear once the Worker is deployed.', 'warn');
     }
     if (!d || !d.found) return line(`${id} has no registered holder or announced prefixes.`, 'warn');
-    setUrl('/' + id, `${id} · ${d.name || d.holder || 'network'} | ipterm`);
+    const name = d.name || d.holder;                // as asnPage() in worker.js titles it
+    setUrl('/' + id, `${id}${name ? ' ' + name : ''}: ASN, IP ranges and upstreams | ipterm`);
     await renderAsn(d);
     await sponsor('asn');
     const top = (d.v4 && d.v4.prefixes && d.v4.prefixes[0]) || (d.v6 && d.v6.prefixes && d.v6.prefixes[0]);
@@ -1428,6 +1428,9 @@
   // links stay ordinary.
   const cidrRel = c => (CIDRLIB.calc(c).range === 'public' ? 'nofollow' : null);
   const cidrNext = (c, hint) => [`cidr ${c}`, `cidr ${c}`, hint, null, cidrRel(c)];
+  // The /cidr page's title without routing (cidrPage() in worker.js words it the same way)
+  const cidrTitle = d => (d.v === 4 ? `${d.cidr} subnet: ${d.netmask}, ${d.usable === 1 ? 'a single address' : d.usableText + ' usable hosts'}`
+    : `${d.cidr} IPv6 subnet`) + ' | ipterm';
 
   async function cidr(raw, pre) {
     if (!CIDRLIB) return line('The subnet calculator did not load. Reload the page and try again.', 'err');
@@ -1436,7 +1439,7 @@
     if (!input && !pre) return toolIntro('cidr');
     const d = pre && pre.data ? pre.data : CIDRLIB.calc(input);
     if (d.error) return line(d.error, 'err');
-    setUrl('/cidr/' + d.cidr, (d.v === 4 ? `${d.cidr} subnet: ${d.netmask}, ${d.usableText} usable hosts` : `${d.cidr} IPv6 subnet`) + ' | ipterm');
+    setUrl('/cidr/' + d.cidr, cidrTitle(d));
     await renderCidr(d);
     // A public range also gets its routing: from the page when the server sent it, else one request (RIPEstat, cached).
     // A page sent without it because it looked like a bot's (route.bot, routeData() in worker.js) asks too: a browser
@@ -1575,8 +1578,19 @@
     head.append(el('span', 'hip', `port ${n}`), el('span', 'tag', s ? s.proto : 'tcp'), el('span', 'tag', 'about'));
     head.append(shareBar({ cmd: `port ${n} --info`, value: String(n), what: 'the port number', path: '/port/' + n }));
     out.appendChild(head);
-    const rows = s ? [['service', s.name], ['used for', s.use], ['protocol', PORTSLIB.protoText(s.proto)], ['if closed', s.tips]]
+    const rows = s ? [['service', s.name], ['used for', s.use], ['protocol', PORTSLIB.protoText(s.proto)]]
       : [['protocol', 'TCP'], ['', `Port ${n} isn't one of the common ports ipterm describes, but it can still be checked.`, 'plain']];
+    const iana = s && PORTSLIB.iana(n);       // IANA's registered name, with the registry and whatportis.com (portPage() in worker.js)
+    if (iana) {
+      const names = document.createDocumentFragment();
+      names.append(iana.text);
+      PORTSLIB.refs(n).forEach(([label, href]) => {
+        const a = el('a', '', label + ' ↗'); a.href = href; a.target = '_blank'; a.rel = 'noopener';
+        names.append(' · ', a);
+      });
+      rows.push([iana.names.length > 1 ? 'IANA names' : 'IANA name', names]);
+    }
+    if (s) rows.push(['if closed', s.tips]);
     if (s && s.risk) rows.push(['caution', s.risk]);
     const blocked = PORTSLIB && PORTSLIB.untestable(n);   // port 25: say so, and offer no check
     const f = document.createDocumentFragment();
@@ -2028,7 +2042,8 @@
     const q = asnM ? 'AS' + Number(asnM[1]) : dom || (p.v === 4 ? p.o.join('.') : raw.toLowerCase());
     if (p && classify(p)[0] !== 'public') {
       setUrl('/whois/' + q, `whois ${q} | ipterm`);
-      line(`${q} is a non-public address (${classify(p)[1] || classify(p)[0]}), so no internet registry holds a record for it.`, 'sys');
+      // in the table's words, as whoisPage() in worker.js (classify() is non-public only when cidr.js is there)
+      line(`${q} is a non-public address, so no internet registry holds a record for it: it is ${CIDRLIB.rangeIn(CIDRLIB.special(p)[1])}.`, 'sys');
       next([`lookup ${q}`, `lookup ${q}`, 'what this range is for'], ['whoami', 'whoami', 'your public IP address']);
       return announce(`${q} is not a public address, so there is no registry record.`);
     }

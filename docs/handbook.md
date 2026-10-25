@@ -15,6 +15,8 @@ ipterm is a terminal-style IP lookup site that runs on a single Cloudflare Worke
 - Whether a network's holder may be a private person (the sitemap leaves it out, and its ASN, whois and `/cidr`
   pages are noindex): `src/holder-heuristic.js`
 - Settings: `wrangler.toml`
+- What each common port is for, and IANA's names for it: `public/ports.js` (see "Port checker"); the table of
+  special-purpose addresses: `public/cidr.js` (see "Subnet calculator")
 - Scripts: `tools/` (deploy, land mask, guides, ASN sitemap, link-preview and SEO checks)
 - The DNS leak test's own DNS server: `dnsleak-server/` (runs on a small VPS outside Cloudflare; see
   [dnsleak-server/README.md](../dnsleak-server/README.md))
@@ -446,6 +448,17 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 
 Lookups of other IPs are cached at the edge for six hours.
 
+**IPinfo's bogons.** For an address it doesn't expect on the public internet, IPinfo answers `{ "ip": ..., "bogon":
+true }` and nothing more. ipterm never asks it about an address the special-purpose table calls non-public (see
+"Special-purpose ranges"), but IPinfo calls some others bogons too, such as 192.88.99.1 (its free API, on 2026-10-25),
+in 192.88.99.0/24, which the table calls public since it is still announced. A lookup keeps just that, from Core,
+Lite or the free API alike (`ipinfoCore()`, `provider()`), with the reverse DNS, and goes no further: no
+proxycheck.io query and no registry date. Its page is titled `192.88.99.1 IP lookup: IPinfo lists it as a bogon`,
+tagged `bogon` and noindex, and says what the table says of the address, then "IPinfo lists it as a bogon: an address
+not expected on the public internet" (`IPINFO_BOGON`). The text answer has a `bogon` line in those words and no VPN
+line, the JSON is `{ ip, version, source, bogon: true, hostname }`, and the terminal titles and draws it the same way
+(`ipTitle()` and `render()` in `public/app.js`). It is cached for six hours like any other lookup.
+
 ## Self-hosting
 
 ipterm is MIT-licensed, so you can run your own copy. Follow "Deploy" above, then:
@@ -742,6 +755,43 @@ block splits or combines. Pages live at `/cidr/<ip>/<prefix>` (canonicalized to 
 cheat sheet is at `/guides/subnet-cheat-sheet`. The math is in `public/cidr.js`, shared by the page and the
 Worker, and makes no outside calls: the JSON and `?format=text` answers are the calculation alone. The page for a
 public range adds how it is routed (see "Routing" below), and so does `cidr` in the terminal for a public range.
+
+**Special-purpose ranges.** `SPECIAL` in `public/cidr.js` is the one table of addresses that aren't public: the
+subnet calculator's `range` and `rangeNote`, the IP pages (`nonPublicReason()` in `src/worker.js`, and with it
+whois, routing, the port check and the rest) and the terminal (`classify()` in `public/app.js`, which adds a hint of
+its own such as "Typical home router.") all read it, so they can't disagree. It holds the blocks that IANA's
+[IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry) and
+[IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry) Special-Purpose Address Registries mark not
+globally reachable, plus multicast, each with its kind (`private`, `cgnat`, `loopback`, `link-local`, `docs`,
+`benchmark`, `multicast`, `ula`, `unspecified`, `reserved`) and the words the pages use. Beyond the table, IPv4 is
+public, and IPv6 is public in 2000::/3 (global unicast) and reserved elsewhere. Two entries are kind `public`: the
+NAT64 prefix 64:ff9b::/96, which IANA marks globally reachable, and 192.88.99.0/24, the 6to4 relay anycast range
+RFC 7526 deprecated, which is still announced (by AS6939, seen by 199 of 269 RIS peers in RIPEstat on 2026-10-25), so
+it is public with its own words, apart from its 6a44 relay address 192.88.99.2. IANA marks five anycast addresses
+globally reachable too, the Port Control Protocol's 192.0.0.9 and 2001:1::1 (RFC 7723), TURN's 192.0.0.10 and
+2001:1::2 (RFC 8155) and the DNS-SD Service Registration Protocol's 2001:1::3 (RFC 9665), but they stay `reserved`,
+with words that name them: IPinfo answers `{ "bogon": true }` for each (its free API, on 2026-10-25), so a lookup
+would only spend IPinfo Core budget on an empty answer. IPinfo answers the same for 192.88.99.1, whose page says so in
+IPinfo's name (see "IPinfo's bogons" under "How the data works"). The IETF block 2001::/23 is left out as a whole,
+since most of what is assigned in it is reachable (Teredo, AS112, AMT), and only its benchmarking block 2001:2::/48
+and those three anycast addresses are in the table. A block takes the most specific entry that holds all of it, and
+otherwise the kind of the range it starts in (10.0.0.0/7 is private, 100.0.0.0/9 public), as the calculator always
+went by its network address. An entry's words go only with a block it holds: a wider one "starts with" it (10.0.0.0/7
+"starts with the RFC 1918 private range (10.0.0.0/8)", ::/96 with the unspecified address), and a /0 is "the whole
+IPv4 address space" or "the whole IPv6 address space". `rangeIn()` and `rangeIs()` in `cidr.js` put the words in a
+sentence ("in the ...", "the loopback address (::1)", "starts with the ..."), on the pages and in error messages,
+where the words come last: `curl ipterm.net/192.168.1.1` gets the error "192.168.1.1 is not a public address, so there
+is nothing to look up: it is in the RFC 1918 private range (192.168.0.0/16)." `kindWord()` gives each kind the word a
+non-public address's page title uses (see "Titles and descriptions").
+
+Until October 2026 the calculator, the IP page and the terminal each had a list of their own. The calculator called
+198.18.0.0/15 (benchmarking), 192.0.0.0/24 (IETF protocol assignments) and 3fff::/20 (documentation, RFC 9637) public
+space, while the IP page called 198.18.0.1 non-public; the terminal didn't know 192.0.0.0/24; and the IP page looked
+up 3fff::/20 and 2001:2::/48 at IPinfo, and the IPv6 space outside 2000::/3 it had no rule for (100::/64, 5f00::/16
+and the unassigned rest), which the calculator called reserved.
+`node tools/check_pages.mjs` checks every block in both registries (a copy of them is in the script; give it IANA's
+CSV files to check the copy too): its first and last address must get the same answer, in the same words, from all
+three.
 
 ### Routing (route)
 
@@ -1295,7 +1345,8 @@ the three Cloudflare records, `setup.sh`, the secret and the checks), its settin
   `X-Ipterm: dnsleak`) and command-line clients, like the port check; 1 to 10 tokens. It counts as one of
   the visitor's 30 lookups a minute, plus one per resolver network not already cached (one IPinfo Lite
   lookup per /24, or IPv6 /48, at most 8). Never Core, never proxycheck.io. Private and other non-public
-  resolver addresses are shown as such and never sent anywhere. JSON, or aligned text with
+  resolver addresses are shown as such and never sent anywhere (in the text answer,
+  `10.0.0.1  non-public: RFC 1918 private range (10.0.0.0/8)`). JSON, or aligned text with
   `?format=text`. From a shell:
   `T=$(openssl rand -hex 10); dig +short $T.dl.ipterm.net; curl "ipterm.net/api/dnsleak?t=$T&format=text"`.
 - **Named services:** resolvers on Cloudflare's, Google's, Quad9's and Cisco OpenDNS's networks are named
@@ -1356,7 +1407,30 @@ tested; for UDP services (WireGuard, Valheim, Minecraft Bedrock) the result says
 any risk in opening it. Other port numbers get a short page marked `noindex`. Port 25's page (title,
 description and terminal) says ipterm can't check it, since Cloudflare blocks it, and offers no check
 button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the page and the Worker, like
-`cidr.js`; add a port by adding a line to its `LIST`.
+`cidr.js`; add a port by adding a line to its `LIST`, and its IANA names and the date below with it.
+
+- **IANA's name.** Each port's page, the Worker's and the terminal's (`portAbout()` in `public/app.js`), has an
+  "IANA name" row: the service name(s) IANA registered for that port on the protocol(s) of its row, from the
+  [Service Name and Transport Protocol Port Number Registry](https://www.iana.org/assignments/service-names-port-numbers)
+  (`IANA` in `public/ports.js`, from the CSV of 2026-10-25), such as "ssh (TCP)" or "domain (TCP and UDP)", or "not
+  registered with IANA" (Minecraft's 25565, WireGuard's 51820 and eight more). Some names belong to another service
+  than the one people use the port for (5000 is `commplex-main`, 7777 `cbt`), and the row says what IANA has, as it
+  is. The row links IANA's registry, searched for the port (it has no page per port:
+  `https://www.iana.org/assignments/service-names-port-numbers?search=<n>`), and whatportis.com's page for it
+  (`https://whatportis.com/ports/<n>`), both `rel="noopener"`; they are on 42 pages, not thousands, so not
+  `nofollow`. whatportis has no page for four of the ports, 8096, 28015, 51413 and 64738 (a 404 on 2026-10-25, when
+  the others answered 200, or 308 to a page that did), so theirs link IANA alone: `NO_WHATPORTIS` in
+  `public/ports.js`, with the day it was checked, which `PORTS.refs()` reads. Check the 42 again when the IANA names
+  are, following redirects, and change the set and its date together. Ports outside the list have no row: only the
+  listed ones were checked against the registry. To check them again, download the registry's CSV and run
+  `node tools/check_pages.mjs service-names-port-numbers.csv`.
+- **Sitemap and date.** `/port` and the 42 pages have a sitemap file of their own, `/sitemap-ports.xml`
+  (`portPaths()` in `src/worker.js`), so Search Console shows how they are indexed. Every URL in it, and its line
+  in `/sitemap.xml`, carries `<lastmod>`: `PORTS.updated`, the `UPDATED` date in `public/ports.js`, the day the
+  port pages' content last changed. Change it in the same commit as a change to a port's row, the IANA names or the
+  page itself (`portPage()`, `portAbout()`), to the day it goes live, and at no other time: search engines ignore a
+  `lastmod` that is always new. The pages draw only on `public/ports.js` and never run a check, so a crawl of them
+  makes no outside request (`tools/check_pages.mjs` checks).
 
 **IPv4, IPv6 and dual stack.** What testing on Cloudflare (`wrangler dev --remote`) showed:
 
@@ -1486,13 +1560,43 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
 
   | File | What | URLs (October 2026) |
   | --- | --- | --- |
-  | `/sitemap-pages.xml` | `SITEMAP_PATHS` in `src/worker.js`: the home page, tools, guides, popular ports, router and resolver addresses, subnet and routing examples, DNS, mail, report card and whois pages | 95 |
+  | `/sitemap-pages.xml` | `SITEMAP_PATHS` in `src/worker.js`: the home page, tools, guides, router and resolver addresses, subnet and routing examples, DNS, mail, report card and whois pages | 85 |
+  | `/sitemap-ports.xml` | `/port` and every port page in `public/ports.js` (`portPaths()`), each with its `<lastmod>` | 43 |
   | `/sitemap-asn-1.xml` | the 1,000 largest networks by announced IPv4 space | 1,000 |
   | `/sitemap-asn-2.xml` | the rest of the 10,000 largest | 9,000 |
 
   More ASN files, up to 40,000 URLs each (a sitemap file may hold 50,000), follow automatically if the list grows
   (`ASN_TIERS`, `asnSitemapFiles()`). The tiers let Search Console show how each is indexed. The index gives each ASN
-  file a `<lastmod>`: the day the list was generated. Every file is checked against the sitemaps.org schemas.
+  file a `<lastmod>`: the day the list was generated. The ports file's URLs carry the day the port pages last changed
+  (`PORTS.updated`: see "Port checker"), and the index gives the file the same. `/sitemap-pages.xml` has no
+  `<lastmod>`: its pages change with live data, and a date that is always today is one search engines ignore. Every
+  file is checked against the sitemaps.org schemas.
+- **Titles and descriptions.** A title says what the page is for, its subject first, and ends in ` | ipterm`; the
+  h1 is the title without that, and `og:title` the same. An IP page is `<ip> IP lookup: <org> (<ASN>), <hostname>`,
+  leaving out what the lookup doesn't have (`8.8.8.8 IP lookup: Google LLC (AS15169), dns.google`, or just
+  `<ip> IP lookup`); `ipTitle()` in `public/app.js` words it the same. A non-public address's page is titled with
+  its kind's word from the special-purpose table (`kindWord()` in `public/cidr.js`; see "Subnet calculator"):
+  `192.168.1.1 · private IPv4 address` for RFC 1918 and unique local (fc00::/7) space, the word the router pages'
+  searches use, and `loopback`, `link-local`, `carrier-grade NAT (shared)`, `documentation`, `benchmarking`,
+  `multicast` or `reserved` for the others, `non-public` only for a kind without a word (the unspecified address ::).
+  The terminal titles its tab the same way (`lookup()`), and the page is tagged with the kind itself (`private`,
+  `docs`, `benchmark` ...). An address IPinfo calls a bogon is `<ip> IP lookup: IPinfo lists it as a bogon` (see
+  "IPinfo's bogons"). An ASN page is
+  `AS13335 Cloudflare, Inc.: ASN, IP ranges and upstreams` (the name as RIPEstat gives it; `asn()` in `app.js` the
+  same), and a `/cidr` page
+  `10.0.0.0/22 subnet: 255.255.252.0, 1,022 usable hosts`, or `a single address` for a /32 (`cidrTitle()` in
+  `app.js`), unless its routing names it. Search results show about 155 characters of a description, so each page
+  gives `descFit()` its summary and shorter versions of it, key fact first, and gets the first that fits in
+  `DESC_MAX` (155); one still too long is cut at a word. The page itself keeps the whole summary, and `og:description`
+  is the same as the description. An IP page's description says where IPinfo locates the address, except for an
+  anycast one (`flags.anycast`), which is answered from many places: it says "anycast (served from many locations)"
+  instead. IPinfo Lite, which bots get, has no anycast flag and gives only a country, which for a resolver says
+  little (Lite places 1.1.1.1 in Australia), so the resolver pages in `SITEMAP_PATHS` (`curatedIps()`) name no place
+  for a Lite answer: a bot's /1.1.1.1 is "a public IPv4 address operated by Cloudflare, Inc. (AS13335). Hostname:
+  one.one.one.one." Other Lite answers keep their country, and the location row is there either way. The tool
+  pages keep their longer summary as `desc` and give search results `meta`; a guide's `meta` (in
+  `tools/build_guides.py`) does the same where its blurb on `/guides` runs long. `node tools/check_pages.mjs` checks
+  the titles, the descriptions and the terminal's titles.
 - **The ASN list** is `src/asn-sitemap.js`, generated by `tools/build_asn_sitemap.mjs` (`npm run asn-sitemap`) and
   committed, since there is no build step. It ranks every origin AS in RIPE NCC's RIS table
   (`riswhoisdump.IPv4.gz`, the data behind RIPEstat; `--caida` uses CAIDA's RouteViews prefix-to-AS file instead) by
@@ -1560,15 +1664,17 @@ Network data comes from [RIPEstat](https://stat.ripe.net/) (free, no key). Resul
 
 - **Guides** live at `/guides` and `/guides/<name>`. They're generated from `tools/build_guides.py`: edit the
   text there, run `python3 tools/build_guides.py`, then deploy. Each page gets its own title, description,
-  canonical link, share tags, breadcrumbs and Article structured data.
+  canonical link, share tags, breadcrumbs and Article structured data. A guide's `desc` is its blurb on `/guides`; where
+  that runs past about 160 characters, a shorter `meta` is the description in search results, `og:description` and the
+  structured data.
 - **Homepage section:** plain HTML below the terminal (in `public/index.html`) explains ipterm and links to
   popular lookups and the guides, so search engines see real text and links. Clicking a lookup there runs it
   in the terminal.
 - **Share image:** `public/og.png` (1200×630) is used when any page is shared, except a shared leak test result, which uses its grade's `public/og-leak-<a-f>.png` (made by `tools/build_og_leak.mjs`).
 - **Placeholders:** static pages use `%ORIGIN%`, which the Worker replaces with your site's https address.
 - **Sitemap:** `/sitemap.xml` is an index of `/sitemap-pages.xml` (`SITEMAP_PATHS` in `src/worker.js`: guides,
-  router addresses, public DNS resolvers, the most searched port pages and more) and the ASN files
-  (`/sitemap-asn-<n>.xml`, from `src/asn-sitemap.js`). See "Shareable pages and search".
+  router addresses, public DNS resolvers and more), `/sitemap-ports.xml` (every port page, with `<lastmod>`) and the
+  ASN files (`/sitemap-asn-<n>.xml`, from `src/asn-sitemap.js`). See "Shareable pages and search".
 
 ## Sponsored line (ads)
 
@@ -1698,14 +1804,14 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | Port checks: only the visitor's own address, one port at a time, only from the ipterm page (same-origin) or a command-line tool, never on page load; 10 a minute per address (`PORT_LIMITER`) | `portRoute()` in `src/worker.js`, `[[ratelimits]]` | See "Port checker" |
 | DNS leak test: `/api/dnsleak` only from the ipterm page or a command-line tool, well-formed tokens only, rate limited; the VPS's API needs the `DNSLEAK_KEY` secret (compared in constant time), listens on 127.0.0.1 behind Caddy, hands each token's resolvers over once and forgets them; non-public resolver addresses never go to IPinfo | `dnsleakRoute()` in `src/worker.js`, `dnsleak-server/` | See "DNS leak test server" |
 | Shared leak test results: the code is made in the browser and holds only the grade and per-check flags (no IP, provider, location or resolver); the Worker decodes it strictly (a letter that doesn't match its checks is a 404); the page never runs the test, and isn't indexed | `public/leakgrade.js`, `leakShareRoute()` in `src/worker.js` | See "Shared results" |
-| Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal | `esc()`, `safeJson()` and `shell()` in `src/worker.js` | |
+| Every value from DNS or a data provider is HTML-escaped; the JSON embedded in pages cannot break out of its script tag; page text is inserted with replacer functions so `$` sequences stay literal. A page's rows print markup only for a `Markup`, a class private to the Worker (a port page's IANA links), so no upstream value, `{ "html": ... }` or not, passes for markup; anything else is made a string and escaped | `esc()`, `safeJson()`, `shell()`, `staticBlock()` and `Markup` in `src/worker.js`; `tools/check_pages.mjs` | |
 | Plain-text answers (`?format=text`, `/<ip>/text`, one-value endpoints, `/line`, `/expect`, the `/me` card, and their error messages) have control characters and bidi overrides replaced, so upstream data or a crafted link can't send escape sequences to a terminal. JSON answers write the same characters as `\u` escapes. The only escape sequences are ipterm's own colors: the `/me` card's, and `?color=1`'s on text answers, added after `plain()` | `plain()`, `kvText()`, `termSafe()` in `src/worker.js`, `meRoute()` | |
-| Upstream data is checked before use: AS numbers must look like `AS123`, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
+| Upstream data is checked before use: AS numbers must look like `AS123`, IPinfo's other fields must be strings (country codes two letters) or are dropped, abuse emails must be plain addresses (no `mailto:` extras), registry responses are read with a size cap, and the registrar link is only followed to a public https host, without redirects | `ipinfoCore()`, `provider()`, `validEmail()`, `readJson()`, `safeRdapLink()` in `src/worker.js` | |
 | The report card's requests to a domain's own site: HEAD only (a GET only after a refused HEAD, its body never read), only to `https://` and `http://` on the default port for a validated name whose addresses are all public, redirects followed only over https within the domain, only to hosts whose addresses are public, and at most twice, 5- and 4-second limits, at most 100 headers looked at and 9 kept, each capped. A 403, a challenge or a timeout is "couldn't check", never a FAIL | `webCheck()`, `httpsCheck()`, `httpCheck()`, `redirectTarget()` in `src/worker.js` | |
 | Badges: the JSON holds only shields.io's schema fields; the SVG holds only a fixed label and the grade (escaped anyway), and is the only answer sent with `Cross-Origin-Resource-Policy: cross-origin` | `badgeReply()`, `badgeSvg()`, `secure()` in `src/worker.js` | |
 | The mail check's one outside fetch, the MTA-STS policy, goes only to `https://mta-sts.<domain>/.well-known/mta-sts.txt` for a validated domain name: no redirects followed, 5-second limit, 64 KB cap. Policy lines, report addresses and logo links are checked before use (host names, plain emails, https URLs only) | `stsPolicy()`, `parseSts()`, `reportUris()`, `httpsUrl()` in `src/worker.js` | |
 | Cross-site browser access (CORS) off by default. Only the static `/openapi.json` and `/llms.txt` allow any origin | `PUBLIC_API` in `wrangler.toml`; `public/_headers` for the two documents | Set to `"true"` to offer a public browser API |
-| Private, loopback, CGNAT, multicast and documentation addresses rejected before any upstream call | `nonPublicReason()` in `src/worker.js` | |
+| Private, loopback, CGNAT, multicast, documentation and other special-purpose addresses rejected before any upstream call; an address IPinfo answers `bogon` for goes no further (no proxycheck.io, no registry) | `nonPublicReason()` in `src/worker.js` (the table in `public/cidr.js`), `withPrivacy()`, `blockData()` | See "Special-purpose ranges" and "IPinfo's bogons" |
 | Redirects for router-address typos take their Location from `SITEMAP_PATHS`, never from the request, so they can't be pointed anywhere else; the query string is dropped | `routerTypo()` in `src/worker.js`, tested by `tools/check_seo.sh` | |
 | Plain http: pages (browsers, crawlers, link previews) get a 301 to the same path on https and the same host; curl and scripts are answered over http (`curl ipterm.net`, the `/expect` kill switch), and every link and cache key names https either way. HSTS on every answer, not preloaded | `route()` in `src/worker.js`; `tools/check_https.mjs` | Don't turn on Cloudflare's "Always Use HTTPS": see "One copy of the site, on https" |
 | RIPEstat answers are read with a size cap (a big network's answer can run to megabytes, which would use up the CPU limit), the AS paths come from three collectors only, and every value is checked before use (AS numbers, prefixes, dates) | `ripestat()`, `routeLookup()`, `upstreams()` in `src/worker.js` | |
@@ -1755,8 +1861,9 @@ npx wrangler dev
 
 `sh tools/check_previews.sh` (link previews and crawlers get pages, scripts get JSON), `sh tools/check_go.sh`
 (address-bar search, hostile inputs included) and `node tools/check_block.mjs` (a lookup's registry date) run
-against it. `node tools/check_bots.mjs` (bots never spend the budgets), `node tools/check_https.mjs` (plain http) and
-`node tools/check_vpnlists.mjs` (the known VPN servers) need no server (Node 22.15 or later).
+against it. `node tools/check_bots.mjs` (bots never spend the budgets), `node tools/check_https.mjs` (plain http),
+`node tools/check_vpnlists.mjs` (the known VPN servers) and `node tools/check_pages.mjs` (the ports sitemap, the IANA
+row, titles and descriptions, special-purpose ranges) need no server (Node 22.15 or later).
 
 Under `wrangler dev` the first lookup starts the VPN lists' first download (the Durable Object's alarm), from the
 providers' real lists. To run the cron trigger itself, start it with `npx wrangler dev --test-scheduled` and ask
@@ -1869,6 +1976,36 @@ nosniff, frames, referrer) and HTTP OK, the 301 to https, with no request to ipt
 another host it is fetched over the network as before (and so says HTTP 522), and so is example.com. (Under
 `wrangler dev`, a request sent with `Host: ipterm.net` does get the 301, but wrangler's proxy rewrites its Location
 to `http://`, so test the redirect here or on the live site.)
+
+`node tools/check_pages.mjs` (Node 22.15 or later) checks the reference-page groundwork, with no server and no
+network: the whole Worker in Node, as `check_bots.mjs` runs it, with `fetch` answering as IPinfo, proxycheck.io, DNS,
+RDAP and RIPEstat would and noting every request, and parts of `public/app.js` run against a stand-in DOM. First the
+ports sitemap: `/sitemap.xml` lists `/sitemap-ports.xml` with its `<lastmod>`, that file lists `/port` and all 42
+port pages with the same real date (`PORTS.updated`, not in the future), `/sitemap-pages.xml` lists none of them, and
+Googlebot gets each as an indexable page with no outside request. Then the IANA row on every port page, the
+Worker's and the terminal's (`portAbout()`): the names and protocol or "not registered with IANA", linked to IANA's
+registry and whatportis.com with `rel="noopener"`, the four ports whatportis has no page for to IANA alone
+(`NO_WHATPORTIS`, with a real check date), and no row for a port outside the list. Then titles and descriptions: IP
+pages with and without a hostname, with an AS number but no name, a bot's IPinfo Lite answer, an anycast address
+(never "located in") and a bot's /1.1.1.1 (no place at all), non-public addresses of every kind (titled with the
+kind's word and tagged as the terminal does, with no outside request; every indexed RFC 1918 page "private"), ASN
+pages (a long holder name too), `/cidr` pages (a /32 is "a single address"; ::/0,
+0.0.0.0/0 and blocks wider than their entry, such as ::/96 and 10.0.0.0/7, in honest words) and routed prefixes,
+IPv6 too, that keep the block's size, each against the terminal's own title where it has one (`ipTitle()`, `asn()`,
+`cidrTitle()`); every description, those of the port, tool, DNS, whois, mail and report card pages too, 155
+characters or less, leading with the page's subject, the same in `og:description`. Then the special-purpose ranges:
+every block of IANA's two registries (a copy in the script), first and last address, gets the same answer from the
+calculator, the IP page's lookup and the terminal's `classify()`, as `SPECIAL` says. Last, the messages that name a
+range (the lookup, whois, routing and port check errors, and the whois page) give its words once, at the end, with no
+parentheses inside parentheses. Then IPinfo's bogons: the anycast addresses 192.0.0.9, 192.0.0.10, 2001:1::1,
+2001:1::2 and 2001:1::3 are non-public and never looked up, and 192.88.99.1, which the stub has IPinfo Core, Lite and
+the free API answer `{ "bogon": true }` for, gets its page (Googlebot's and a browser's), JSON, text answer and
+terminal lookup in IPinfo's name, with no empty range, no fields of nulls and no request but IPinfo and reverse DNS.
+Then markup: IPinfo answering `{ "html": "<b>x</b>" }` for a network's name, domain or place puts no markup on the
+page (those fields are null), and `staticBlock()` prints only the Worker's own `Markup` as markup, escaping anything
+else. Give it IANA's CSV files (`node tools/check_pages.mjs service-names-port-numbers.csv
+iana-ipv4-special-registry-1.csv iana-ipv6-special-registry-1.csv`, from iana.org/assignments) and it also checks
+every port's names and the registry copy against them.
 
 ## License
 

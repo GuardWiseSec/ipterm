@@ -59,8 +59,9 @@
 //   GET /go?q=              address-bar search: a 302 to the page for an IP, ASN, domain, range, email address,
 //                           port or terminal command (OpenSearch: /opensearch.xml; the form on /api)
 //   GET /robots.txt
-//   GET /sitemap.xml        a sitemap index: /sitemap-pages.xml (SITEMAP_PATHS) and /sitemap-asn-<n>.xml, the
-//                           largest networks in tiers (src/asn-sitemap.js, built by tools/build_asn_sitemap.mjs)
+//   GET /sitemap.xml        a sitemap index: /sitemap-pages.xml (SITEMAP_PATHS), /sitemap-ports.xml (every port page in
+//                           public/ports.js, with its <lastmod>) and /sitemap-asn-<n>.xml, the largest networks in tiers
+//                           (src/asn-sitemap.js, built by tools/build_asn_sitemap.mjs)
 //   GET /status             for the owner: today's and this hour's IPinfo Core and proxycheck.io budget use, and
 //                           each VPN server list's size and freshness. Needs the STATUS_KEY secret (x-status-key
 //                           header or ?key=); without it, a 404
@@ -216,6 +217,7 @@ async function route(request, env, ctx) {
   if (path === '/robots.txt') return robots(url);
   if (path === '/sitemap.xml') return sitemapIndex(url, env);
   if (path === '/sitemap-pages.xml') return sitemap(url, env, SITEMAP_PATHS);
+  if (path === '/sitemap-ports.xml') return sitemap(url, env, portPaths(), PORTS.updated);
   const asnMap = /^\/sitemap-asn-([1-9]\d{0,2})\.xml$/.exec(path);
   if (asnMap && asnSitemapFiles()[asnMap[1] - 1]) return sitemap(url, env, asnSitemapFiles()[asnMap[1] - 1].map(n => '/AS' + n));
   if (path === '/status' && await statusKeyOk(request, url, env)) return statusRoute(io);
@@ -275,21 +277,25 @@ const FILE_EXT = /\.(html?|php\d?|aspx?|jsp|cgi|pl|py|sh|js|mjs|css|map|json|xml
 
 /* ---------- tool landing pages and 404 ---------- */
 
+// desc is the page's own summary; meta, the shorter description search results show (DESC_MAX).
 const TOOLS = {
   whois: {
     title: 'Whois lookup: who owns a domain, IP address or network | ipterm', heading: 'Whois lookup',
+    meta: 'Free whois lookup for domains, IP addresses and ASNs: registrar, registration and expiry dates, name servers, owner and abuse contact, over RDAP.',
     desc: 'Free whois lookup for domains, IP addresses and networks (ASNs). See the registrar, registration and expiry dates, name servers, the owning organization and the abuse contact, straight from the registries over RDAP.',
     usage: 'whois <ip, ASN or domain>',
     examples: [['whois example.com', '/whois/example.com'], ['whois github.com', '/whois/github.com'], ['whois 8.8.8.8', '/whois/8.8.8.8'], ['whois AS13335', '/whois/AS13335']],
   },
   dns: {
     title: 'DNS lookup: A, AAAA, MX, NS, TXT and CAA records | ipterm', heading: 'DNS lookup',
+    meta: 'Free DNS lookup for any domain: A, AAAA, MX, NS, TXT and CAA records, who hosts the site and whether DNSSEC validates. Enter an IP address for reverse DNS.',
     desc: "Free DNS lookup for any domain: addresses (A and AAAA), mail servers (MX), name servers, TXT and CAA records, who hosts the site and whether DNSSEC validates. Enter an IP address for reverse DNS. Answers come from Cloudflare's public resolver.",
     usage: 'dig <domain> [type]',
     examples: [['dig example.com', '/dns/example.com'], ['dig gmail.com MX', '/dns/gmail.com/MX'], ['dig github.com TXT', '/dns/github.com/TXT'], ['dig 8.8.8.8', '/dns/8.8.8.8']],
   },
   mail: {
     title: 'Email security check: SPF, DMARC, DKIM and MX records | ipterm', heading: 'Email security check',
+    meta: 'Free SPF, DMARC and DKIM checker for any domain: mail servers, SPF lookups counted against the limit of 10, the DMARC policy and DKIM keys, graded A to F.',
     desc: "Free SPF, DMARC and DKIM checker for any domain: its mail servers and provider, SPF with its DNS lookups counted against the limit of 10, the DMARC policy and report addresses, DKIM keys, MTA-STS, TLS-RPT and BIMI, graded A to F with a fix for each problem.",
     usage: 'mail <domain> [--dkim <selector>]',
     checks: ['MX: the mail servers and the provider behind them, or a null MX (the domain accepts no mail)',
@@ -302,6 +308,7 @@ const TOOLS = {
   },
   grade: {
     title: 'Domain report card: DNSSEC, security headers, email and expiry, graded A to F | ipterm', heading: 'Domain report card',
+    meta: "Free domain security check, graded A to F: DNSSEC, IPv6, CAA, email, registration expiry and the website's security headers, with a fix for each problem.",
     desc: "Free domain security check, graded A to F: DNSSEC, IPv6, CAA and HTTPS records, the email security grade (SPF, DMARC, DKIM), registration expiry and transfer lock, and the website's HTTPS redirect and security headers (HSTS, CSP, X-Content-Type-Options, frame protection, Referrer-Policy), with a fix for each problem and a badge for your README.",
     usage: 'grade <domain>',
     checks: ['DNS: DNSSEC, an AAAA record (IPv6), CAA (which certificate authorities may issue certificates) and an HTTPS record',
@@ -312,6 +319,7 @@ const TOOLS = {
   },
   leaktest: {
     title: 'VPN and DNS leak test: DNS, WebRTC and IPv6 leaks | ipterm', heading: 'VPN and DNS leak test',
+    meta: 'Free DNS leak test and VPN leak test, graded A to F: see which DNS servers look up sites for you, and whether they belong to your VPN or to your provider.',
     desc: "Free DNS leak test and VPN leak test, graded A to F: see which DNS servers look up sites for you, and whether they belong to your VPN or to your internet provider. Also checks WebRTC and IPv6 leaks that bypass a VPN, a time zone that gives you away, and whether your IP is a known VPN. Runs in your browser in a few seconds; nothing is stored.",
     usage: 'leaktest',
     checks: ['DNS: which DNS servers look up sites for you, and do they belong to your VPN, or to your internet provider?',
@@ -323,18 +331,21 @@ const TOOLS = {
   },
   cidr: {
     title: 'Subnet calculator: CIDR, netmask and usable host range | ipterm', heading: 'Subnet calculator',
+    meta: 'Free IPv4 and IPv6 subnet calculator: network and broadcast addresses, netmask, wildcard mask, usable hosts and host count, and routing for public ranges.',
     desc: 'Free IPv4 and IPv6 subnet calculator. Enter a range like 10.0.0.0/22 or an address with a netmask to get the network and broadcast addresses, netmask, wildcard mask, usable host range and host count. For a public range, see how it is routed: the origin network, RPKI and AS paths.',
     usage: 'cidr <range>',
     examples: [['cidr 192.168.1.0/24', '/cidr/192.168.1.0/24'], ['cidr 10.0.0.0/22', '/cidr/10.0.0.0/22'], ['cidr 172.16.0.0/12', '/cidr/172.16.0.0/12'], ['cidr 1.1.1.0/24', '/cidr/1.1.1.0/24']],
   },
   port: {
     title: 'Port checker: is a port open on my IP? | ipterm', heading: 'Port checker',
+    meta: 'Free open port checker: see whether a TCP port is open on your own IP address, for port forwarding, game servers, Plex, SSH or Remote Desktop.',
     desc: 'Free open port checker: see whether a TCP port is open on your own IP address, for port forwarding, game servers, Plex, SSH or Remote Desktop. ipterm connects to the address you visit from, one port at a time, and explains why a port may be closed.',
     usage: 'port <number>',
     examples: [['port 25565', '/port/25565'], ['port 32400', '/port/32400'], ['port 22', '/port/22'], ['port 3389', '/port/3389']],
   },
   api: {
     title: 'ipterm API: IP address lookups from curl and scripts | ipterm', heading: 'API and command line',
+    meta: 'Use ipterm from curl and scripts, with no key and no sign-up: your IP as plain text, and any IP address, network, DNS name or subnet as JSON or text.',
     desc: 'Use ipterm from curl and scripts, with no key and no sign-up: your IP as plain text, one value at a time (/asn, /city, /tz), and any IP address, network, DNS name, registry record or subnet as JSON or aligned text.',
     usage: 'curl ipterm.net/help',
     examples: [],
@@ -344,6 +355,7 @@ const TOOLS = {
 // The leak test page before (or without) the DNS test server: it doesn't promise what it can't check.
 const LEAKTEST_NO_DNS = {
   title: 'VPN leak test: WebRTC, IPv6 and time zone check | ipterm', heading: 'VPN and privacy leak test',
+  meta: 'Check whether your browser gives away more than your IP address, graded A to F: WebRTC and IPv6 leaks, your time zone, and whether your IP is a known VPN.',
   desc: "Check whether your browser gives away more than your IP address, graded A to F: WebRTC leaks, IPv6 leaks that bypass a VPN, a device time zone that doesn't match your IP's location, and whether your IP is recognized as a VPN. Runs in your browser in a few seconds; nothing is stored.",
   checks: TOOLS.leaktest.checks.slice(1),
 };
@@ -375,7 +387,7 @@ function toolRoute(io, tool, html) {
       goForm('/go', 'go-form') +
       `<p class="ln sys">A search box for a wiki or intranet page (plain HTML, no script):</p><pre class="doc-pre"><code>${esc(goForm(io.url.origin + '/go'))}</code></pre></div>` +
       `<p class="ln sys">IP address data powered by <a href="https://ipinfo.io" rel="noopener">IPinfo</a>.</p>` : '');
-  return shell(io, { status: 200, path: '/' + tool, title: t.title, desc: t.desc, initial: { kind: 'tool', tool },
+  return shell(io, { status: 200, path: '/' + tool, title: t.title, desc: t.meta || t.desc, initial: { kind: 'tool', tool },
     body: staticBlock(t.heading, [tool], [['usage', t.usage]], t.desc, extra) });
 }
 
@@ -656,7 +668,7 @@ async function ipRoute(io, q, html) {
   const reason = nonPublicReason(p);
   if (reason) {
     const d = { ip, version: p.v, bogon: true, range: reason };
-    return html ? ipPage(io, d, 200) : reply(io, { error: `${ip} is not a public address (${reason}), so there is nothing to look up.`, ...d }, 400);
+    return html ? ipPage(io, d, 200) : reply(io, { error: `${ip} is not a public address, so there is nothing to look up: it is ${CIDR.rangeIn(reason)}.`, ...d }, 400);
   }
   // The caller's own address never goes to a registry for its date (withBlock): by number it is answered from the
   // edge (above), and its page goes without. ?block=0 leaves the date out for any address: the terminal sends it, and
@@ -876,7 +888,7 @@ async function whoisRoute(io, q, html) {
     const reason = nonPublicReason(p);
     if (reason) {
       const d = { query, kind: 'ip', found: false, bogon: true, range: reason };
-      return html ? whoisPage(io, d, 200) : reply(io, { error: `${query} is not a public address (${reason}), so no registry holds a record for it.`, ...d }, 400);
+      return html ? whoisPage(io, d, 200) : reply(io, { error: `${query} is not a public address, so no registry holds a record for it: it is ${CIDR.rangeIn(reason)}.`, ...d }, 400);
     }
   }
   return guard(
@@ -978,7 +990,7 @@ async function portCheck(io, n) {
   if (range && /carrier-grade/.test(range)) {
     return untested('cgnat', `not tested: ${base.ip} is in the carrier-grade NAT range (100.64.0.0/10). Your provider shares public addresses between many customers, so nothing on the internet can reach this one and no port forward can work. Ask your provider for a public IPv4 address, or use IPv6 or a tunnel such as Tailscale or Cloudflare Tunnel.`);
   }
-  if (range) return untested('not-public', `not tested: ${base.ip} is not a public address (${range}), so nothing on the internet can reach it.`);
+  if (range) return untested('not-public', `not tested: ${base.ip} is not a public address, so nothing on the internet can reach it: it is ${CIDR.rangeIn(range)}.`);
   if (v6Reserved(p)) {
     return untested('not-public', `not tested: ${base.ip} is a reserved or transition IPv6 address (IPv4-embedded, 6to4, Teredo or IETF-reserved), so ipterm doesn't connect to it. To test your IPv4 address, run: curl -4 ${io.url.host}/port/${n}`);
   }
@@ -1122,7 +1134,7 @@ async function dnsleakData(io, conf, tokens) {
 }
 
 function dnsleakText(d, o) {
-  const lines = d.resolvers.map(r => (r.private ? `${r.ip}  (${r.range})` : [r.ip, r.asn, r.service || r.org, r.countryCode].filter(Boolean).join('  ')));
+  const lines = d.resolvers.map(r => (r.private ? `${r.ip}  non-public: ${r.range}` : [r.ip, r.asn, r.service || r.org, r.countryCode].filter(Boolean).join('  ')));
   return kvText([['zone', d.zone], ['names seen', `${d.seen} of ${d.tokens}`], ['resolvers', lines.length ? lines : 'none']],
     d.resolvers.some(r => r.asn) ? [IPINFO_CREDIT] : [], o);
 }
@@ -1154,12 +1166,17 @@ function portPage(io, d, status) {
   const blocked = PORTS.untestable(n);                   // port 25: say so, and offer no check
   const named = s ? `Port ${n} (${s.name})` : `Port ${n}`;
   const title = blocked ? `${named}: what it's for and why ipterm can't check it | ipterm` : `${named}: check if it's open on your IP | ipterm`;
-  const desc = blocked ? (s ? s.use + ' ' : '') + `ipterm can't check this port: ${blocked}`
-    : s ? `${s.use} Check whether TCP port ${n} is open on your own IP address, and see why it may be closed.`
+  const why = blocked && `ipterm can't check this port: ${blocked}`;
+  const desc = blocked ? descFit((s ? s.use + ' ' : '') + why, s && `${s.use} ipterm can't check this port.`, why)
+    : s ? descFit(`${s.use} Check whether TCP port ${n} is open on your own IP address, and see why it may be closed.`, `${s.use} Check if TCP port ${n} is open on your IP.`, s.use)
     : `Check whether TCP port ${n} is open on your own IP address: ipterm connects to the address you visit from and reports open, closed or no answer.`;
-  const summary = blocked ? desc : (s ? s.use + ' ' : '') + `ipterm can check whether TCP port ${n} is open on your own IP address: it connects to the address you visit from, on this one port, and reports open, closed or no answer. Nothing is stored.` +
+  const summary = blocked ? (s ? s.use + ' ' : '') + why : (s ? s.use + ' ' : '') + `ipterm can check whether TCP port ${n} is open on your own IP address: it connects to the address you visit from, on this one port, and reports open, closed or no answer. Nothing is stored.` +
     (s && s.proto === 'udp' ? ` ${s.name} uses UDP, which the check can't test.` : '');
-  const rows = s ? [['protocol', PORTS.protoText(s.proto)], ['why it may be closed', s.tips], ['caution', s.risk]] : [['protocol', 'TCP']];
+  // IANA's registered name, linked to the registry and to whatportis.com (portAbout() in public/app.js shows the same)
+  const iana = PORTS.iana(n);
+  const ianaRow = iana && [iana.names.length > 1 ? 'IANA names' : 'IANA name', new Markup(esc(iana.text) + ' · ' +
+    PORTS.refs(n).map(([label, href]) => `<a href="${esc(href)}" rel="noopener">${esc(label)}</a>`).join(' · '))];
+  const rows = s ? [['protocol', PORTS.protoText(s.proto)], ianaRow, ['why it may be closed', s.tips], ['caution', s.risk]].filter(Boolean) : [['protocol', 'TCP']];
   const p = t => `<p class="ln">${t}</p>`;
   const extra = (blocked ? '' : `<p class="ln sys">Check it: type <code>port ${n}</code> in the terminal, or from a command line run <code>curl -4 ${esc(host)}/port/${n}</code>. It only tests the address you connect from, one port at a time.</p>`) +
     `<p class="ln sys">For a port to be open, all of these must be true:</p>` +
@@ -1266,7 +1283,7 @@ function ipField(io, q, name) {
     return textError(`${why} Fields for any address: ${Object.keys(IP_FIELDS).join(', ')}; or text or json for the whole answer.`, 404);
   }
   const p = parseIp(q), ip = canonIp(p), reason = nonPublicReason(p);
-  if (reason) return textError(`${ip} is not a public address (${reason}), so there is nothing to look up.`, 400);
+  if (reason) return textError(`${ip} is not a public address, so there is nothing to look up: it is ${CIDR.rangeIn(reason)}.`, 400);
   return guard(
     () => ipData(io, ip, p, { lite: true }),              // Lite only, and no withPrivacy(): no Core or proxycheck.io budget
     d => one(name === 'country' ? d.country || countryName(d.countryCode) : d[IP_FIELDS[name]], 'public, max-age=300',
@@ -1302,6 +1319,11 @@ function vpnTone(s) {
   const m = /^(yes|flagged|not a known VPN, proxy or Tor service|not on|not checked)\b[^:,(]*?(?=:|,| \(|$)/.exec(s);
   return m ? ansi(true, VPN_TONES[m[1]], m[0]) + s.slice(m[0].length) : s;
 }
+// IPinfo calls some addresses bogons that the special-purpose table in public/cidr.js calls public (192.88.99.1, in the
+// former 6to4 relay range AS6939 still announces), and answers just { bogon: true } for them, which a lookup keeps
+// (ipinfoCore(), provider()). Its page, its text answer and the terminal say so in IPinfo's name, and it goes no
+// further: no proxycheck.io query (withPrivacy) and no registry date (blockData).
+const IPINFO_BOGON = 'IPinfo lists it as a bogon: an address not expected on the public internet';
 function ipText(d, o) {
   const self = d.source === 'edge';
   const ctry = d.country ? d.country + (d.countryCode ? ` [${d.countryCode}]` : '') : d.countryCode;
@@ -1310,8 +1332,8 @@ function ipText(d, o) {
     ['network', [d.asn, d.org].filter(Boolean).join('  ')], ['domain', d.asDomain],
     ['location', [d.city, d.region, ctry].filter(Boolean).join(', ')], ['continent', d.city ? null : d.continent], ['postal', d.postal],
     ['coordinates', d.lat != null && d.lon != null ? `${d.lat}, ${d.lon}` : null], ['time zone', d.timezone],
-    ['block', blockText(d.block)],
-    ['connection', connectionText(d)], ['vpn / proxy', self ? null : vpnText(d), vpnTone],
+    ['block', blockText(d.block)], ['bogon', d.bogon ? IPINFO_BOGON : null],
+    ['connection', connectionText(d)], ['vpn / proxy', self || d.bogon ? null : vpnText(d), vpnTone],
     ['edge', d.colo ? `${d.colo} (the Cloudflare data center that answered you)` : null],
     ['source', (SOURCE_NAMES[d.source] || d.source || '') + (d.privacy ? ' + proxycheck.io' : '') + (d.vpnServer ? ` + ${d.vpnServer.provider}'s server list` : '') +
       (d.relay ? " + Apple's iCloud Private Relay list" : '')],
@@ -1773,11 +1795,14 @@ function edgeInfo(io) {
   };
 }
 
+// IPinfo's answers end up on pages and in the terminal, so each field is a string (or null), whatever arrives.
 const txt = (v, n = 120) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null);
 const asnOf = v => (typeof v === 'string' && /^AS\d{1,10}$/i.test(v) ? v.toUpperCase() : null);
+const ccOf = v => (typeof v === 'string' && /^[A-Z]{2}$/i.test(v) ? v.toUpperCase() : null);
 
 // IPinfo Core (paid): city-level location plus connection flags. Shape documented at
-// https://ipinfo.io/developers/core-api: { ip, hostname, geo: {...}, as: {...}, is_* flags }.
+// https://ipinfo.io/developers/core-api: { ip, hostname, geo: {...}, as: {...}, is_* flags }. For an address IPinfo
+// calls a bogon it is { ip, bogon: true } and nothing more, and so is this (IPINFO_BOGON).
 async function ipinfoCore(ip, env) {
   // One attempt with a time limit: if Core has any trouble, the caller falls back to Lite.
   const r = await fetch(`https://api.ipinfo.io/lookup/${ip}`,   // ip is already validated and canonical
@@ -1785,6 +1810,7 @@ async function ipinfoCore(ip, env) {
   if (r.status === 401 || r.status === 403 || r.status === 429) { if (r.body) r.body.cancel(); return { refused: r.status }; }
   if (!r.ok) { if (r.body) r.body.cancel(); throw new Error('ipinfo core ' + r.status); }
   const d = await r.json();
+  if (d && d.bogon === true) return { source: 'ipinfo-core', bogon: true };
   const g = d && typeof d.geo === 'object' && d.geo ? d.geo : {}, a = d && typeof d.as === 'object' && d.as ? d.as : {};
   const lat = num(g.latitude), lon = num(g.longitude);
   const flag = k => (d[k] === true ? true : undefined);
@@ -1793,7 +1819,7 @@ async function ipinfoCore(ip, env) {
     hostname: txt(d.hostname, 255),
     asn: asnOf(a.asn), org: txt(a.name), asDomain: txt(a.domain, 255),
     asType: ['isp', 'hosting', 'business', 'education', 'government'].includes(a.type) ? a.type : null,
-    city: txt(g.city), region: txt(g.region), countryCode: /^[A-Z]{2}$/i.test(g.country_code || '') ? g.country_code.toUpperCase() : null, country: txt(g.country),
+    city: txt(g.city), region: txt(g.region), countryCode: ccOf(g.country_code), country: txt(g.country),
     continent: txt(g.continent), postal: txt(g.postal_code, 20), timezone: txt(g.timezone, 64),
     lat: lat != null && Math.abs(lat) <= 90 ? lat : null, lon: lon != null && Math.abs(lon) <= 180 ? lon : null,
     flags: { mobile: flag('is_mobile'), hosting: flag('is_hosting'), anonymous: flag('is_anonymous'), anycast: flag('is_anycast'), satellite: flag('is_satellite') },
@@ -1916,41 +1942,42 @@ async function provider(ip, env, opts = {}) {
   if (env.IPINFO_TOKEN) {
     const r = await fetchRetry(`https://api.ipinfo.io/lite/${ip}?token=${env.IPINFO_TOKEN}`, {}, 'ipinfo lite');
     if (!r.ok) throw new Error('ipinfo lite ' + r.status);
-    const d = await r.json();
+    const d = (await r.json()) || {};
+    const cap = fallback === 'visitor' ? { _visitorCap: true } : {};
+    if (d.bogon === true) return { ...cap, source: 'ipinfo-lite', bogon: true };
     return {
-      ...(fallback === 'visitor' ? { _visitorCap: true } : {}),
+      ...cap,
       source: 'ipinfo-lite',
-      asn: typeof d.asn === 'string' && /^AS\d{1,10}$/i.test(d.asn) ? d.asn.toUpperCase() : null,
-      org: d.as_name || null,
-      asDomain: d.as_domain || null,
-      countryCode: d.country_code || null,
-      country: d.country || null,
-      continent: d.continent || null,
-      bogon: d.bogon || undefined,
+      asn: asnOf(d.asn),
+      org: txt(d.as_name),
+      asDomain: txt(d.as_domain, 255),
+      countryCode: ccOf(d.country_code),
+      country: txt(d.country),
+      continent: txt(d.continent),
     };
   }
   const r = await fetchRetry(`https://ipinfo.io/${ip}/json`, { headers: { accept: 'application/json' } }, 'ipinfo');
   if (!r.ok) throw new Error('ipinfo ' + r.status);
-  const d = await r.json();
-  const [lat, lon] = (d.loc || '').split(',').map(Number);
+  const d = (await r.json()) || {};
+  if (d.bogon === true) return { source: 'ipinfo', bogon: true };
+  const [lat, lon] = (typeof d.loc === 'string' ? d.loc : '').split(',').map(Number);
   const m = /^(AS\d{1,10})\s+(.*)$/.exec(typeof d.org === 'string' ? d.org : '');
   return {
     source: 'ipinfo',
-    hostname: d.hostname || null,
+    hostname: txt(d.hostname, 255),
     asn: m ? m[1] : null,
-    org: m ? m[2] : d.org || null,
-    city: d.city || null,
-    region: d.region || null,
-    postal: d.postal || null,
-    countryCode: d.country || null,
-    country: countryName(d.country),
+    org: m ? txt(m[2]) : txt(d.org),
+    city: txt(d.city),
+    region: txt(d.region),
+    postal: txt(d.postal, 20),
+    countryCode: ccOf(d.country),
+    country: countryName(ccOf(d.country)),
     lat: Number.isFinite(lat) ? lat : null,
     lon: Number.isFinite(lon) ? lon : null,
-    timezone: d.timezone || null,
+    timezone: txt(d.timezone, 64),
     // The free API marks anycast too (as on 8.8.8.8), and nothing else of Core's flags: enough for the connection
     // line and for the map not to draw a radius. vpnText reads only Core's flags, so the VPN verdict is unchanged.
     ...(d.anycast === true ? { flags: { anycast: true } } : {}),
-    bogon: d.bogon || undefined,
   };
 }
 
@@ -2342,12 +2369,15 @@ function routeTarget(raw) {
   const p = !s.includes('/') && parseIp(s);
   if (p) {
     const why = nonPublicReason(p);
-    return why ? { error: `${canonIp(p)} is not a public address (${why}), so it isn't routed on the internet.` } : { query: canonIp(p), ip: true, p };
+    return why ? { error: `${canonIp(p)} is not a public address, so it isn't routed on the internet: it is ${CIDR.rangeIn(why)}.` } : { query: canonIp(p), ip: true, p };
   }
   const d = CIDR.calc(s);
   if (d.error) return { error: d.error };
+  // A public block can start with a non-public entry (192.88.99.2/31, with the 6a44 relay address): it says so.
   const why = nonPublicReason(parseIp(d.network));
-  if (d.range !== 'public' || why) return { error: `${d.cidr} is not public address space (${why || d.rangeNote}), so it isn't routed on the internet.` };
+  if (d.range !== 'public' || why) {
+    return { error: `${d.cidr} is not public address space, so it isn't routed on the internet: it ${d.range !== 'public' ? CIDR.rangeIs(d.rangeNote) : 'starts with the ' + why}.` };
+  }
   if (d.prefix < (d.v === 4 ? 8 : 16)) return { error: `${d.cidr} is larger than any route: give a /${d.v === 4 ? 8 : 16} or smaller.` };
   return { query: d.cidr, ip: false, p: parseIp(d.network), len: d.prefix };
 }
@@ -2449,11 +2479,12 @@ function rpkiText(o) {
     'not-found': 'not found: no ROA covers this prefix' }[o.rpki] || 'not checked';
 }
 
-function routeSummary(r) {
+// brief: without the RPKI and visibility sentences (a page's description)
+function routeSummary(r, brief = false) {
   if (!r || r.error) return '';
   const o = r.origins[0], who = o ? o.asn + (o.name ? ` (${o.name})` : '') : 'an unknown network';
   const more = r.origins.length > 1 ? ` and ${r.origins.length - 1} other network${r.origins.length > 2 ? 's' : ''}` : '';
-  const tail = (o && o.rpki ? ` RPKI: ${rpkiText(o)}.` : '') + (r.visibility ? ` ${r.visibility.seeing} of ${r.visibility.total} RIS peers see it.` : '');
+  const tail = brief ? '' : (o && o.rpki ? ` RPKI: ${rpkiText(o)}.` : '') + (r.visibility ? ` ${r.visibility.seeing} of ${r.visibility.total} RIS peers see it.` : '');
   if (r.status === 'announced') return `${r.query} is announced in BGP by ${who}${more}.${tail}`;
   if (r.status === 'covered') return (r.kind === 'ip' ? `${r.query} is routed in ${r.prefix}` : `${r.query} is not announced on its own: it is routed as part of ${r.prefix}`) + `, announced by ${who}${more}.${tail}`;
   if (r.status === 'split') return `${r.query} is not announced as a whole, but as more specific prefixes such as ${r.inside.slice(0, 3).join(', ')}.`;
@@ -3897,7 +3928,8 @@ async function blockData(io, ip, p, pending) {
     const hit = await caches.default.match(cacheReq(io, key));
     if (hit) return blockOf(await hit.json());
     if (io.bot) return null;               // bots (isBot) only read the cache
-    await pending;                         // the lookup failed or was refused: no registry query either
+    // The lookup failed or was refused: no registry query either. Nor for an address IPinfo calls a bogon (IPINFO_BOGON).
+    if ((await pending).bogon) return null;
     let f = blockInFlight(ip);
     if (!f) {
       const base = await rdapBase({ ip, p }, io.url.origin);
@@ -4088,6 +4120,16 @@ function parseDomain(o, rr, d) {
 
 /* ---------- pages ---------- */
 
+// Search results show about 155 characters of a description. A page offers its summary and shorter versions of it,
+// key fact first, and gets the first that fits (one still too long is cut at a word). The page itself keeps the
+// whole summary. shorter() gives the versions that drop parts from the end: all of them, then one fewer, and so on.
+const DESC_MAX = 155;
+function descFit(...tries) {
+  const t = tries.filter(Boolean), s = t.find(x => x.length <= DESC_MAX) || t[t.length - 1] || '';
+  return s.length <= DESC_MAX ? s : s.slice(0, DESC_MAX - 1).replace(/\s+\S*$/, '').replace(/[\s,;:]+$/, '') + '…';
+}
+const shorter = (parts, sep = ' ', end = '') => parts.filter(Boolean).map((_, i, a) => a.slice(0, a.length - i).join(sep) + end);
+
 let SHELL = null;
 async function loadShell(io) {
   if (SHELL) return SHELL;
@@ -4277,21 +4319,51 @@ function ipPage(io, d, status) {
     return shell(io, { status, path, title: `${ip} | ipterm`, initial: { kind: 'ip', query: ip, error: d.error },
       body: staticBlock(`${ip}`, [v], [], d.error) });
   }
-  if (d.bogon) {
-    const priv = /RFC 1918|unique local/.test(d.range || '');
-    const summary = `${ip} is a non-public ${v} address in the ${d.range}. It is used inside local networks and cannot be reached or located from the internet.` +
-      (priv ? ` If it is your router's address, open http://${d.version === 6 ? '[' + ip + ']' : ip} in a browser on the same network to reach its settings.` : '');
+  if (d.bogon && d.range) {                              // not public (nonPublicReason): never looked up
+    const range = d.range, priv = /RFC 1918|unique local/.test(range), url = `http://${d.version === 6 ? '[' + ip + ']' : ip}`;
+    const where = CIDR.rangeIn(range), lead = `${ip} is a non-public ${v} address${where.startsWith('the ') ? ': ' : ' '}${where}.`;
+    // Documentation, benchmarking, multicast and reserved space isn't anyone's local network.
+    const reach = /RFC 1918|unique local|link-local|loopback|carrier-grade/.test(range)
+      ? 'It is used inside local networks and cannot be reached or located from the internet.' : 'It cannot be reached or located from the internet.';
+    const router = priv ? `If it is your router's address, open ${url} in a browser on the same network to reach its settings.` : null;
+    const summary = [lead, reach, router].filter(Boolean).join(' ');
+    const desc = descFit(summary, router && `${lead} ${router}`, router && `${lead} If it is your router, open ${url} for its settings.`,
+      `${lead} It cannot be reached or located from the internet.`, lead);
     // Only the router and well-known addresses in SITEMAP_PATHS are indexed: the rest of the private space
-    // is millions of near-identical pages.
-    return shell(io, { status, path, title: `${ip} · private ${v} address | ipterm`, desc: summary, noindex: !curatedIps().has(ip),
-      initial: { kind: 'ip', query: ip, data: d }, body: staticBlock(ip, [v, 'private'], [['range', d.range]], summary,
+    // is millions of near-identical pages. The title and the tag are the terminal's (lookup() and render() in
+    // public/app.js): the word for the special-purpose table's kind ("private IPv4 address": kindWord() in
+    // public/cidr.js), and the kind itself (private, docs, benchmark ...).
+    const kind = CIDR.special(parseIp(ip))[0];
+    return shell(io, { status, path, title: `${ip} · ${CIDR.kindWord(kind)} ${v} address | ipterm`, desc, noindex: !curatedIps().has(ip),
+      initial: { kind: 'ip', query: ip, data: d }, body: staticBlock(ip, [v, kind], [['range', range]], summary,
         `<p class="ln sys">Guides: <a href="/guides/find-router-ip">How to find your router's IP address</a> · <a href="/guides/private-ip-ranges">Private IP address ranges explained</a></p>`) });
   }
+  if (d.bogon) {
+    // IPinfo's bogon (IPINFO_BOGON), an address the special-purpose table calls public: what the table says of it, if
+    // anything, and then IPinfo's word, in IPinfo's name. ipTitle() and render() in public/app.js do the same.
+    const [, words, listed] = CIDR.special(parseIp(ip));
+    const lead = `${ip} is an ${v} address${listed ? ' ' + CIDR.rangeIn(words) : ''}.`, summary = `${lead} ${IPINFO_BOGON}.`;
+    return shell(io, { status, path, title: `${ip} IP lookup: IPinfo lists it as a bogon | ipterm`, desc: descFit(summary, `${lead} IPinfo lists it as a bogon.`),
+      noindex: true, initial: { kind: 'ip', query: ip, data: d },
+      body: staticBlock(ip, [v, 'bogon'], [['hostname', d.hostname], ['range', listed ? words : null]], summary) });
+  }
   const place = [d.city, d.region, d.country || d.countryCode].filter(Boolean).join(', ');
-  const owner = [d.org, d.asn ? `(${d.asn})` : ''].filter(Boolean).join(' ');
-  const summary = `${ip} is a public ${v} address` + (owner ? ` operated by ${owner}` : '') + (place ? `, located in ${place}` : '') +
-    (d.hostname ? `. Hostname: ${d.hostname}` : '') + '. IP location is approximate.';
-  const title = [ip, d.hostname, owner || null].filter(Boolean).join(' · ') + ' | ipterm';
+  const owner = d.org ? d.org + (d.asn ? ` (${d.asn})` : '') : d.asn || '';
+  // An anycast address is answered from many places, and IPinfo's location is one of them, so it is called anycast
+  // instead. IPinfo Lite, which bots get, has no anycast flag and gives only a country, which for a resolver says
+  // little (1.1.1.1: Australia), so the resolver pages in SITEMAP_PATHS, the IP pages search results show most, name
+  // no place for a Lite answer. Other Lite answers keep their country.
+  const anycast = Boolean(d.flags && d.flags.anycast);
+  const placed = !anycast && !(d.source === 'ipinfo-lite' && curatedIps().has(ip)) ? place : '';
+  const lead = `${ip} is a public ${v} address` + (owner ? ` operated by ${owner}` : '') +
+    (anycast ? ', anycast (served from many locations)' : placed ? `, located in ${placed}` : '') + '.';
+  const host = d.hostname ? `Hostname: ${d.hostname}.` : null, approx = placed ? 'IP location is approximate.' : null;
+  const summary = [lead, host, approx].filter(Boolean).join(' ');
+  const desc = descFit(summary, approx && `${lead} ${approx}`, lead);
+  // "<ip> IP lookup: <org> (<ASN>), <hostname>", without the parts the lookup doesn't have. ipTitle() in public/app.js
+  // words it the same way.
+  const named = [owner, d.hostname].filter(Boolean).join(', ');
+  const title = `${ip} IP lookup${named ? ': ' + named : ''} | ipterm`;
   const rows = [
     ['hostname', d.hostname], ['network', owner], ['domain', d.asDomain], ['location', place],
     ['coordinates', d.lat != null && d.lon != null ? `${d.lat}, ${d.lon}` : null], ['time zone', d.timezone],
@@ -4305,7 +4377,7 @@ function ipPage(io, d, status) {
     (/^AS\d{1,10}$/i.test(d.asn || '') ? `<p class="ln sys">More from this network: <a href="/${esc(d.asn)}">${esc(d.asn)}${d.org ? ' ' + esc(d.org) : ''}</a></p>` : '') +
     `<p class="ln sys">Registry record: <a href="/whois/${esc(ip)}">whois ${esc(ip)}</a> (owner and abuse contact)</p>` +
     `<p class="ln sys">Guide: <a href="/guides/what-your-ip-reveals">What your IP address reveals (and what it doesn't)</a></p>`;
-  return shell(io, { status, path, title, desc: summary, noindex: start, initial: { kind: 'ip', query: ip, data: d },
+  return shell(io, { status, path, title, desc, noindex: start, initial: { kind: 'ip', query: ip, data: d },
     cache: d.blockLate ? 'no-store' : null,                // sent before its registry date arrived (withBlock)
     body: staticBlock(ip, [v, 'public'], rows, summary, links) });
 }
@@ -4317,17 +4389,23 @@ function cidrPage(io, d, status, route = null) {
       initial: { kind: 'cidr', query: String(d.input || ''), error: d.error }, body: staticBlock('Subnet calculator', ['cidr'], [], d.error) });
   }
   const path = '/cidr/' + d.cidr;                        // canonical: the network address, not the host that was typed
-  let summary, title, rows;
+  const where = `It ${CIDR.rangeIs(d.rangeNote)}.`;      // "It is in the ...", "It starts with the ..." (rangeIs)
+  let summary, title, rows, brief;                       // brief: shorter summaries for the description, longest first
   if (d.v === 4) {
-    summary = `${d.cidr} has netmask ${d.netmask} (wildcard ${d.wildcard}), ${d.totalText} addresses and ${d.usableText} usable host${d.usable === 1 ? '' : 's'}` +
-      (d.prefix <= 30 ? ` from ${d.first} to ${d.last}, with broadcast address ${d.broadcast}` : '') + `. It is in the ${d.rangeNote}.`;
-    title = `${d.cidr} subnet: ${d.netmask}, ${d.usableText} usable hosts | ipterm`;
+    const hosts = `${d.usableText} usable host${d.usable === 1 ? '' : 's'}`, span = d.prefix <= 30 ? ` from ${d.first} to ${d.last}` : '';
+    const has = `${d.cidr} has netmask ${d.netmask}`, count = `${d.totalText} address${d.total === 1 ? '' : 'es'} and ${hosts}`;
+    summary = `${has} (wildcard ${d.wildcard}), ${count}${span}` + (d.prefix <= 30 ? `, with broadcast address ${d.broadcast}` : '') + `. ${where}`;
+    brief = [`${has}, ${count}${span}. ${where}`, `${has}, ${count}. ${where}`, `${has}, ${count}.`, `${has} and ${hosts}.`];
+    // cidrTitle() in public/app.js words it the same way
+    title = `${d.cidr} subnet: ${d.netmask}, ${d.usable === 1 ? 'a single address' : d.usableText + ' usable hosts'} | ipterm`;
     rows = [['network', d.cidr], ['netmask', d.netmask], ['wildcard', d.wildcard], ['broadcast', d.prefix <= 30 ? d.broadcast : null],
       ['usable hosts', `${d.first} – ${d.last}`], ['host count', `${d.usableText} usable · ${d.totalText} addresses`],
       ['splits into', d.halves && d.halves.join(' · ')], ['part of', d.supernet], ['range', d.rangeNote], ['legacy class', d.legacyClass]];
   } else {
-    summary = `${d.cidr} is an IPv6 block of ${d.totalPow} (${d.totalText}) addresses, from ${d.network} to ${d.last}` +
-      (d.subnets64 ? `, containing ${d.subnets64} /64 subnet${d.subnets64 === '1' ? '' : 's'}` : '') + `. It is in ${d.rangeNote}.`;
+    const subs = d.subnets64 ? `${d.subnets64} /64 subnet${d.subnets64 === '1' ? '' : 's'}` : null, block = `${d.cidr} is an IPv6 block of ${d.totalPow}`;
+    summary = `${block} (${d.totalText}) addresses, from ${d.network} to ${d.last}` + (subs ? `, containing ${subs}` : '') + `. ${where}`;
+    brief = [`${block} addresses, from ${d.network} to ${d.last}. ${where}`, subs && `${block} addresses (${subs}). ${where}`, `${block} addresses. ${where}`,
+      `${block} addresses.`];                          // the block's size, beside a routing lead that leaves no room for where
     title = `${d.cidr} IPv6 subnet | ipterm`;
     rows = [['network', d.cidr], ['first address', d.network], ['last address', d.last], ['addresses', `${d.totalPow} = ${d.totalText}`],
       ['/64 subnets', d.subnets64], ['expanded', d.expanded], ['splits into', d.halves && d.halves.join(' · ')], ['part of', d.supernet], ['range', d.rangeNote]];
@@ -4341,6 +4419,8 @@ function cidrPage(io, d, status, route = null) {
     const rpki = o && o.rpki ? (o.rpki === 'valid' ? ', RPKI valid' : o.rpki === 'not-found' ? ', no ROA' : ', RPKI invalid') : '';
     if (o && r.status === 'announced') title = `${d.cidr}: announced by ${o.asn}${o.name ? ' ' + o.name : ''}${rpki} | ipterm`;
     else if (o) title = `${d.cidr}: routed in ${r.prefix} by ${o.asn}${o.name ? ' ' + o.name : ''} | ipterm`;
+    const lead = routeSummary(r, true) + (o && o.rpki ? ` RPKI: ${o.rpki === 'valid' ? 'valid' : o.rpki === 'not-found' ? 'no ROA' : 'invalid'}.` : '');
+    brief = [...brief.filter(Boolean).map(s => `${lead} ${s}`), lead, routeSummary(r, true)];
     summary = r.summary + ' ' + summary;
     rows.push(...routeRows(r).map(([k, v]) => [k, Array.isArray(v) ? v.join(' · ') : v]));
     const asLink = a => `<a href="/${esc(a)}">${esc(a)}</a>`;   // ASN pages ask RIPEstat only
@@ -4352,7 +4432,7 @@ function cidrPage(io, d, status, route = null) {
   // The routing section names the origin networks' holders: noindex, follow when one may be a private person, as
   // on the origin's own ASN page (prefix-overview gives the holder as as-overview does).
   const personal = Boolean(r) && r.origins.some(o => personHeld(o.holder));
-  return shell(io, { status, path, title, desc: summary, noindex: personal, initial: { kind: 'cidr', query: d.cidr, data: d, ...(route ? { route } : {}) },
+  return shell(io, { status, path, title, desc: descFit(summary, ...brief), noindex: personal, initial: { kind: 'cidr', query: d.cidr, data: d, ...(route ? { route } : {}) },
     body: staticBlock(`Subnet ${d.cidr}`, ['cidr', 'IPv' + d.v, d.range, ...(r ? [r.status] : [])], rows, summary, links) });
 }
 
@@ -4367,8 +4447,8 @@ function dnsPage(io, d, status) {
   const R = d.records || {}, vals = t => (R[t] || []).map(r => (t === 'MX' ? mxText(r) : r.value));
   const mail = (R.MX || []).filter(r => !nullMx(r)).map(r => r.value);
   const list = (a, n = 3) => a.slice(0, n).join(', ') + (a.length > n ? ` and ${a.length - n} more` : '');
-  let summary;
-  if (parseIp(name)) summary = R.PTR ? `The reverse DNS (PTR) name for ${name} is ${list(vals('PTR'))}.` : `${name} has no reverse DNS (PTR) record.`;
+  let summary, desc;
+  if (parseIp(name)) summary = desc = R.PTR ? `The reverse DNS (PTR) name for ${name} is ${list(vals('PTR'))}.` : `${name} has no reverse DNS (PTR) record.`;
   else {
     // The first clause names the domain (a one-type page, /dns/gmail.com/MX, has no A records to lead with).
     const parts = [], add = (first, later) => parts.push(parts.length ? later : first);
@@ -4383,6 +4463,7 @@ function dnsPage(io, d, status) {
     summary = (parts.length ? parts.join('; ') : `${name} has no ${single || 'common'} records`) + '.' +
       (d.hosting && d.hosting.org ? ` Hosted by ${d.hosting.org}${d.hosting.asn ? ` (${d.hosting.asn})` : ''}.` : '') +
       (d.dnssec ? ' DNSSEC: validated.' : '');
+    desc = descFit(summary, ...shorter(parts, '; ', '.'));
   }
   const rows = [];
   if (d.cname && d.cname.length) rows.push(['alias of', d.cname.join(' → ')]);
@@ -4395,7 +4476,7 @@ function dnsPage(io, d, status) {
     (takesMail ? `<p class="ln sys">Email security: <a href="/mail/${esc(name)}">mail check for ${esc(name)}</a> (SPF, DMARC, DKIM, MTA-STS, graded A to F)</p>` : '') +
     (!parseIp(name) && !recordName(name) ? `<p class="ln sys">Report card: <a href="/grade/${esc(name)}">grade ${esc(name)}</a> (DNSSEC, email, expiry and security headers, graded A to F)</p>` : '');
   const typesTitle = single ? `${single} record` : 'DNS records';
-  return shell(io, { status, path, title: `${name} ${typesTitle}` + (R.A ? ` · ${R.A[0].value}` : '') + ' | ipterm', desc: summary,
+  return shell(io, { status, path, title: `${name} ${typesTitle}` + (R.A ? ` · ${R.A[0].value}` : '') + ' | ipterm', desc,
     initial: { kind: 'dns', query: name, qtype: single, data: d },
     body: staticBlock(`DNS: ${name}${single ? ' ' + single : ''}`, ['dns', d.dnssec ? 'dnssec' : 'unsigned'], rows, summary, links) });
 }
@@ -4405,16 +4486,17 @@ function whoisPage(io, d, status) {
   const q = d.query, path = '/whois/' + q;
   const date = s => (s ? String(s).slice(0, 10) : null);
   if (d.error || d.bogon || !d.found) {
-    const msg = d.error || (d.bogon ? `${q} is a non-public address (${d.range}), so no internet registry holds a record for it.`
+    const msg = d.error || (d.bogon ? `${q} is a non-public address, so no internet registry holds a record for it: it is ${CIDR.rangeIn(d.range)}.`
       : d.message || `No registry record was found for ${q}.`);
     const keep = d.bogon || (d.kind === 'domain' && !d.error);     // let the terminal explain it in its own words
     return shell(io, { status, path, title: `whois ${q} | ipterm`, initial: { kind: 'whois', query: q, ...(keep ? { data: d } : { error: msg }) },
       body: staticBlock(`whois ${q}`, ['whois'], [], msg, d.bogon ? `<p class="ln sys">Guide: <a href="/guides/private-ip-ranges">Private IP address ranges explained</a></p>` : '') });
   }
   const block = (d.cidrs || []).join(', ') || (d.range ? `${d.range.start} – ${d.range.end}` : null);
-  const summary = `${q} is registered` + (d.org ? ` to ${d.org}` : '') + (d.registry ? ` through ${d.registry}` : '') +
-    (block && d.kind === 'ip' ? `, as part of ${block}` : '') + '.' +
-    (d.abuse && d.abuse.email ? ` Abuse reports go to ${d.abuse.email}.` : '');
+  const who = `${q} is registered` + (d.org ? ` to ${d.org}` : '') + (d.registry ? ` through ${d.registry}` : '');
+  const lead = who + (block && d.kind === 'ip' ? `, as part of ${block}` : '') + '.', abuse = d.abuse && d.abuse.email ? `Abuse reports go to ${d.abuse.email}.` : null;
+  const summary = [lead, abuse].filter(Boolean).join(' ');
+  const desc = descFit(summary, lead, who + '.');
   const rows = [
     ['owner', d.org], ['network name', d.name], ['handle', d.handle && !/ - /.test(d.handle) ? d.handle : null], ['registry', d.registry],
     ['address block', block], ['range', d.range ? `${d.range.start} – ${d.range.end}` : null], ['type', d.type], ['country', d.country],
@@ -4434,7 +4516,7 @@ function whoisPage(io, d, status) {
   // registrant, or else the administrative contact) and the AS or network name in name; "<name> <org>" is the
   // holder as RIPEstat gives it, so this page and the network's ASN page come to the same answer.
   const personal = personName(d.org) || personName(d.name) || (Boolean(d.org) && personHeld(`${d.name || d.handle || ''} ${d.org}`));
-  return shell(io, { status, path, title: `whois ${q}` + (d.org ? ` · ${d.org}` : '') + ' | ipterm', desc: summary, noindex: personal,
+  return shell(io, { status, path, title: `whois ${q}` + (d.org ? ` · ${d.org}` : '') + ' | ipterm', desc, noindex: personal,
     initial: { kind: 'whois', query: q, data: d },
     body: staticBlock(`whois ${q}`, ['whois', d.registry || 'rdap'], rows, summary,
       `<p class="ln sys">See also: ${back} · <a href="/guides/what-is-an-asn">What is an ASN?</a></p>`) });
@@ -4447,11 +4529,14 @@ function domainWhoisPage(io, d, status) {
   const reg = d.registrar && d.registrar.name;
   const left = d.expires ? dayDiff(d.expires) : null;
   const ns = d.nameservers || [];
-  const summary = `${q} was registered` + (d.registered ? ` on ${date(d.registered)}` : '') + (reg ? ` through ${reg}` : '') +
-    (d.expires ? ` and ${left != null && left < 0 ? 'expired' : 'expires'} on ${date(d.expires)}` : '') + '.' +
-    (ns.length ? ` Its name servers are ${ns.slice(0, 2).join(' and ')}${ns.length > 2 ? ` (and ${ns.length - 2} more)` : ''}.` : '') +
-    (d.registrant ? ` Registrant: ${d.registrant.replace(/\.$/, '')}.` : ' Owner details are not published.') +
-    (d.abuse && d.abuse.email ? ` Abuse reports go to ${d.abuse.email}.` : '');
+  const parts = [
+    `${q} was registered` + (d.registered ? ` on ${date(d.registered)}` : '') + (reg ? ` through ${reg}` : '') +
+      (d.expires ? ` and ${left != null && left < 0 ? 'expired' : 'expires'} on ${date(d.expires)}` : '') + '.',
+    ns.length ? `Its name servers are ${ns.slice(0, 2).join(' and ')}${ns.length > 2 ? ` (and ${ns.length - 2} more)` : ''}.` : null,
+    d.registrant ? `Registrant: ${d.registrant.replace(/\.$/, '')}.` : 'Owner details are not published.',
+    d.abuse && d.abuse.email ? `Abuse reports go to ${d.abuse.email}.` : null,
+  ];
+  const summary = parts.filter(Boolean).join(' '), desc = descFit(...shorter(parts));
   const rows = [
     ['domain', d.unicodeName ? `${q} (${d.unicodeName})` : q], ['registrar', reg ? reg + (d.registrar.ianaId ? ` (IANA ID ${d.registrar.ianaId})` : '') : null],
     ['registered', date(d.registered)], ['expires', d.expires ? date(d.expires) + (left != null ? (left < 0 ? ` (expired ${-left} days ago)` : ` (in ${left} days)`) : '') : null],
@@ -4460,7 +4545,7 @@ function domainWhoisPage(io, d, status) {
     ['registrant', d.registrant ? d.registrant + (d.registrantCountry ? ` (${d.registrantCountry})` : '') : 'not published (redacted for privacy)'],
     ['abuse email', d.abuse && d.abuse.email], ['abuse phone', d.abuse && d.abuse.phone], ['registry', d.registry],
   ];
-  return shell(io, { status, path, title: `whois ${q}` + (reg ? ` · ${reg}` : '') + (d.expires ? ` · expires ${date(d.expires)}` : '') + ' | ipterm', desc: summary,
+  return shell(io, { status, path, title: `whois ${q}` + (reg ? ` · ${reg}` : '') + (d.expires ? ` · expires ${date(d.expires)}` : '') + ' | ipterm', desc,
     initial: { kind: 'whois', query: q, data: d },
     body: staticBlock(`whois ${q}`, ['whois', 'domain', d.registry || 'rdap'], rows, summary,
       `<p class="ln sys">See also: <a href="/dns/${esc(q)}">DNS records for ${esc(q)}</a> · <a href="/mail/${esc(q)}">mail check for ${esc(q)}</a>` +
@@ -4480,7 +4565,7 @@ function mailPage(io, d, status) {
   const hosts = d.mx.records.filter(r => !nullMx({ value: r.host })).map(r => r.host);
   // The summary is what search engines show for "<domain> dmarc" and "<domain> spf record". A record
   // that couldn't be read is said so, as on its check line, never called missing.
-  const summary = [`${name} gets ${/^[AF]$/.test(d.grade) ? 'an' : 'a'} ${d.grade} for email security (${mailTally(d.counts)})`,
+  const clauses = [`${name} gets ${/^[AF]$/.test(d.grade) ? 'an' : 'a'} ${d.grade} for email security (${mailTally(d.counts)})`,
     d.nullMx ? 'it accepts no mail (null MX)' : d.mx.providers.length ? `mail is handled by ${d.mx.providers.join(' and ')}` : hosts.length ? `mail goes to ${hosts[0]}` : 'it has no MX records',
     unread.DMARC ? "its DMARC record couldn't be read"
       : dm && dm.policy ? `its DMARC policy${dm.inherited ? ` (from ${dm.from})` : ''} is p=${dmarcEffective(dm)}` + (dm.rua.length ? ` with reports to ${dm.rua[0]}` : '') : 'it has no working DMARC policy',
@@ -4489,11 +4574,12 @@ function mailPage(io, d, status) {
         : spf.redirectMacro ? `SPF uses ${spf.lookups} of 10 DNS lookups and hands off to a redirect= with a macro`
         : `SPF ends in ${spf.all || 'no all'} with ${spf.lookups} of 10 DNS lookups`) : spf.records ? `it has ${spf.records} SPF records` : 'it has no SPF record',
     ...(sts && !sts.error && !sts.errors.length && sts.mode === 'enforce' ? ['MTA-STS is enforced'] : []),
-  ].join('; ') + '.';
+  ];
+  const summary = clauses.join('; ') + '.', desc = descFit(...shorter(clauses, '; ', '.'));
   const links = `<p class="ln sys">Records: <a href="/dns/${esc(name)}/MX">dig ${esc(name)} MX</a> · <a href="/dns/${esc(name)}/TXT">dig ${esc(name)} TXT</a>` +
     ` · <a href="/dns/_dmarc.${esc(name)}/TXT">dig _dmarc.${esc(name)} TXT</a> · <a href="/whois/${esc(name)}">whois ${esc(name)}</a></p>` +
     `<p class="ln sys">${recordName(name) ? '' : `Report card: <a href="/grade/${esc(name)}">grade ${esc(name)}</a> (DNSSEC, expiry and security headers too) · `}How the grade works: <a href="/mail">email security check</a></p>`;
-  return shell(io, { status, path, title: `${name} SPF, DMARC and DKIM check: grade ${d.grade} | ipterm`, desc: summary,
+  return shell(io, { status, path, title: `${name} SPF, DMARC and DKIM check: grade ${d.grade} | ipterm`, desc,
     initial: { ...initial, data: d }, body: staticBlock(`Mail check: ${name}`, ['mail', `grade ${d.grade}`], rows, summary, links) });
 }
 
@@ -4507,9 +4593,12 @@ function gradePage(io, d, status) {
   const rows = gradeRows(d, false).map(([k, v]) => [k, Array.isArray(v) ? v.join(' · ') : v]);
   const problems = [...d.checks.filter(c => c.status === 'fail'), ...d.checks.filter(c => c.status === 'warn')];
   // The summary is what search engines show for "<domain> security headers" and the like.
-  const summary = `${name} gets ${/^[AF]$/.test(d.grade) ? 'an' : 'a'} ${d.grade} on ipterm's domain report card (${gradeTally(d)})` +
+  const lead = `${name} gets ${/^[AF]$/.test(d.grade) ? 'an' : 'a'} ${d.grade} on ipterm's domain report card (${gradeTally(d)})`;
+  const summary = lead +
     (problems.length ? `. To fix: ${problems.slice(0, 3).map(c => `${c.check}, ${c.text}`).join('; ')}${problems.length > 3 ? `; and ${problems.length - 3} more` : ''}.`
       : '. DNSSEC, IPv6, CAA, email security, the registration and the security headers all check out.');
+  // The description names what to fix without the reasons: the page gives those.
+  const desc = descFit(summary, problems.length && `${lead}. To fix: ${andList([...new Set(problems.map(c => c.check))])}.`, lead + '.');
   const b = badgeLinks(name, io.url.origin);
   const links = `<p class="ln sys">See also: <a href="/dns/${esc(name)}">dig ${esc(name)}</a> · <a href="/mail/${esc(name)}">mail check for ${esc(name)}</a>` +
     ` · <a href="/whois/${esc(name)}">whois ${esc(name)}</a></p><p class="ln sys">How the grade works: <a href="/grade">domain report card</a></p>` +
@@ -4517,7 +4606,7 @@ function gradePage(io, d, status) {
     `<div class="badge-ref"><p class="ln sys">Badge for a README (shields.io fetches it, so your readers' browsers never contact ipterm):</p>` +
     `<pre class="doc-pre"><code>${esc(b.markdown)}</code></pre>` +
     `<p class="ln sys">Or the same badge served by ipterm itself (each reader's browser fetches it from ipterm):</p><pre class="doc-pre"><code>${esc(b.markdownSvg)}</code></pre></div>`;
-  return shell(io, { status, path, title: `${name} security report card: grade ${d.grade} | ipterm`, desc: summary,
+  return shell(io, { status, path, title: `${name} security report card: grade ${d.grade} | ipterm`, desc,
     initial: { ...initial, data: d }, body: staticBlock(`Report card: ${name}`, ['grade', `grade ${d.grade}`], rows, summary, links) });
 }
 
@@ -4547,10 +4636,14 @@ function asnPage(io, d, status) {
   const name = d.name || d.holder || d.asn;
   const ups = d.upstreams && d.upstreams.list ? d.upstreams.list : [];
   const upName = u => u.asn + (u.name ? ` (${u.name})` : '');
-  const summary = `${d.asn} (${name}) is an autonomous system` + (d.registry ? ` registered with ${d.registry}` : '') +
-    `. It announces ${d.v4.count.toLocaleString('en-US')} IPv4 prefixes covering ${d.v4.addresses.toLocaleString('en-US')} addresses` +
-    ` and ${d.v6.count.toLocaleString('en-US')} IPv6 prefixes.` +
-    (ups.length ? ` Its main upstream network${ups.length > 1 ? 's are' : ' is'} ${andList(ups.slice(0, 3).map(upName))}.` : '');
+  const prefixes = (n, v) => `${n.toLocaleString('en-US')} ${v} prefix${n === 1 ? '' : 'es'}`;
+  const lead = `${d.asn}${name !== d.asn ? ` (${name})` : ''} is an autonomous system`, reg = d.registry ? ` registered with ${d.registry}` : '';
+  const size = `It announces ${prefixes(d.v4.count, 'IPv4')} covering ${d.v4.addresses.toLocaleString('en-US')} addresses and ${prefixes(d.v6.count, 'IPv6')}.`;
+  const upsText = ups.length && `Its main upstream network${ups.length > 1 ? 's are' : ' is'} ${andList(ups.slice(0, 3).map(upName))}.`;
+  const summary = [`${lead}${reg}.`, size, upsText].filter(Boolean).join(' ');
+  // The description names the upstreams by number only, as the shorter way to fit them in.
+  const desc = descFit(summary, upsText && `${lead}${reg}. ${size} Main upstreams: ${andList(ups.slice(0, 3).map(u => u.asn))}.`,
+    `${lead}${reg}. ${size}`, `${lead}. ${size}`, `${lead}${reg}.`);
   const rows = [
     ['holder', d.holder], ['registry', d.registry], ['announced', d.announced ? 'yes' : 'no'],
     ['IPv4 prefixes', d.v4.count.toLocaleString('en-US')], ['IPv4 addresses', d.v4.addresses.toLocaleString('en-US')],
@@ -4569,18 +4662,25 @@ function asnPage(io, d, status) {
     (list ? `<p class="ln sys">Largest announced prefixes:</p><ul class="static-list">${list}</ul>` : '') +
     `<p class="ln sys">Registry record: <a href="/whois/${esc(d.asn)}">whois ${esc(d.asn)}</a></p>` +
     `<p class="ln sys">Guide: <a href="/guides/what-is-an-asn">What is an ASN?</a></p>`;
-  return shell(io, { status, path, title: `${d.asn} · ${name} | ipterm`, desc: summary, noindex: personal,
+  // "AS13335 Cloudflare, Inc.: ASN, IP ranges and upstreams", as asn() in public/app.js titles it
+  const title = `${d.asn}${name !== d.asn ? ' ' + name : ''}: ASN, IP ranges and upstreams | ipterm`;
+  return shell(io, { status, path, title, desc, noindex: personal,
     initial: { kind: 'asn', query: d.asn, data: d }, body: staticBlock(`${d.asn} · ${name}`, ['asn'], rows, summary, links) });
 }
 
 const andList = a => (a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1]);
 
+// rows: [key, value]. A value is made a string and escaped, whatever its shape (upstream JSON can hold anything), unless
+// it is Markup.
 function staticBlock(heading, tags, rows, summary, extra = '') {
   const tagHtml = tags.map(t => `<span class="tag">${esc(t)}</span>`).join(' ');
-  const dl = rows.filter(r => r[1] != null && r[1] !== '').map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  const dl = rows.filter(r => r[1] != null && r[1] !== '').map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v instanceof Markup ? v.html : esc(v)}</dd>`).join('');
   return `<article class="static" id="static"><div class="head"><span class="hip">${esc(heading)}</span> ${tagHtml}</div>` +
     (dl ? `<dl class="kv">${dl}</dl>` : '') + `<p class="ln">${esc(summary)}</p>${extra}</article>`;
 }
+// Markup this file wrote and escaped itself (the links in a port page's IANA row), which staticBlock prints as it is.
+// Nothing outside the module can make one, so no value from upstream, { html } or not, is ever taken for markup.
+class Markup { constructor(html) { this.html = String(html); } }
 
 /* ---------- robots and sitemap ---------- */
 
@@ -4588,8 +4688,7 @@ const SITEMAP_PATHS = [
   // pages, tools and guides
   '/', '/whois', '/dns', '/mail', '/cidr', '/leaktest', '/api', '/guides', '/guides/find-router-ip', '/guides/private-ip-ranges', '/guides/what-your-ip-reveals',
   '/guides/ipv4-vs-ipv6', '/guides/what-is-an-asn', '/privacy',
-  // port checker: what each port is for (the pages never run a check themselves)
-  '/port', '/port/22', '/port/80', '/port/443', '/port/3389', '/port/25565', '/port/32400', '/port/8080', '/port/27015', '/port/51820',
+  // the port checker's pages have a file of their own: /sitemap-ports.xml (portPaths)
   // router and other private addresses people search for. These are the only non-public addresses whose pages
   // are indexed (curatedIps()), and typos of them redirect here (routerTypo()).
   '/192.168.1.1', '/192.168.0.1', '/10.0.0.1', '/192.168.1.254', '/192.168.100.1', '/192.168.2.1', '/192.168.0.254',
@@ -4612,6 +4711,10 @@ const SITEMAP_PATHS = [
   '/whois/google.com', '/whois/github.com', '/whois/cloudflare.com', '/whois/wikipedia.org', '/whois/example.com',
   '/whois/8.8.8.8', '/whois/1.1.1.1', '/whois/9.9.9.9', '/whois/208.67.222.222', '/whois/AS15169', '/whois/AS13335', '/whois/AS16509', '/whois/AS8075',
 ];
+
+// The port checker and each port's page in public/ports.js, for /sitemap-ports.xml. The pages never run a check and
+// draw only on ports.js, so crawling them asks no one anything.
+const portPaths = () => ['/port', ...PORTS.list().map(n => '/port/' + n)];
 
 function robots(url) {
   return text(`User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /go\nDisallow: /badge/\n\nSitemap: ${url.origin}/sitemap.xml\n`, 'public, max-age=86400');
@@ -4637,18 +4740,21 @@ const XML = { 'content-type': 'application/xml; charset=utf-8', 'cache-control':
 // /sitemap.xml: the index of the sitemap files. A copy run by someone else (SELF_HOSTED) lists nothing.
 function sitemapIndex(url, env) {
   if (selfHosted(env)) return sitemap(url, env, []);
-  const files = [['/sitemap-pages.xml', null], ...asnSitemapFiles().map((_, i) => [`/sitemap-asn-${i + 1}.xml`, ASN_SITEMAP_DATE])];
+  const files = [['/sitemap-pages.xml', null], ['/sitemap-ports.xml', PORTS.updated],
+    ...asnSitemapFiles().map((_, i) => [`/sitemap-asn-${i + 1}.xml`, ASN_SITEMAP_DATE])];
   const items = files.map(([p, mod]) => `  <sitemap><loc>${esc(url.origin + p)}</loc>${mod ? `<lastmod>${esc(mod)}</lastmod>` : ''}</sitemap>`).join('\n');
   return new Response(`<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${items}\n</sitemapindex>\n`, { headers: XML });
 }
 
 // A file of 9,000 URLs takes about 7 ms of CPU to build, so each isolate keeps what it built (a few files at most).
+// lastmod: the day these pages' content last changed (PORTS.updated for the port pages), given on each URL. The other
+// files have none: their pages change with live data, and a date that is always new is one search engines ignore.
 const sitemapMemo = new Map();
-function sitemap(url, env, paths) {
+function sitemap(url, env, paths, lastmod = null) {
   const key = url.origin + url.pathname + (selfHosted(env) ? ' copy' : '');
   if (!sitemapMemo.has(key)) {
-    const origin = esc(url.origin);
-    const items = (selfHosted(env) ? [] : paths).map(p => `  <url><loc>${origin}${esc(encodePath(p))}</loc></url>`).join('\n');
+    const origin = esc(url.origin), mod = lastmod ? `<lastmod>${esc(lastmod)}</lastmod>` : '';
+    const items = (selfHosted(env) ? [] : paths).map(p => `  <url><loc>${origin}${esc(encodePath(p))}</loc>${mod}</url>`).join('\n');
     if (sitemapMemo.size > 20) sitemapMemo.clear();
     sitemapMemo.set(key, `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${items}\n</urlset>\n`);
   }
@@ -4821,28 +4927,11 @@ function secure(res, env) {
   return out;
 }
 
+// Why an address isn't public, in the words of the special-purpose table in public/cidr.js (the subnet calculator and
+// the terminal use the same one), or null for a public address.
 function nonPublicReason(p) {
-  if (p.v === 4) {
-    const [a, b, c] = p.o;
-    if (a === 0) return '"this network" block (0.0.0.0/8)';
-    if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return 'RFC 1918 private range';
-    if (a === 100 && b >= 64 && b <= 127) return 'carrier-grade NAT range (100.64.0.0/10)';
-    if (a === 127) return 'loopback range (127.0.0.0/8)';
-    if (a === 169 && b === 254) return 'link-local range (169.254.0.0/16)';
-    if (a === 192 && b === 0 && c === 0) return 'IETF protocol assignments (192.0.0.0/24)';
-    if ((a === 192 && b === 0 && c === 2) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113)) return 'documentation range (RFC 5737)';
-    if (a === 198 && (b === 18 || b === 19)) return 'benchmarking range (198.18.0.0/15)';
-    if (a >= 224) return 'multicast or reserved range';
-    return null;
-  }
-  const g = p.g;
-  if (g.slice(0, 7).every(x => x === 0) && g[7] <= 1) return 'unspecified or loopback address';
-  if (g.slice(0, 5).every(x => x === 0) && g[5] === 0xffff) return 'IPv4-mapped address; look up the IPv4 address instead';
-  if ((g[0] & 0xffc0) === 0xfe80) return 'link-local range (fe80::/10)';
-  if ((g[0] & 0xfe00) === 0xfc00) return 'unique local range (fc00::/7)';
-  if ((g[0] & 0xff00) === 0xff00) return 'multicast range (ff00::/8)';
-  if (g[0] === 0x2001 && g[1] === 0x0db8) return 'documentation range (2001:db8::/32)';
-  return null;
+  const [kind, note] = CIDR.special(p);
+  return kind === 'public' ? null : note;
 }
 
 /* ---------- helpers ---------- */

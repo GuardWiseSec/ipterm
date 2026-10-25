@@ -5,7 +5,8 @@
 # of the ASN sitemap (and so are the whois and /cidr pages that name such a holder, while other ASN pages list
 # it as an upstream by number only), DNS record names (_dmarc.gmail.com) get no report card and no link to one,
 # the /text and /json forms of address and network pages are noindex (an X-Robots-Tag header) while the
-# pages stay indexable, and the sitemap index and its files are there with the expected URL counts. Against the live
+# pages stay indexable, and the sitemap index and its files are there with the expected URL counts (the port pages in
+# a file of their own, each with a <lastmod>; tools/check_pages.mjs checks it closely with no server). Against the live
 # site it also asks over plain http: Googlebot gets a 301 to https, curl the bare address, /expect a 200 or 412 (never a
 # redirect) and robots.txt an https Sitemap line (tools/check_https.mjs checks the same with no server).
 # Run against `npx wrangler dev` (default) or the live site:
@@ -156,6 +157,12 @@ printf '%s\n' "$idx" | grep -q 'sitemap-asn-1.xml' && ok 'the index lists sitema
 for a in AS35100 AS50053; do case "$asns" in *"/$a</loc>"*) no "$a is in an ASN sitemap, but its page is noindex" ;; *) ok "$a (noindex) is in no ASN sitemap" ;; esac; done
 for a in AS13335 AS15169 AS3356 AS5617; do case "$asns" in *"/$a</loc>"*) ok "$a is in an ASN sitemap" ;; *) no "$a is in no ASN sitemap" ;; esac; done
 curl -s "$B/sitemap-pages.xml" | grep -q '<loc>[a-z]*://[^/]*/AS[0-9]*</loc>' && no 'sitemap-pages.xml still lists ASN pages' || ok 'sitemap-pages.xml leaves ASN pages to the ASN files'
+# The port pages have a file of their own: /port and every port the /port page lists, each with the day they last changed.
+ports=$(curl -s "$B/sitemap-ports.xml"); listed=$(curl -s -A "$UA" "$B/port" | grep -o 'href="/port/[0-9]*"' | sort -u | wc -l | tr -d ' ')
+n=$(printf '%s\n' "$ports" | grep -c '<url>'); dated=$(printf '%s\n' "$ports" | grep -c '</loc><lastmod>[0-9]\{4\}-[0-9][0-9]-[0-9][0-9]</lastmod></url>')
+if [ "$listed" -gt 0 ] && [ "$n" = $((listed + 1)) ] && [ "$dated" = "$n" ]; then ok "sitemap-ports.xml: /port and its $listed ports, each with a <lastmod>"; else no "sitemap-ports.xml: $n URLs ($dated with a <lastmod>), /port lists $listed ports"; fi
+printf '%s\n' "$idx" | grep -q 'sitemap-ports.xml</loc><lastmod>' && ok 'the index lists sitemap-ports.xml with a <lastmod>' || no 'the index lists no dated sitemap-ports.xml'
+curl -s "$B/sitemap-pages.xml" | grep -q '<loc>[a-z]*://[^/]*/port' && no 'sitemap-pages.xml still lists port pages' || ok 'sitemap-pages.xml leaves port pages to sitemap-ports.xml'
 
 # Plain http, on a deployed copy only: wrangler dev's 127.0.0.1, localhost and [::1] stay on http (route()). Run it
 # with the https address; these lines ask the same host over http.

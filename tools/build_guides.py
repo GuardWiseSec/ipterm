@@ -4,6 +4,9 @@ Run from the project root:  python3 tools/build_guides.py
 Edit the GUIDES list below, then re-run and redeploy. %ORIGIN% is replaced with the site's
 address by the Worker when a page is served, so canonical links and structured data stay correct
 on any domain.
+
+Each guide's desc is its blurb on /guides; meta, when there is one, is a shorter version (about 155
+characters) for search results, og:description and the Article's structured data.
 """
 import html
 import json
@@ -33,6 +36,7 @@ GUIDES = [
         'crumb': 'router IP',
         'cmd': 'man router-ip',
         'desc': "Find your router's IP address (default gateway) on Windows, Mac, Linux, iPhone and Android, plus the most common default addresses and what to do if you can't log in.",
+        'meta': "Find your router's IP address (default gateway) on Windows, Mac, Linux, iPhone and Android, plus the most common default addresses.",
         'lede': "Your router's IP address, also called the <em>default gateway</em>, is the address you type into a browser to open the router's settings page. It is usually 192.168.1.1 or 192.168.0.1, but it varies by brand and internet provider, so the surest way is to ask your device.",
         'body': '''
 <h2>Windows</h2>
@@ -84,6 +88,7 @@ GUIDES = [
         'crumb': 'private ranges',
         'cmd': 'man private-ip',
         'desc': 'What 10.x.x.x, 172.16–31.x.x and 192.168.x.x addresses are, why they cannot be located, and the other special ranges you will see: loopback, link-local, carrier-grade NAT and documentation.',
+        'meta': 'What 10.x.x.x, 172.16–31.x.x and 192.168.x.x addresses are, why they cannot be located, and other special ranges such as loopback and carrier-grade NAT.',
         'lede': 'Some IP addresses are reserved for use inside local networks and are never routed on the public internet. Your laptop, phone and router almost certainly use one of them right now, and they look the same in millions of homes and offices.',
         'body': '''
 <h2>The three private ranges (RFC 1918)</h2>
@@ -128,6 +133,7 @@ GUIDES = [
         'crumb': 'what your IP reveals',
         'cmd': 'man ip-privacy',
         'desc': 'What a website can learn from your IP address: your provider and an approximate location. What it cannot: your name, street address or browsing history. Plus how dynamic IPs, CGNAT and VPNs change the picture.',
+        'meta': 'What a website can learn from your IP address: your provider and an approximate location. What it cannot: your name, street address or browsing history.',
         'lede': 'Every website you visit sees your public IP address, because that is where it sends its reply. On its own, the address says less than many people fear, and more than some people assume.',
         'body': '''
 <h2>What an IP address does reveal</h2>
@@ -238,6 +244,7 @@ GUIDES = [
         'crumb': 'subnet cheat sheet',
         'cmd': 'cidr --table',
         'desc': 'Every IPv4 prefix from /8 to /32 with its subnet mask, wildcard mask, total addresses and usable hosts, plus how CIDR notation works and common IPv6 prefix sizes.',
+        'meta': 'Every IPv4 prefix from /8 to /32 with its subnet mask, wildcard mask, addresses and usable hosts, plus how CIDR notation works and common IPv6 prefixes.',
         'lede': 'CIDR notation writes a network as an address plus a prefix length: <code>192.168.1.0/24</code> means the first 24 bits identify the network and the remaining 8 identify hosts. This page converts every common prefix to its subnet mask.',
         'body': """
 <h2>Reading CIDR notation</h2>
@@ -324,7 +331,7 @@ def guide_page(g):
     ld = {
         '@context': 'https://schema.org',
         '@graph': [
-            {'@type': 'Article', 'headline': g['title'], 'description': g['desc'], 'datePublished': UPDATED, 'dateModified': UPDATED,
+            {'@type': 'Article', 'headline': g['title'], 'description': g.get('meta', g['desc']), 'datePublished': UPDATED, 'dateModified': UPDATED,
              'author': {'@type': 'Organization', 'name': 'ipterm'}, 'publisher': {'@type': 'Organization', 'name': 'ipterm'},
              'mainEntityOfPage': f'%ORIGIN%{path}', 'image': '%ORIGIN%/og.png'},
             {'@type': 'BreadcrumbList', 'itemListElement': [
@@ -335,7 +342,7 @@ def guide_page(g):
     }
     crumbs = f'<a href="/">ipterm</a><span aria-hidden="true">/</span><a href="/guides">guides</a><span aria-hidden="true">/</span><span aria-current="page">{html.escape(g["crumb"])}</span>'
     related = ''.join(f'<li><a href="/guides/{s}">{html.escape(BY_SLUG[s]["title"])}</a></li>' for s in g['related'])
-    out = HEAD.format(title=html.escape(g['title']), desc=html.escape(g['desc'], quote=True), path=path, og_type='article', ld=ld_json(ld), crumbs=crumbs)
+    out = HEAD.format(title=html.escape(g['title']), desc=html.escape(g.get('meta', g['desc']), quote=True), path=path, og_type='article', ld=ld_json(ld), crumbs=crumbs)
     out += f'''    <p class="ln echo"><span class="ps1">guest@ipterm:~$</span> {html.escape(g['cmd'])}</p>
     <h1>{html.escape(g['title'])}</h1>
     <p class="doc-meta">Updated {UPDATED_LABEL} · {minutes} min read</p>

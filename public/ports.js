@@ -106,6 +106,25 @@
     [64738, 'Mumble', 'tcp+udp', 'Mumble voice chat servers (Murmur), over TCP and UDP.',
       'Forward 64738 TCP and UDP to the server.'],
   ];
+  // The day the port pages last changed (a row above, IANA below, or the page itself: portPage() in src/worker.js,
+  // portAbout() in public/app.js). /sitemap-ports.xml gives it as every port page's <lastmod>, so search engines
+  // recrawl them when it moves: change it with them, and only then.
+  const UPDATED = '2026-10-25';
+  // IANA's service names for each port above, on the protocol(s) of its row, from the Service Name and Transport
+  // Protocol Port Number Registry (iana.org/assignments/service-names-port-numbers, the CSV of 2026-10-25). Space
+  // separated, in the registry's order; '' when IANA has no entry for that port and protocol. For the tcp+udp rows
+  // the names are the same on both. `node tools/check_pages.mjs <the registry CSV>` checks them against a new copy.
+  const IANA = {
+    21: 'ftp', 22: 'ssh', 23: 'telnet', 25: 'smtp', 53: 'domain', 80: 'http www www-http', 110: 'pop3', 143: 'imap',
+    443: 'https', 445: 'microsoft-ds', 554: 'rtsp', 587: 'submission', 993: 'imaps', 1194: 'openvpn', 1723: 'pptp',
+    1883: 'mqtt', 2456: 'altav-remmgt', 3074: 'xbox', 3306: 'mysql', 3389: 'ms-wbt-server', 3478: 'stun turn stun-behavior',
+    5000: 'commplex-main', 5001: 'commplex-link', 5060: 'sip', 5432: 'postgresql', 5900: 'rfb', 6881: '', 7777: 'cbt',
+    8006: 'wpl-analytics', 8080: 'http-alt', 8096: '', 8123: '', 8443: 'pcsync-https', 9987: 'dsm-scm-target', 19132: '',
+    25565: '', 27015: '', 28015: '', 32400: 'plex', 51413: '', 51820: '', 64738: '',
+  };
+  // The ports above that whatportis.com has no page for: https://whatportis.com/ports/<n> answers 404 (checked on the
+  // day below; the others answered 200, or 308 to a page that did). refs() leaves whatportis out for them.
+  const NO_WHATPORTIS = { checked: '2026-10-25', ports: new Set([8096, 28015, 51413, 64738]) };
   // Ports ipterm can't check at all, and why: the Worker refuses them before connecting, and their pages
   // and the terminal say so instead of offering a check.
   const UNTESTABLE = { 25: "Cloudflare, which runs ipterm, doesn't allow connections to port 25 (email), to stop spam." };
@@ -128,5 +147,17 @@
     cgnatNames: () => [...new Set(Object.values(CGNAT))],
     // "22", " 022 " -> 22; anything else (ranges, lists, words) -> null
     parse: s => { const t = String(s == null ? '' : s).trim(); const n = /^\d{1,5}$/.test(t) ? Number(t) : NaN; return valid(n) ? n : null; },
+    updated: UPDATED,
+    // IANA's registered names for port n, and as one line ("ssh (TCP)", "not registered with IANA"), or null for a
+    // port that isn't in the list (only these were checked against the registry)
+    iana: n => {
+      const s = BY.get(Number(n)), names = s && Object.hasOwn(IANA, s.port) ? IANA[s.port].split(' ').filter(Boolean) : null;
+      if (!names) return null;
+      return { names, text: names.length ? `${names.join(', ')} (${s.proto === 'tcp+udp' ? 'TCP and UDP' : s.proto.toUpperCase()})` : 'not registered with IANA' };
+    },
+    // Where to read more about port n: IANA's registry searched for it (there is no page per port) and whatportis.com,
+    // where it has a page (NO_WHATPORTIS)
+    refs: n => [['IANA registry', `https://www.iana.org/assignments/service-names-port-numbers?search=${Number(n)}`],
+      ...(NO_WHATPORTIS.ports.has(Number(n)) ? [] : [['whatportis', `https://whatportis.com/ports/${Number(n)}`]])],
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);
