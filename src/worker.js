@@ -1603,21 +1603,31 @@ function helpBody(h, env = {}) {
 
 // Runs a data step and maps rate limiting and provider failures to friendly responses.
 // Outside services occasionally hiccup. Every upstream call gets a time limit and one retry
-// (after a short pause) on network errors, timeouts, 5xx and 429 responses.
+// (after a short pause) on network errors, timeouts, 5xx and 429 responses. by (a Date.now() time, optional) is a
+// deadline for both tries together: each try gets what is left of it at most, and the retry comes only with a second
+// left after the pause, so a server that doesn't answer gets one try, not two. The error says whether the last try
+// timed out (timedOut).
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-async function fetchRetry(url, init = {}, label = 'upstream', timeout = 8000) {
+// How long whois, dig and routing may wait on the outside services they ask, every try and redirect included (by,
+// above): well inside the 9 seconds the terminal waits (getJson in public/app.js), so it shows the Worker's message,
+// not its own. The handbook ("When something fails") lists the worst case of every other route.
+const DEADLINE = 6500;
+const isTimeout = e => !!e && (e.name === 'TimeoutError' || e.name === 'AbortError');
+async function fetchRetry(url, init = {}, label = 'upstream', timeout = 8000, by = Infinity) {
   let last;
   for (let attempt = 0; attempt < 2; attempt++) {
+    const again = () => attempt === 0 && by - Date.now() >= 1400;      // the pause, and a second for the retry
     try {
-      const r = await fetch(url, { ...init, signal: AbortSignal.timeout(timeout) });
-      if (attempt === 0 && (r.status >= 500 || r.status === 429)) { last = new Error(`${label} HTTP ${r.status}`); await sleep(400); continue; }
+      const r = await fetch(url, { ...init, signal: AbortSignal.timeout(Math.max(0, Math.min(timeout, by - Date.now()))) });
+      if (again() && (r.status >= 500 || r.status === 429)) { last = new Error(`${label} HTTP ${r.status}`); await sleep(400); continue; }
       return r;
     } catch (e) {
       last = e;
-      if (attempt === 0) { await sleep(400); continue; }
+      if (again()) { await sleep(400); continue; }
+      break;
     }
   }
-  throw new Error(`${label}: ${(last && last.message) || last}`);
+  throw Object.assign(new Error(`${label}: ${(last && last.message) || last}`), { timedOut: isTimeout(last) });
 }
 
 async function guard(step, ok, fail = (msg, status) => json({ error: msg }, status)) {
@@ -1631,7 +1641,8 @@ async function guard(step, ok, fail = (msg, status) => json({ error: msg }, stat
     }
     // Visible with `npx wrangler tail` (or Workers Logs if enabled). Never logs the visitor's IP or the API token.
     console.error('[ipterm] upstream failure:', plain(String((e && e.message) || e)).replace(/token=[^&\s]+/g, 'token=***'));
-    return fail('A data source didn\'t respond. Try again in a moment.', 502);
+    // A registry server that didn't answer (rdapFetch) is named, and the fault put where it lies.
+    return fail(e instanceof RegistrySilent ? e.text : 'A data source didn\'t respond. Try again in a moment.', 502);
   }
 }
 
@@ -2289,11 +2300,12 @@ async function withListings(io, ip, pending) {
 
 /* ---------- RIPEstat: networks and routing ----------
    Free, no key. Answers are read with a size cap, since a big network's answer can run to megabytes and
-   parsing that would use up the Worker's CPU time. */
+   parsing that would use up the Worker's CPU time. by: a deadline shared with other calls (fetchRetry). */
 const RIPESTAT = 'https://stat.ripe.net/data/';
-async function ripestat(call, query, { max = 1_000_000, timeout = 8000, retry = true } = {}) {
+async function ripestat(call, query, { max = 1_000_000, timeout = 8000, retry = true, by = Infinity } = {}) {
   const url = `${RIPESTAT}${call}/data.json?${query}&sourceapp=ipterm`;
-  const r = retry ? await fetchRetry(url, {}, 'ripestat ' + call, timeout) : await fetch(url, { signal: AbortSignal.timeout(timeout) });
+  const r = retry ? await fetchRetry(url, {}, 'ripestat ' + call, timeout, by)
+    : await fetch(url, { signal: AbortSignal.timeout(Math.max(0, Math.min(timeout, by - Date.now()))) });
   if (!r.ok) { if (r.body) r.body.cancel(); throw new Error(`ripestat ${call} HTTP ${r.status}`); }
   const j = await readJson(r, max);
   return j && typeof j.data === 'object' && j.data ? j.data : {};
@@ -2351,9 +2363,11 @@ async function asnData(n) {
 
 /* Routing for a public prefix or address: the route that carries it, which network originates that route,
    whether RPKI allows that origin, how many RIS peers see it, and a few AS paths. RIPEstat only (never IPinfo
-   or proxycheck.io), five calls at most, cached six hours (ten minutes if a part didn't answer):
+   or proxycheck.io), five calls at most, cached six hours (ten minutes if a part didn't answer), all of them within
+   DEADLINE together, so a RIPEstat that doesn't answer costs 6.5 seconds at most, not 17:
      prefix-overview  the route (the prefix itself, or the less specific that covers it) and its origins;
-                      6 seconds, one retry. Then, in parallel, one try each:
+                      6 seconds, one retry while the deadline allows. Then, in parallel, one try each, cut short
+                      by the deadline:
      routing-status   RIS visibility and first seen; 4 seconds (it is slow for big aggregates)
      rpki-validation  each origin (up to two) against the published ROAs; 5 seconds
      bgp-state        AS paths, 5 seconds, from three RIS collectors only (rrcs=): RRC00 Amsterdam (multihop, peers
@@ -2402,7 +2416,8 @@ function canonPrefix(s) {
 const prefixWithin = (a, b) => { const [na, la] = a.split('/'), lb = Number(b.split('/')[1]), p = parseIp(na); return !!p && Number(la) >= lb && inPrefix(p, b) >= 0; };
 
 async function routeLookup(t) {
-  const po = await ripestat('prefix-overview', 'resource=' + t.query, { max: 200_000, timeout: 6000 });
+  const by = Date.now() + DEADLINE;
+  const po = await ripestat('prefix-overview', 'resource=' + t.query, { max: 200_000, timeout: 6000, by });
   const origins = (Array.isArray(po.asns) ? po.asns : []).filter(a => a && Number.isInteger(a.asn) && a.asn > 0 && a.asn <= 4294967295).slice(0, 4)
     .map(a => { const holder = txt(a.holder, 160); return { asn: 'AS' + a.asn, holder, name: holderName(holder), rpki: null, roas: [] }; });
   const asked = t.ip ? `${t.query}/${t.p.v === 4 ? 32 : 128}` : t.query;
@@ -2422,8 +2437,9 @@ async function routeLookup(t) {
   if (!prefix) return withRouteNotes(d);
   let partial = false;
   const soft = pending => pending.catch(() => { partial = true; return null; });
-  // One try each, in parallel, so a slow part costs at most five seconds and the rest still shows.
-  const once = { retry: false, timeout: 5000 };
+  // One try each, in parallel, so a slow part costs at most five seconds (or what is left of the deadline) and the
+  // rest still shows.
+  const once = { retry: false, timeout: 5000, by };
   const [rs, bs, ...rpki] = await Promise.all([
     soft(ripestat('routing-status', 'resource=' + prefix, { ...once, max: 100_000, timeout: 4000 })),
     soft(ripestat('bgp-state', `resource=${prefix}&rrcs=${ROUTE_RRCS.map(([k]) => k).join(',')}`, { ...once, max: 400_000 })),
@@ -2596,9 +2612,10 @@ function reverseName(p) {
     : p.g.map(x => x.toString(16).padStart(4, '0')).join('').split('').reverse().join('.') + '.ip6.arpa';
 }
 
-async function doh(name, type) {
+// by: a deadline shared by the queries of one answer (dnsData), so a resolver that doesn't answer costs 6.5 seconds.
+async function doh(name, type, by = Infinity) {
   const r = await fetchRetry(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`,
-    { headers: { accept: 'application/dns-json' } }, 'dns');
+    { headers: { accept: 'application/dns-json' } }, 'dns', 8000, by);
   if (!r.ok) throw new Error('dns HTTP ' + r.status);
   return r.json();
 }
@@ -2631,7 +2648,8 @@ function parseRecord(type, data) {
 }
 
 async function dnsData(io, name, types, forIp) {
-  const res = await Promise.all(types.map(t => doh(name, t)));
+  const by = Date.now() + DEADLINE;
+  const res = await Promise.all(types.map(t => doh(name, t, by)));
   const d = { name: forIp || name, query: name, types, status: 'NOERROR', dnssec: false, cname: [], records: {}, source: 'cloudflare-dns' };
   res.forEach((r, i) => {
     const t = types[i];
@@ -3629,8 +3647,12 @@ const regrade = checks => (checks || []).some(c => c.skipped && !c.lasting);
 async function gradeData(io, name) {
   const dns = await gradeDns(name);
   if (dns.status !== 'NOERROR' && !dns.broken) return { ...(dns._ttl ? { _ttl: dns._ttl } : {}), domain: name, status: dns.status, grade: null, subrequests: dns.subrequests };
-  // A rate limit in a part fails the whole card (429); any other failure only leaves that part unchecked.
-  const part = p => p.then(v => v, e => { if (e instanceof RateLimited) throw e; return { error: "a data source didn't respond" }; });
+  // A rate limit in a part fails the whole card (429); any other failure only leaves that part unchecked. A registry
+  // server that didn't answer (rdapFetch) is named.
+  const part = p => p.then(v => v, e => {
+    if (e instanceof RateLimited) throw e;
+    return { error: e instanceof RegistrySilent ? `${e.host} didn't answer` : "a data source didn't respond" };
+  });
   const [mail, registration, web] = await Promise.all([
     dns.broken ? null : part(mailCheck(io, name, null)),
     part(cached(io, 'whois/' + name, 21600, () => domainLookup(name, io.url.origin))),
@@ -3735,10 +3757,12 @@ function badgeSvg(label, message, color) {
 // regional registry (ARIN, RIPE NCC, APNIC, LACNIC, AFRINIC) holds each address block and ASN.
 
 // An address or ASN file that couldn't be read isn't asked for again for a minute (per isolate): while IANA is down,
-// each lookup goes straight to rdap.org instead of spending 12 seconds on two tries first. Not dns.json: through
+// each lookup goes straight to rdap.org instead of spending 3 seconds on IANA first. Not dns.json: through
 // rdap.org a domain's answer names no registry and can't say its TLD has no RDAP, and whois keeps it for 6 hours.
+// by: the registry exchange's deadline (rdapFetch), of which IANA gets BOOT_WAIT at most, so rdap.org still has time.
 const BOOT = {}, BOOT_FAILED = {};
-async function bootstrap(kind, origin) {               // kind: ipv4 | ipv6 | asn | dns
+const BOOT_WAIT = 3000;
+async function bootstrap(kind, origin, by = Date.now() + DEADLINE) {   // kind: ipv4 | ipv6 | asn | dns
   if (BOOT[kind]) return BOOT[kind];
   const key = new Request(`${origin}/__cache/rdap-bootstrap/${kind}`);
   const hit = await caches.default.match(key);
@@ -3747,7 +3771,7 @@ async function bootstrap(kind, origin) {               // kind: ipv4 | ipv6 | as
   else {
     if (Date.now() < (BOOT_FAILED[kind] || 0)) throw new Error('bootstrap failed a moment ago');
     try {
-      const r = await fetchRetry(`https://data.iana.org/rdap/${kind}.json`, {}, 'iana bootstrap', 6000);
+      const r = await fetchRetry(`https://data.iana.org/rdap/${kind}.json`, {}, 'iana bootstrap', BOOT_WAIT, Math.min(by, Date.now() + BOOT_WAIT));
       if (!r.ok) throw new Error('bootstrap ' + r.status);
       data = await r.json();
     } catch (e) { if (kind !== 'dns') BOOT_FAILED[kind] = Date.now() + 60_000; throw e; }
@@ -3777,9 +3801,9 @@ function inPrefix(p, prefix) {
 
 // The RDAP base of the registry that holds target, null when none does, or rdap.org (which redirects to it) when
 // IANA's file can't be read.
-async function rdapBase(target, origin) {
+async function rdapBase(target, origin, by) {
   let list;
-  try { list = await bootstrap(target.asn ? 'asn' : target.p.v === 4 ? 'ipv4' : 'ipv6', origin); }
+  try { list = await bootstrap(target.asn ? 'asn' : target.p.v === 4 ? 'ipv4' : 'ipv6', origin, by); }
   catch (e) {
     console.error('[ipterm] IANA bootstrap unavailable, using rdap.org:', plain(String((e && e.message) || e)));
     return 'https://rdap.org/';
@@ -3803,6 +3827,55 @@ async function rdapBase(target, origin) {
 const REGISTRY = { idnic: 'IDNIC', jpnic: 'JPNIC', krnic: 'KRNIC', twnic: 'TWNIC', 'registro.br': 'NIC.br',
   arin: 'ARIN', ripe: 'RIPE NCC', apnic: 'APNIC', lacnic: 'LACNIC', afrinic: 'AFRINIC' };
 const RDAP_INIT = { headers: { accept: 'application/rdap+json, application/json' } };
+
+// One RDAP request within its exchange's deadline (by, a Date.now() time: DEADLINE from the start of the lookup, IANA's
+// file included). Redirects are followed here, three at most and to http or https only, as fetch would, so a server
+// that doesn't answer is known by name: ARIN sends a transferred block on to its registry, LACNIC sends Brazil's
+// addresses to NIC.br, and rdap.org sends everything on. A server still silent at the deadline gets no second try
+// (fetchRetry): RegistrySilent names it, and one that had RDAP_FAIR or more to answer is then taken as silent for
+// RDAP_PAUSE (per isolate, keyed by its origin), so the requests after it fail at once instead of each waiting the
+// deadline out. tld: a domain's, whose registry the message names. Returns { r, url }: the answer and the server it
+// came from.
+const RDAP_FAIR = 3000, RDAP_PAUSE = 60_000;
+const rdapQuiet = {};                    // per isolate: RDAP server (origin) -> until when it is taken as silent
+const rdapSilent = u => Date.now() < (rdapQuiet[originOf(u)] || 0);
+async function rdapFetch(url, by, tld = null) {
+  for (let hop = 0; hop < 4; hop++) {
+    if (rdapSilent(url)) throw new RegistrySilent(url, tld);
+    const t0 = Date.now();
+    let r;
+    try { r = await fetchRetry(url, { ...RDAP_INIT, redirect: 'manual' }, 'rdap', DEADLINE, by); } catch (e) {
+      if (!e.timedOut) throw Object.assign(e, { origin: originOf(url) });
+      if (Date.now() - t0 >= RDAP_FAIR) rdapQuiet[originOf(url)] = Date.now() + RDAP_PAUSE;
+      throw new RegistrySilent(url, tld);
+    }
+    const to = r.status >= 300 && r.status < 400 ? r.headers.get('location') : null;
+    if (!to) return { r, url };
+    if (r.body) r.body.cancel();
+    let next = null;
+    try { next = new URL(to, url); } catch {}
+    const odd = !next || !/^https?:$/.test(next.protocol) ? 'a redirect that is not http(s)' : hop === 3 ? 'too many redirects' : null;
+    if (odd) throw Object.assign(new Error('rdap: ' + odd), { origin: originOf(url) });   // the server that sent it
+    url = next.href;
+  }
+}
+
+// A registry server that didn't answer within the deadline (rdapFetch). Its message is for the logs and for blockAsk,
+// which pauses the registry date after an "rdap: " failure. text is what whois says, in JSON, as text and on the
+// page alike: which server, whose (a domain's registry by its TLD, an address's or AS number's by REGISTRY), and that
+// the fault is theirs, not the visitor's.
+class RegistrySilent extends Error {
+  constructor(url, tld) {
+    const host = (() => { try { return new URL(url).hostname; } catch { return String(url); } })();
+    super('rdap: no answer from ' + host);
+    this.origin = originOf(url);
+    this.host = host;
+    const rir = Object.keys(REGISTRY).find(k => host.includes(k));
+    const who = host === 'rdap.org' ? "rdap.org, which ipterm asks while IANA's list of registries can't be read,"
+      : tld ? `The .${tld} registry's whois server (${host})` : `${rir ? REGISTRY[rir] + "'s" : "The registry's"} whois server (${host})`;
+    this.text = `${who} didn't answer. That's on their side; try again later.`;
+  }
+}
 
 // Shared readers for RDAP objects. Entities nest (ARIN puts abuse under the org; registrars put it
 // under the registrar), so they are flattened first. Contact details live in jCard (vcardArray).
@@ -3862,12 +3935,13 @@ async function rdapLookup(target, origin, base) {   // base: rdapBase's answer, 
   const query = target.asn ? 'AS' + target.asn : target.ip;
   const kind = target.asn ? 'asn' : 'ip';
   const tail = target.asn ? 'autnum/' + target.asn : 'ip/' + target.ip;
-  if (base === undefined) base = await rdapBase(target, origin);
+  const by = Date.now() + DEADLINE;
+  if (base === undefined) base = await rdapBase(target, origin, by);
   if (!base) return { query, kind, found: false };
   const url = base + tail;
-  const r = await fetchRetry(url, RDAP_INIT, 'rdap');
+  const { r, url: at } = await rdapFetch(url, by);     // at: the server that answered (after any redirect)
   if (r.status === 404) return { query, kind, found: false };
-  if (!r.ok) throw Object.assign(new Error('rdap ' + r.status), { origin: originOf(r.url || url) });   // the server that answered (after any redirect)
+  if (!r.ok) throw Object.assign(new Error('rdap ' + r.status), { origin: originOf(at) });
   const o = await readJson(r);
 
   const ents = flatEntities(o.entities);
@@ -3877,7 +3951,7 @@ async function rdapLookup(target, origin, base) {   // base: rdapBase's answer, 
   const abuse = ents.find(e => has(e, 'abuse'));
   const ev = a => eventDate(o, a);
   const remark = (o.remarks || []).find(x => !x.title || /^description$/i.test(x.title));
-  const host = (() => { try { return new URL(r.url || url).hostname; } catch { return ''; } })();
+  const host = (() => { try { return new URL(at).hostname; } catch { return ''; } })();
 
   return {
     query, kind, found: true, source: 'rdap',
@@ -3933,7 +4007,8 @@ async function blockData(io, ip, p, pending) {
     let f = blockInFlight(ip);
     if (!f) {
       const base = await rdapBase({ ip, p }, io.url.origin);
-      if (!base || Date.now() < (blockPause[originOf(base)] || 0)) return null;   // no registry, or it just failed: no count, no request
+      // no registry, or it just failed (here, or went silent for whois: rdapFetch): no count, no request
+      if (!base || Date.now() < (blockPause[originOf(base)] || 0) || rdapSilent(base)) return null;
       if (!io.charged) await (io.extra ||= limit(io));                 // one count, shared with privacyData's
       f = blockInFlight(ip) || blockAsk(io, ip, p, base, key);         // another lookup may have asked meanwhile
     }
@@ -3995,9 +4070,9 @@ const DOMAIN_REGISTRIES = [[/verisign/, 'Verisign'], [/publicinterestregistry|\.
   [/afilias/, 'Identity Digital'], [/godaddy|registry\.co/, 'GoDaddy Registry'], [/cira\.ca/, 'CIRA'], [/auda|\.au\//, 'auDA']];
 const PRIVACY_RE = /redact|privacy|withheld|not disclosed|data protected|gdpr|proxy|statutory masking|non-public|not available/i;
 
-async function domainBase(name, origin) {               // longest matching TLD in IANA's dns.json
+async function domainBase(name, origin, by) {           // longest matching TLD in IANA's dns.json
   let best = null, bestLen = 0;
-  for (const s of await bootstrap('dns', origin)) {
+  for (const s of await bootstrap('dns', origin, by)) {
     for (const t of s.ranges) {
       const tl = String(t).toLowerCase();
       if ((name === tl || name.endsWith('.' + tl)) && tl.length > bestLen) { best = s.base; bestLen = tl.length; }
@@ -4035,8 +4110,10 @@ async function domainLookup(name, origin) {
     return { ...base0, found: false, reason: 'special',
       message: `.${tld} is reserved for local or special use, so no public registry holds ${name}.` };
   }
+  // IANA's list, the registry (each name tried) and the registrar's record share one deadline (rdapFetch).
+  const by = Date.now() + DEADLINE;
   let base, viaFallback = false;
-  try { base = await domainBase(name, origin); }
+  try { base = await domainBase(name, origin, by); }
   catch (e) {
     console.error('[ipterm] IANA bootstrap unavailable, using rdap.org:', plain(String((e && e.message) || e)));
     base = 'https://rdap.org/'; viaFallback = true;
@@ -4054,7 +4131,7 @@ async function domainLookup(name, origin) {
   let o = null, url = null, used = null;
   for (const c of tries) {
     url = base + 'domain/' + c;                          // c is a validated, punycoded host name
-    const r = await fetchRetry(url, RDAP_INIT, 'rdap');
+    const { r } = await rdapFetch(url, by, tld);
     if (r.status === 404 || r.status === 400) { if (r.body) r.body.cancel(); continue; }
     if (!r.ok) throw new Error('rdap ' + r.status);
     o = await readJson(r); used = c; break;
@@ -4066,15 +4143,16 @@ async function domainLookup(name, origin) {
         : `The ${registry || '.' + tld} registry has no record of ${tries[0]}. It is most likely unregistered (or reserved).` };
   }
 
-  // Follow the registrar's RDAP record when the registry links to it (best effort, short timeout).
+  // Follow the registrar's RDAP record when the registry links to it (best effort, short timeout: 4 seconds, or what
+  // is left of the deadline, and not at all with under half a second left).
   let rr = null;
   const rel = (Array.isArray(o.links) ? o.links : []).find(l => l && l.rel === 'related' && typeof l.href === 'string' &&
     (l.type ? /json/i.test(l.type) : /\/domain\//i.test(l.href)));
-  const relUrl = rel && safeRdapLink(rel.href);
-  if (relUrl && relUrl !== url) {
+  const relUrl = rel && safeRdapLink(rel.href), wait = Math.min(4000, by - Date.now());
+  if (relUrl && relUrl !== url && wait >= 500) {
     try {
       // redirect: 'manual' so the checks above can't be sidestepped by a redirect elsewhere
-      const r2 = await fetch(relUrl, { ...RDAP_INIT, redirect: 'manual', signal: AbortSignal.timeout(4000) });
+      const r2 = await fetch(relUrl, { ...RDAP_INIT, redirect: 'manual', signal: AbortSignal.timeout(wait) });
       if (r2.status === 200) rr = await readJson(r2, 500_000); else if (r2.body) r2.body.cancel();
     } catch (e) { /* registrar details are a bonus; the registry record stands on its own */ }
   }

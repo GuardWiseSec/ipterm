@@ -27,7 +27,7 @@
 //    without routing for a bot (bot: true), which a browser too old to send Sec-Fetch-* gets too, the terminal (cidr in
 //    public/app.js) asks /api/route once: that browser's request gets the routing and the page's own note (.route-bot)
 //    goes, so it never says "open the page in a browser" above routing; Googlebot's renderer gets a 403, or nothing at
-//    all when it obeys robots.txt, and the note stays, with no "network error" in its place.
+//    all when it obeys robots.txt, and the note stays, with no error line in its place.
 // 5. Links: the Worker's ASN page links ten of its largest prefixes (up to four IPv6) and lists the rest as text, its
 //    /cidr page has no links for "splits into" and "part of", and the terminal (public/app.js renderAsn, renderCidr,
 //    cidr and next, run against a stand-in DOM) makes the same ASN prefixes ordinary links and the rest nofollow, and
@@ -492,14 +492,14 @@ for (const [who, ua, px, want] of [
   ok(onPage === 1 && staticBot.length === (want === 200 ? 0 : 1),
     `${who}: the page's note for bots (.route-bot) ${want === 200 ? 'goes once routing has loaded' : 'stays, since no routing came'}: ${staticBot.length} of ${onPage} left`);
 }
-// A crawler that obeys robots.txt can't fetch /api/ at all, and getJson answers a network error: that must not
-// replace the page's honest note in the page the crawler renders.
+// A crawler that obeys robots.txt can't fetch /api/ at all, and getJson answers that it couldn't reach ipterm: that
+// must not replace the page's honest note in the page the crawler renders.
 printed = []; asked = [];
 staticBot = botNotes(`<article class="static" id="static"><p class="ln sys route-bot">Routing data skipped: RIPEstat isn't asked for automated visitors</p></article>`);
-await terminal(true, say, async () => ({ error: 'network error. Check your connection and try again.' }))
+await terminal(true, say, async () => ({ error: "Couldn't reach ipterm. Check your connection, or try again in a moment.", unreached: 'network' }))
   .cidr('', { data: globalThis.IPTERM_CIDR.calc('87.121.150.0/24'), route: { error: 'Routing data skipped', bot: true } });
 ok(staticBot.length === 1 && printed.length === 0,
-  `a crawler kept off /api/ by robots.txt: the page keeps its note for bots and nothing says "network error" (prints ${shown() || 'nothing'})`);
+  `a crawler kept off /api/ by robots.txt: the page keeps its note for bots and no error line takes its place (prints ${shown() || 'nothing'})`);
 for (const [what, route, live] of [
   ['a rate-limit note', { error: 'Routing data skipped: too many lookups from your address. Wait a minute and reload.' }, true],
   ['routing', { status: 'announced', prefix: '87.121.150.0/24', origins: [{ asn: 'AS64500' }], upstreams: [] }, true],

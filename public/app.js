@@ -467,15 +467,27 @@
   const SRC = { edge: 'cloudflare edge', 'ipinfo-lite': 'ipinfo lite', 'ipinfo-core': 'ipinfo core', ipinfo: 'ipinfo', demo: 'sample data' };
   const fmt = n => Number(n).toLocaleString('en-US');
 
+  // A request that got no answer: unreached is 'timeout' when ipterm took longer than GET_WAIT (this timer fired: a
+  // data source behind it is slow, and whois, dig and routing give up on theirs well before, DEADLINE in worker.js, to
+  // say which), else 'network' (the request failed, or the browser is offline). Only 'network' mentions the visitor's
+  // connection, and without blaming it: ipterm may be the one that can't be reached.
+  const GET_WAIT = 9000;
+  const NO_ANSWER = {
+    timeout: `No answer from ipterm within ${GET_WAIT / 1000} seconds: a registry or data source may be slow or down. Try again in a moment.`,
+    network: "Couldn't reach ipterm. Check your connection, or try again in a moment.",
+  };
   async function getJson(path, extra) {
-    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 9000);
+    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), GET_WAIT);
     try {
       const r = await fetch(path, { signal: ctrl.signal, headers: { accept: 'application/json', ...extra } });
       if (!(r.headers.get('content-type') || '').includes('json')) return { error: 'no-api' };
       const d = await r.json();
       if (r.ok || (d && d.found === false)) return d;
       return { error: (d && d.error) || 'HTTP ' + r.status };
-    } catch { return { error: 'network error. Check your connection and try again.' }; }
+    } catch {
+      const unreached = ctrl.signal.aborted && navigator.onLine !== false ? 'timeout' : 'network';
+      return { error: NO_ANSWER[unreached], unreached };
+    }
     finally { clearTimeout(t); }
   }
   // Addresses this page has seen as yours: the one you connect from (whoami, leaktest, port), your other IP version
@@ -624,7 +636,7 @@
     out.appendChild(d); scroll();
   }
   // A data source hiccup or the rate limit (not a typo): offer to run the same command again.
-  const RETRYABLE = /didn't respond|didn't finish|Too many (lookups|port checks)|network error|HTTP \d/;
+  const RETRYABLE = /didn't respond|didn't answer|didn't finish|Too many (lookups|port checks)|No answer from ipterm|Couldn't reach ipterm|HTTP \d/;
   function failedUpstream(mark) {
     for (let n = mark ? mark.nextSibling : out.firstChild; n; n = n.nextSibling)
       if (n.classList && n.classList.contains('err') && RETRYABLE.test(n.textContent)) return true;
@@ -2345,7 +2357,7 @@
   // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup),
   // unless the caller names one to prefer ("mal gmail.com" -> mail, not man).
   const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'grade', 'lookup', 'nslookup', 'asn', 'route', 'port', 'ping', 'traceroute', 'dmarc',
-    'share', 'copy', 'privacy', 'clear', 'history', 'keys', 'theme', 'crt', 'reset', 'access', 'api', 'about', 'ifconfig', 'ipconfig'];
+    'share', 'copy', 'privacy', 'clear', 'history', 'keys', 'theme', 'crt', 'reset', 'access', 'motion', 'screen', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
   function osa(a, b) {
     const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
@@ -2495,18 +2507,24 @@
     announce(msg); line(msg, 'sys');
   }
 
+  // Commands first, then what happens by itself, under its own heading: listed the same way, "motion" and
+  // "screen readers" read like commands, and typing them said "command not found".
   async function access() {
+    line('Commands you can type:', 'sys');
     await kv([
       ['theme contrast', 'near-white text on black, no glow. Turns on by itself if your system asks for more contrast'],
       ['theme paper', 'dark text on a light background'],
       ['crt off', 'keep your theme, drop the glow, scanlines and vignette'],
-      ['motion', 'animations are skipped when your system is set to reduce motion'],
-      ['screen readers', 'each result is announced as a one-line summary'],
       ['keys', 'keyboard shortcuts. Tab completes at the prompt; on an empty prompt it moves focus out of the terminal'],
       ['reset', 'forget these settings and go back to the defaults'],
     ]);
+    line('Automatic, nothing to type:', 'sys');
+    await kv([
+      ['reduced motion', 'animations are skipped when your system is set to reduce motion'],
+      ['screen readers', 'each result is announced as a one-line summary'],
+    ]);
     line('Settings are remembered on this device only.', 'sys');
-    announce('Accessibility options listed: theme contrast, theme paper, crt off.');
+    announce('Accessibility commands: theme contrast, theme paper, crt off, keys, reset. Reduced motion and screen reader summaries are automatic.');
   }
 
   /* ---------- share, copy and copy md ----------
@@ -2815,6 +2833,9 @@
       case 'crt': return crt(args[0]);
       case 'reset': return reset();
       case 'access': return access();
+      // The two automatic items access lists, for anyone who types them anyway.
+      case 'motion': return line('Nothing to switch: animations are skipped by themselves when your system is set to reduce motion. Type access for the settings you can change.', 'sys');
+      case 'screen': return line('Nothing to switch on: with a screen reader, each result is announced as a one-line summary by itself. Type access for the settings you can change.', 'sys');
       case 'copy': return copy(args[0]);
       case 'api': return apiHelp();
       // what people type out of habit in other terminals (and the prompts shown on the site's own pages)
@@ -3156,7 +3177,7 @@
       await render(p, d.ip, d, true);
       whoamiNext(d);
       await sponsor('whoami');
-    } else if (d && d.error && d.error !== 'no-api' && !/^network/.test(d.error)) {
+    } else if (d && d.error && d.error !== 'no-api' && !d.unreached) {
       setLive(true);                                     // the server is there but refused (e.g. rate limit)
       q.textContent = d.error; q.className = 'ln err'; announce(q.textContent);
       next(['retry', 'whoami', 'ask again']);

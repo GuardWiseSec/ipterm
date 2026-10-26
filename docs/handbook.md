@@ -809,11 +809,12 @@ that page (an address goes to the page of the route it is in). It shows, from [R
 - **upstreams and AS paths**: the networks just before the origin in the routes the collectors see, and two or
   three sample paths, the shortest through each of the most common of those networks.
 
-The data comes from five RIPEstat calls at most, cached for six hours (ten minutes when a part didn't answer):
+The data comes from five RIPEstat calls at most, cached for six hours (ten minutes when a part didn't answer), all
+within 6.5 seconds together (`DEADLINE`: each call gets its own limit or what is left, whichever is less):
 
 | Call | For | Limits |
 | --- | --- | --- |
-| `prefix-overview` | the route and its origins | 6 seconds, one retry, 200 KB |
+| `prefix-overview` | the route and its origins | 6 seconds, one retry while the deadline allows, 200 KB |
 | `routing-status` | visibility, first seen | one try, 4 seconds (it is slow for big aggregates), 100 KB |
 | `rpki-validation` | each origin (up to two) | one try, 5 seconds, 50 KB |
 | `bgp-state` | AS paths | one try, 5 seconds, 400 KB, three collectors only: `rrcs=00,01,11` |
@@ -843,8 +844,9 @@ type with TTLs (A, AAAA, CNAME, MX, NS, TXT, CAA, SOA, SRV, PTR, DS, DNSKEY, HTT
 reverse lookup. A null MX (`0 .`, RFC 7505: the domain accepts no mail, as on example.com) shows as
 `0 . (accepts no mail: null MX)`, and its JSON `value` is `"."`. Pages live at `/dns/<domain>` and
 `/dns/<domain>/<TYPE>`; curl gets JSON. Answers come from
-Cloudflare's public resolver (1.1.1.1) and are cached for five minutes. International domain names are
-converted to their punycode form automatically.
+Cloudflare's public resolver (1.1.1.1) and are cached for five minutes; one that gets no answer within 6.5 seconds
+is an error (see "When something fails"). International domain names are converted to their punycode form
+automatically.
 
 A DNS result for a domain with MX records or an SPF record links to its mail check (a `mail check` row and the
 `next:` line in the terminal, a link on the `/dns/...` page), and so does a domain's whois `next:` line. A domain's
@@ -1101,7 +1103,8 @@ registrar's own record for the abuse contact and any published owner details. Ow
 redacted for privacy since GDPR, so "not published" is normal. Subdomains are looked up as their
 registered domain (`whois blog.github.com` shows github.com). Domain records are cached for six hours.
 Every generic extension (.com, .org, .app, .xyz …) publishes RDAP, because ICANN requires it; some
-country extensions don't (.de and .io, for example), and ipterm says so instead of guessing.
+country extensions don't (.de and .io, for example), and ipterm says so instead of guessing. A registry server that
+doesn't answer within 6.5 seconds is named in the error, as theirs (see "When something fails").
 
 ### Recently registered blocks
 
@@ -1159,7 +1162,8 @@ What it costs, and the limits on it (`blockData()` in `src/worker.js`):
   other data was already cached, once a day per address and data center.
 - A registry that fails (a timeout, a 5xx, a 429) just leaves `block` out, and is then left alone for a minute, or
   ten after a 429 (per isolate, keyed by the server that failed: the one ARIN redirected to, when it did): lookups
-  of addresses it holds skip the date without waiting, counting or adding to its load until then. One bad record
+  of addresses it holds skip the date without waiting, counting or adding to its load until then, and do the same
+  for a minute after whois found the registry silent (`rdapFetch()`, see "When something fails"). One bad record
   (another 4xx, a reply that doesn't parse) just leaves `block` out and pauses nothing. When IANA's bootstrap file can't be read, lookups use rdap.org (which redirects to the
   registry), and the file isn't asked for again for a minute.
 - Bots (`isBot()`, see "Bots never spend the budgets") only read the cache: a page they fetch shows the line
@@ -1730,7 +1734,7 @@ The policy is a plain-language template, not legal advice.
 | High-contrast theme | `theme contrast`. Applied automatically when the system asks for more contrast and the visitor hasn't picked a theme |
 | Light theme | The **light / dark** switch in the header of every page, or `theme paper`. Switching back returns to whichever dark theme was in use |
 | CRT effects off | `crt off` (glow, scanlines, vignette) in any theme; `crt on` to restore |
-| Accessibility help | `access` command, or the "accessibility" link in the footer |
+| Accessibility help | `access` command, or the "accessibility" link in the footer. It lists the commands to type (theme contrast, theme paper, crt off, keys, reset) apart from what happens by itself (reduced motion, screen reader summaries); typing `motion` or `screen readers` explains that there is nothing to switch |
 | Back to defaults | `reset` forgets the saved theme and CRT setting, restoring automatic high-contrast detection |
 | Reduced motion | Follows the system setting: map zoom, pulse and label animation are skipped |
 | Keyboard | Tab completes at the prompt, but on an empty prompt it moves focus on, and Shift+Tab always does, so the terminal never traps the keyboard. The share buttons are real buttons with names (`Copy the address 8.8.8.8`) and say "copied" in place; screen readers hear what was copied, Tab's matches and Ctrl+R's finds |
@@ -1845,13 +1849,59 @@ Notes:
 Every call to an outside service (IPinfo, RIPEstat, the registries, DNS) has a time limit and is retried
 once after a short pause, so brief hiccups don't reach visitors. If IANA's registry directory is down,
 whois falls back to rdap.org. When a lookup still fails, the visitor sees "A data source didn't respond"
-and the Worker logs which service failed. Watch live with:
+(HTTP 502) and the Worker logs which service failed. Watch live with:
 
 ```sh
 npx wrangler tail
 ```
 
 Logs name the service and error only: never the visitor's IP or your API token.
+
+**Deadlines.** The terminal waits 9 seconds for an answer (`getJson()` in `public/app.js`). whois, dig and routing
+give up sooner, so the visitor gets the Worker's own words: the whole answer, every try and redirect included, gets
+`DEADLINE` (6.5 seconds, the `by` of `fetchRetry()` in `src/worker.js`). Within it a server that doesn't answer gets
+one try, not two: the retry comes only after a quick failure (a 5xx, a 429, a refused connection) with a second left.
+For whois, IANA's file gets 3 seconds of it at most (`BOOT_WAIT`), so rdap.org still has time when IANA is down, and
+the registrar's record 4 seconds or what is left. Until October 2026 a silent registry took about 17 seconds (8
+seconds, twice), so the terminal gave up first and said "network error. Check your connection".
+
+**A registry that doesn't answer is named** (`rdapFetch()`, `RegistrySilent`): "The .ng registry's whois server
+(rdap.nic.net.ng) didn't answer. That's on their side; try again later." for a domain, and "ARIN's whois server
+(rdap.arin.net) didn't answer. ..." for an address or AS number (the registry known by its server, as in `REGISTRY`;
+rdap.org by name, while IANA's list can't be read). It is the same in JSON, as text and on the `/whois/` page, with
+HTTP 502, and the report card's registration line says "the registry record couldn't be read (rdap.nic.net.ng didn't
+answer)". Redirects are followed by hand, three at most, so the server named is the one that stayed silent: NIC.br's
+when LACNIC sends a Brazilian address on, and the registry rdap.org sent the request to. A server that had 3 seconds
+or more and didn't answer is then left alone for a minute (`RDAP_PAUSE`, per isolate, keyed by its origin, as a
+lookup's registry date already was): whois, the report card and the registry date fail at once, in the same words,
+instead of each waiting the deadline out. A registry that answers within the deadline, however slowly, is not
+affected.
+
+**The terminal's own message** doesn't blame the visitor's connection when ipterm is slow. When its 9-second timer
+fires it says "No answer from ipterm within 9 seconds: a registry or data source may be slow or down. Try again in a
+moment."; when the request itself fails (a `TypeError`: no connection, or ipterm can't be reached), or the browser
+says it is offline, "Couldn't reach ipterm. Check your connection, or try again in a moment." Both, like the Worker's
+messages, offer `retry` (`RETRYABLE`).
+
+**Worst cases**, with every outside service silent and every retry firing (anything over 9 seconds ends in the
+terminal's own message):
+
+| Request | Longest wait | Made of |
+| --- | --- | --- |
+| whois (`/api/whois`, `/whois/<x>`) | 6.5 s | `DEADLINE` (about 17 s before) |
+| dig (`/api/dns`, `/dns/<name>`) | 6.5 s | `DEADLINE`, one try per record type (about 16 s before) |
+| routing (`/api/route`, a public `/cidr` page) | 6.5 s | `DEADLINE`: prefix-overview 6 s, the other calls what is left (about 17 s before) |
+| port check (`/api/port`) | 5 s | `PORT_TIMEOUT` |
+| a lookup (`/api/lookup`, `/<ip>`) | about 27 s | IPinfo Core 6 s, then Lite 8 s twice, then proxycheck.io 4 s and the registry date's 0.3 s |
+| leaktest (`/api/check`) | about 30 s | reverse DNS 3 s twice, then the lookup's Core and Lite, then up to 1.5 s for the Tor list |
+| asn (`/api/asn`, `/AS<n>`) | about 20 s | RIPEstat 8 s twice, then 4 s for the upstreams' names |
+| mail (`/api/mail`, `/mail/<domain>`) | about 25 s, more for a chain of slow SPF includes | DNS 4 s twice a query, in three rounds: the records; SPF includes, DMARC parents and the MTA-STS policy (5 s); DKIM |
+| grade (`/api/grade`, `/grade/<domain>`) | about 40 s | its DNS in two rounds (4 s twice each), then the mail check beside whois (6.5 s) and the site (5 s) |
+
+The last five have no deadline yet: each would need one through several parts, and one under 9 seconds would cut
+real answers short. RIPEstat's announced-prefixes takes 3.5 to 5.4 seconds for the largest networks (AS3356, AS174
+and AS13335, measured 2026-10-25), and IPinfo Lite is the fallback after a Core timeout of 6 seconds. Until then a
+silent IPinfo, resolver or RIPEstat there ends in the terminal's own message, which no longer blames the visitor.
 
 ## Local development
 
@@ -1862,8 +1912,9 @@ npx wrangler dev
 `sh tools/check_previews.sh` (link previews and crawlers get pages, scripts get JSON), `sh tools/check_go.sh`
 (address-bar search, hostile inputs included) and `node tools/check_block.mjs` (a lookup's registry date) run
 against it. `node tools/check_bots.mjs` (bots never spend the budgets), `node tools/check_https.mjs` (plain http),
-`node tools/check_vpnlists.mjs` (the known VPN servers) and `node tools/check_pages.mjs` (the ports sitemap, the IANA
-row, titles and descriptions, special-purpose ranges) need no server (Node 22.15 or later).
+`node tools/check_vpnlists.mjs` (the known VPN servers), `node tools/check_pages.mjs` (the ports sitemap, the IANA
+row, titles and descriptions, special-purpose ranges) and `node tools/check_timeouts.mjs` (silent registries and the
+terminal's time limit) need no server (Node 22.15 or later).
 
 Under `wrangler dev` the first lookup starts the VPN lists' first download (the Durable Object's alarm), from the
 providers' real lists. To run the cron trigger itself, start it with `npx wrangler dev --test-scheduled` and ask
@@ -1924,7 +1975,7 @@ an uncached public `/cidr` page get the calculation and the "Routing data skippe
 the routing from the cache once a browser navigation has looked it up; the terminal's `/api/route`, curl and a script
 still ask RIPEstat, and so does the terminal on the page a browser too old to send `Sec-Fetch-*` gets
 (`bot: true`) and then drops the page's `.route-bot` note, while Googlebot's renderer gets the 403 (or, obeying
-robots.txt, no answer) and the note stays, never a "network error" in its place; a private `/cidr` page is the same for a bot and a person
+robots.txt, no answer) and the note stays, never an error line in its place; a private `/cidr` page is the same for a bot and a person
 and asks nothing; a bot's `/route` asks nothing (a redirect, or a 403 for JSON and text); and the three public
 `/cidr` pages in `SITEMAP_PATHS` keep live routing for bots, and only they. Then the links: the Worker's ASN page links ten of its largest prefixes (up to four
 IPv6) and lists the rest as text, its `/cidr` page has no "splits into" or "part of" links, and the terminal's
@@ -2006,6 +2057,21 @@ page (those fields are null), and `staticBlock()` prints only the Worker's own `
 else. Give it IANA's CSV files (`node tools/check_pages.mjs service-names-port-numbers.csv
 iana-ipv4-special-registry-1.csv iana-ipv6-special-registry-1.csv`, from iana.org/assignments) and it also checks
 every port's names and the registry copy against them.
+
+`node tools/check_timeouts.mjs` (Node 22.15 or later) checks the deadlines (see "When something fails"), with no
+server and no network: the whole Worker in Node with `fetch` stubbed, where a server that never answers holds each
+request until the request's own time limit aborts it. The deadlines are real, so it takes about 7 seconds, the slow
+cases side by side. whois of unijos.edu.ng, whose registry server (rdap.nic.net.ng) never answers, must be a 502
+within the deadline, well inside the terminal's 9 seconds, after one request to that server, naming the .ng registry
+and its server; then the text answer, the page (and the `initial.error` the terminal boots from) and the report
+card's registration line say the same at once, with no new request, since the server is left alone for a minute. A
+silent ARIN must be named ARIN's, a silent NIC.br behind LACNIC's redirect NIC.br's, and a registry that answers in 2
+seconds, or after one 503, still gives its record; with IANA's file silent, whois of an AS number gets its record
+through rdap.org after IANA's 3 seconds. dig and routing with a silent resolver or RIPEstat must be a 502
+within the deadline, one try per query. Then the terminal's `getJson()` and `RETRYABLE`, read out of `public/app.js`:
+its own abort says "No answer from ipterm within 9 seconds", with no word about the connection; a `TypeError`, or an
+abort while the browser is offline, "Couldn't reach ipterm"; answers that came pass as before; and these messages and
+the Worker's offer `retry`, while a typo doesn't.
 
 ## License
 
