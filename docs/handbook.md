@@ -1104,7 +1104,8 @@ redacted for privacy since GDPR, so "not published" is normal. Subdomains are lo
 registered domain (`whois blog.github.com` shows github.com). Domain records are cached for six hours.
 Every generic extension (.com, .org, .app, .xyz …) publishes RDAP, because ICANN requires it; some
 country extensions don't (.de and .io, for example), and ipterm says so instead of guessing. A registry server that
-doesn't answer within 6.5 seconds is named in the error, as theirs (see "When something fails").
+doesn't answer within 6.5 seconds, can't be reached or answers with a failure is named in the error, as theirs (see
+"When something fails").
 
 ### Recently registered blocks
 
@@ -1161,7 +1162,8 @@ What it costs, and the limits on it (`blockData()` in `src/worker.js`):
   `Cache-Control: no-store`, so a browser asks again rather than reusing it. In practice the wait shows on a lookup whose
   other data was already cached, once a day per address and data center.
 - A registry that fails (a timeout, a 5xx, a 429) just leaves `block` out, and is then left alone for a minute, or
-  ten after a 429 (per isolate, keyed by the server that failed: the one ARIN redirected to, when it did): lookups
+  ten after a 429 (per isolate, keyed by the server that failed: the one ARIN redirected to, when that one answered
+  with the failure, and otherwise the one asked): lookups
   of addresses it holds skip the date without waiting, counting or adding to its load until then, and do the same
   for a minute after whois found the registry silent (`rdapFetch()`, see "When something fails"). One bad record
   (another 4xx, a reply that doesn't parse) just leaves `block` out and pauses nothing. When IANA's bootstrap file can't be read, lookups use rdap.org (which redirects to the
@@ -1849,7 +1851,7 @@ Notes:
 Every call to an outside service (IPinfo, RIPEstat, the registries, DNS) has a time limit and is retried
 once after a short pause, so brief hiccups don't reach visitors. If IANA's registry directory is down,
 whois falls back to rdap.org. When a lookup still fails, the visitor sees "A data source didn't respond"
-(HTTP 502) and the Worker logs which service failed. Watch live with:
+(HTTP 502; whois names the registry server instead, below) and the Worker logs which service failed. Watch live with:
 
 ```sh
 npx wrangler tail
@@ -1865,17 +1867,43 @@ For whois, IANA's file gets 3 seconds of it at most (`BOOT_WAIT`), so rdap.org s
 the registrar's record 4 seconds or what is left. Until October 2026 a silent registry took about 17 seconds (8
 seconds, twice), so the terminal gave up first and said "network error. Check your connection".
 
-**A registry that doesn't answer is named** (`rdapFetch()`, `RegistrySilent`): "The .ng registry's whois server
-(rdap.nic.net.ng) didn't answer. That's on their side; try again later." for a domain, and "ARIN's whois server
-(rdap.arin.net) didn't answer. ..." for an address or AS number (the registry known by its server, as in `REGISTRY`;
-rdap.org by name, while IANA's list can't be read). It is the same in JSON, as text and on the `/whois/` page, with
-HTTP 502, and the report card's registration line says "the registry record couldn't be read (rdap.nic.net.ng didn't
-answer)". Redirects are followed by hand, three at most, so the server named is the one that stayed silent: NIC.br's
-when LACNIC sends a Brazilian address on, and the registry rdap.org sent the request to. A server that had 3 seconds
-or more and didn't answer is then left alone for a minute (`RDAP_PAUSE`, per isolate, keyed by its origin, as a
-lookup's registry date already was): whois, the report card and the registry date fail at once, in the same words,
-instead of each waiting the deadline out. A registry that answers within the deadline, however slowly, is not
-affected.
+**A registry that fails is named** (`rdapFetch()`, `RegistryFailed`), whatever the failure. One that doesn't answer
+within the deadline: "The .ng registry's whois server (rdap.nic.net.ng) didn't answer. That's on their side; try again
+later." for a domain, and "ARIN's whois server (rdap.arin.net) didn't answer. ..." for an address or AS number (the
+registry known by its server, as in `REGISTRY`; rdap.org by name, while IANA's list can't be read). One that still
+fails after the retry says how: "ARIN's whois server (rdap.arin.net) failed to answer (HTTP 525). That's on their side;
+try again in a moment." for an answer that is a failure (a 5xx, Cloudflare's 525 for a TLS handshake that failed, a
+429, or another status whois can't read), and "AFRINIC's whois server (rdap.afrinic.net) couldn't be reached. ..." for
+a refused or reset connection. The answer's body is read within the same deadline (`rdapFetch()`'s `json()`), and is
+the server's too: one cut off after its headers "couldn't be reached", and one still unfinished at the deadline "didn't
+answer". It is the same in JSON, as text and on the `/whois/` page, always with HTTP 502, and the report card's
+registration line says "the registry record couldn't be read (rdap.nic.net.ng didn't answer)", or "(rdap.arin.net
+failed to answer: HTTP 525)". The logs get the status and the server's host only: "rdap 525 from rdap.arin.net",
+"rdap: couldn't reach rdap.afrinic.net", "rdap: no answer from rdap.nic.net.ng". An answer that isn't JSON, or is past
+`readJson()`'s size cap, is one bad record rather than the registry failing, and gets the general "A data source
+didn't respond. Try again in a moment."
+
+Redirects are left to `fetch`, which follows them itself, so the server named is the one ipterm asked, from IANA's
+list, unless an answer came back after a redirect: then it is the server that answered (the answer's `url`), RIPE
+NCC's when ARIN sends a transferred block on and RIPE NCC answers 503. A server that goes silent behind a redirect is
+reported as the one asked, since redirects are no longer followed by hand: LACNIC, not NIC.br, when LACNIC sends a
+Brazilian address on and NIC.br doesn't answer, and rdap.org, not the registry it sent the request to.
+
+Only silence pauses a server. One that had 3 seconds or more and didn't answer (or didn't finish its answer) is then
+left alone for a minute (`RDAP_PAUSE`, per isolate, keyed by the origin ipterm asked, as a lookup's registry date
+already was): whois, the report card and the registry date fail at once, in the same words, instead of each waiting
+the deadline out. That is the server asked even when the silent one is behind it, so while NIC.br is silent LACNIC's
+own addresses fail at once too, for that minute. A 5xx, a 525, a 429, a refused connection or an answer cut off pauses
+nothing for whois (the registry date keeps its own pause, see "Recently registered blocks"), so one bad handshake
+doesn't block a minute of lookups. A registry that answers within the deadline, however slowly, is not affected.
+
+From 25 October 2026 `rdapFetch()` followed redirects by hand (`redirect: 'manual'`, three at most), so that the
+silent server behind a redirect could be named. On Cloudflare's network about 45% of fresh ARIN lookups then failed
+with HTTP 525 (Cloudflare's TLS handshake with rdap.arin.net, an old Apache and OpenSSL 1.0.2k, failing), against 3 to
+11% while `fetch` followed redirects itself, and the release was rolled back. ARIN has some trouble of its own, but
+the manual redirects were the main change in how it was asked (the other, the deadline, stays). The 525s don't show
+locally: `wrangler dev` and Node connect to ARIN directly, so `tools/check_timeouts.mjs` checks the logic only. Try a change to
+how registries are asked on a preview address, against fresh ARIN lookups, before it serves visitors.
 
 **The terminal's own message** doesn't blame the visitor's connection when ipterm is slow. When its 9-second timer
 fires it says "No answer from ipterm within 9 seconds: a registry or data source may be slow or down. Try again in a
@@ -2058,17 +2086,26 @@ else. Give it IANA's CSV files (`node tools/check_pages.mjs service-names-port-n
 iana-ipv4-special-registry-1.csv iana-ipv6-special-registry-1.csv`, from iana.org/assignments) and it also checks
 every port's names and the registry copy against them.
 
-`node tools/check_timeouts.mjs` (Node 22.15 or later) checks the deadlines (see "When something fails"), with no
-server and no network: the whole Worker in Node with `fetch` stubbed, where a server that never answers holds each
-request until the request's own time limit aborts it. The deadlines are real, so it takes about 7 seconds, the slow
-cases side by side. whois of unijos.edu.ng, whose registry server (rdap.nic.net.ng) never answers, must be a 502
-within the deadline, well inside the terminal's 9 seconds, after one request to that server, naming the .ng registry
-and its server; then the text answer, the page (and the `initial.error` the terminal boots from) and the report
-card's registration line say the same at once, with no new request, since the server is left alone for a minute. A
-silent ARIN must be named ARIN's, a silent NIC.br behind LACNIC's redirect NIC.br's, and a registry that answers in 2
-seconds, or after one 503, still gives its record; with IANA's file silent, whois of an AS number gets its record
-through rdap.org after IANA's 3 seconds. dig and routing with a silent resolver or RIPEstat must be a 502
-within the deadline, one try per query. Then the terminal's `getJson()` and `RETRYABLE`, read out of `public/app.js`:
+`node tools/check_timeouts.mjs` (Node 22.15 or later) checks the deadlines and the registry messages (see "When
+something fails"), with no server and no network: the whole Worker in Node with `fetch` stubbed, where a server that
+never answers holds each request until the request's own time limit aborts it, and redirects are followed as the
+platform's `fetch` follows them (unless a request says `redirect: 'manual'`). The deadlines are real, so it takes about
+9 seconds, the slow cases side by side. First the quick failures, each a 502 well within the deadline after one
+retry, naming the registry in its own words: ARIN answering 525 twice ("failed to answer (HTTP 525)", in JSON, as text
+and on the page), the .ng registry 503 twice (and the report card's line), AFRINIC resetting the connection twice
+("couldn't be reached"), APNIC 429 twice, and ARIN's redirect to a RIPE NCC server that answers 503 (RIPE NCC's, the
+server that answered). ARIN's answer cut off after its headers "couldn't be reached" too (at once: the body gets no
+retry), while a maintenance page instead of JSON is one bad record, with the general message. None of them pauses its
+server: ARIN answering 525 and then the record, right after, gives the record through the retry, and AFRINIC is asked
+again. LACNIC's redirect to a NIC.br that answers gives NIC.br's record, and no RDAP request may say
+`redirect: 'manual'`. Then whois of unijos.edu.ng, whose registry server (rdap.nic.net.ng) never answers, must be a 502 within the deadline, well inside the terminal's 9 seconds, after one
+request to that server, naming the .ng registry and its server; then the text answer, the page (and the
+`initial.error` the terminal boots from) and the report card's registration line say the same at once, with no new
+request, since the server is left alone for a minute. A silent ARIN must be named ARIN's, a silent NIC.br behind
+LACNIC's redirect LACNIC's (the server asked, then left alone), a server that sends its headers and then nothing
+"didn't answer" (and is left alone too), and a registry that answers in 2 seconds, or after one 503, still gives its
+record; with IANA's file silent, whois of an AS number gets its record through rdap.org after IANA's 3 seconds. dig and routing with a silent resolver or RIPEstat must be a 502 within the deadline, one try per
+query. Then the terminal's `getJson()` and `RETRYABLE`, read out of `public/app.js`:
 its own abort says "No answer from ipterm within 9 seconds", with no word about the connection; a `TypeError`, or an
 abort while the browser is offline, "Couldn't reach ipterm"; answers that came pass as before; and these messages and
 the Worker's offer `retry`, while a typo doesn't.

@@ -636,7 +636,7 @@
     out.appendChild(d); scroll();
   }
   // A data source hiccup or the rate limit (not a typo): offer to run the same command again.
-  const RETRYABLE = /didn't respond|didn't answer|didn't finish|Too many (lookups|port checks)|No answer from ipterm|Couldn't reach ipterm|HTTP \d/;
+  const RETRYABLE = /didn't respond|didn't answer|couldn't be reached|didn't finish|Too many (lookups|port checks)|No answer from ipterm|Couldn't reach ipterm|HTTP \d/;
   function failedUpstream(mark) {
     for (let n = mark ? mark.nextSibling : out.firstChild; n; n = n.nextSibling)
       if (n.classList && n.classList.contains('err') && RETRYABLE.test(n.textContent)) return true;

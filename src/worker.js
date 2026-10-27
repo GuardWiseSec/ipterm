@@ -1641,8 +1641,9 @@ async function guard(step, ok, fail = (msg, status) => json({ error: msg }, stat
     }
     // Visible with `npx wrangler tail` (or Workers Logs if enabled). Never logs the visitor's IP or the API token.
     console.error('[ipterm] upstream failure:', plain(String((e && e.message) || e)).replace(/token=[^&\s]+/g, 'token=***'));
-    // A registry server that didn't answer (rdapFetch) is named, and the fault put where it lies.
-    return fail(e instanceof RegistrySilent ? e.text : 'A data source didn\'t respond. Try again in a moment.', 502);
+    // A registry server that failed (RegistryFailed: silent, unreachable or a failed answer) is named, and the fault put
+    // where it lies.
+    return fail(e instanceof RegistryFailed ? e.text : 'A data source didn\'t respond. Try again in a moment.', 502);
   }
 }
 
@@ -3648,10 +3649,10 @@ async function gradeData(io, name) {
   const dns = await gradeDns(name);
   if (dns.status !== 'NOERROR' && !dns.broken) return { ...(dns._ttl ? { _ttl: dns._ttl } : {}), domain: name, status: dns.status, grade: null, subrequests: dns.subrequests };
   // A rate limit in a part fails the whole card (429); any other failure only leaves that part unchecked. A registry
-  // server that didn't answer (rdapFetch) is named.
+  // server that failed (RegistryFailed) is named.
   const part = p => p.then(v => v, e => {
     if (e instanceof RateLimited) throw e;
-    return { error: e instanceof RegistrySilent ? `${e.host} didn't answer` : "a data source didn't respond" };
+    return { error: e instanceof RegistryFailed ? e.brief : "a data source didn't respond" };
   });
   const [mail, registration, web] = await Promise.all([
     dns.broken ? null : part(mailCheck(io, name, null)),
@@ -3829,51 +3830,64 @@ const REGISTRY = { idnic: 'IDNIC', jpnic: 'JPNIC', krnic: 'KRNIC', twnic: 'TWNIC
 const RDAP_INIT = { headers: { accept: 'application/rdap+json, application/json' } };
 
 // One RDAP request within its exchange's deadline (by, a Date.now() time: DEADLINE from the start of the lookup, IANA's
-// file included). Redirects are followed here, three at most and to http or https only, as fetch would, so a server
-// that doesn't answer is known by name: ARIN sends a transferred block on to its registry, LACNIC sends Brazil's
-// addresses to NIC.br, and rdap.org sends everything on. A server still silent at the deadline gets no second try
-// (fetchRetry): RegistrySilent names it, and one that had RDAP_FAIR or more to answer is then taken as silent for
-// RDAP_PAUSE (per isolate, keyed by its origin), so the requests after it fail at once instead of each waiting the
-// deadline out. tld: a domain's, whose registry the message names. Returns { r, url }: the answer and the server it
-// came from.
+// file included). fetch follows redirects itself (RDAP_INIT, its default): ARIN sends a transferred block on to its
+// registry, LACNIC sends Brazil's addresses to NIC.br, and rdap.org sends everything on. They are not followed by hand:
+// with redirect: 'manual', briefly in October 2026, far more of Cloudflare's TLS handshakes with ARIN failed (see
+// "When something fails" in the handbook). So a server that stays silent behind a redirect is reported as the one
+// ipterm asked, from IANA's list (LACNIC, not NIC.br), while one that answered after a redirect, even with a failure, is
+// known by its answer's URL (r.url). A server still silent at the deadline gets no second try (fetchRetry):
+// RegistryFailed names it, and one that had RDAP_FAIR or more to answer is then taken as silent for RDAP_PAUSE (per
+// isolate, keyed by the origin asked), so the requests after it fail at once instead of each waiting the deadline out.
+// A quick failure (a 5xx such as a 525, a 429, a refused or reset connection) gets fetchRetry's one retry and pauses
+// nothing: one bad handshake doesn't hold up a minute of lookups. A connection that still fails is a RegistryFailed
+// here; an answer that is still a failure is one in the lookup that reads it (rdapLookup, domainLookup). tld: a
+// domain's, whose registry the message names. Returns { r, url, json }: the answer, the server it came from, and
+// json(max), its body read (readJson) within the same deadline, since the fetch's time limit covers the body too. A
+// body that fails is the server's failure as well: one still unread at the deadline is that server gone silent (named,
+// and paused as above), and one cut off is a lost connection; JSON that doesn't parse, or a body past the cap, is one
+// bad record and stays an error of its own.
 const RDAP_FAIR = 3000, RDAP_PAUSE = 60_000;
 const rdapQuiet = {};                    // per isolate: RDAP server (origin) -> until when it is taken as silent
 const rdapSilent = u => Date.now() < (rdapQuiet[originOf(u)] || 0);
 async function rdapFetch(url, by, tld = null) {
-  for (let hop = 0; hop < 4; hop++) {
-    if (rdapSilent(url)) throw new RegistrySilent(url, tld);
-    const t0 = Date.now();
-    let r;
-    try { r = await fetchRetry(url, { ...RDAP_INIT, redirect: 'manual' }, 'rdap', DEADLINE, by); } catch (e) {
-      if (!e.timedOut) throw Object.assign(e, { origin: originOf(url) });
-      if (Date.now() - t0 >= RDAP_FAIR) rdapQuiet[originOf(url)] = Date.now() + RDAP_PAUSE;
-      throw new RegistrySilent(url, tld);
-    }
-    const to = r.status >= 300 && r.status < 400 ? r.headers.get('location') : null;
-    if (!to) return { r, url };
-    if (r.body) r.body.cancel();
-    let next = null;
-    try { next = new URL(to, url); } catch {}
-    const odd = !next || !/^https?:$/.test(next.protocol) ? 'a redirect that is not http(s)' : hop === 3 ? 'too many redirects' : null;
-    if (odd) throw Object.assign(new Error('rdap: ' + odd), { origin: originOf(url) });   // the server that sent it
-    url = next.href;
+  if (rdapSilent(url)) throw new RegistryFailed(url, tld);
+  const t0 = Date.now();
+  const silent = at => {                 // still silent at the deadline: paused if it had RDAP_FAIR or more
+    if (Date.now() - t0 >= RDAP_FAIR) rdapQuiet[originOf(url)] = Date.now() + RDAP_PAUSE;
+    return new RegistryFailed(at, tld);
+  };
+  let r;
+  try { r = await fetchRetry(url, RDAP_INIT, 'rdap', DEADLINE, by); } catch (e) {
+    throw e.timedOut ? silent(url) : new RegistryFailed(url, tld, 0);
   }
+  const at = r.url || url;
+  const json = max => readJson(r, max).catch(e => {
+    throw isTimeout(e) ? silent(at) : e instanceof SyntaxError || /too large/.test(e && e.message) ? e : new RegistryFailed(at, tld, 0);
+  });
+  return { r, url: at, json };
 }
 
-// A registry server that didn't answer within the deadline (rdapFetch). Its message is for the logs and for blockAsk,
-// which pauses the registry date after an "rdap: " failure. text is what whois says, in JSON, as text and on the
-// page alike: which server, whose (a domain's registry by its TLD, an address's or AS number's by REGISTRY), and that
-// the fault is theirs, not the visitor's.
-class RegistrySilent extends Error {
-  constructor(url, tld) {
+// A registry server that failed whois: status null for one that didn't answer, or finish its answer, within the
+// deadline (rdapFetch), 0 for one that couldn't be reached (a refused or reset connection, after the retry, or an
+// answer cut off partway), or the HTTP status of an answer the lookup can't use (a 5xx such as Cloudflare's 525 for a
+// failed TLS handshake, or a 429, after the retry; or another 4xx). url: the server asked, or the one that answered
+// after a redirect. Its message, for the logs and for blockAsk (which pauses the registry date after an "rdap: "
+// failure, a 5xx or a 429), holds the status and the host only.
+// text is what whois says, in JSON, as text and on the page alike: which server, whose (a domain's registry by its
+// TLD, an address's or AS number's by REGISTRY), and that the fault is theirs, not the visitor's; brief is the report
+// card's registration line (the host and what it did).
+class RegistryFailed extends Error {
+  constructor(url, tld, status = null) {
     const host = (() => { try { return new URL(url).hostname; } catch { return String(url); } })();
-    super('rdap: no answer from ' + host);
+    super(status ? `rdap ${status} from ${host}` : status === 0 ? `rdap: couldn't reach ${host}` : 'rdap: no answer from ' + host);
     this.origin = originOf(url);
     this.host = host;
     const rir = Object.keys(REGISTRY).find(k => host.includes(k));
     const who = host === 'rdap.org' ? "rdap.org, which ipterm asks while IANA's list of registries can't be read,"
       : tld ? `The .${tld} registry's whois server (${host})` : `${rir ? REGISTRY[rir] + "'s" : "The registry's"} whois server (${host})`;
-    this.text = `${who} didn't answer. That's on their side; try again later.`;
+    const what = status ? 'failed to answer' : status === 0 ? "couldn't be reached" : "didn't answer";
+    this.text = `${who} ${what}${status ? ` (HTTP ${status})` : ''}. That's on their side; try again ${status === null ? 'later' : 'in a moment'}.`;
+    this.brief = `${host} ${what}${status ? `: HTTP ${status}` : ''}`;
   }
 }
 
@@ -3939,10 +3953,10 @@ async function rdapLookup(target, origin, base) {   // base: rdapBase's answer, 
   if (base === undefined) base = await rdapBase(target, origin, by);
   if (!base) return { query, kind, found: false };
   const url = base + tail;
-  const { r, url: at } = await rdapFetch(url, by);     // at: the server that answered (after any redirect)
+  const { r, url: at, json } = await rdapFetch(url, by);   // at: the server that answered (after any redirect)
   if (r.status === 404) return { query, kind, found: false };
-  if (!r.ok) throw Object.assign(new Error('rdap ' + r.status), { origin: originOf(at) });
-  const o = await readJson(r);
+  if (!r.ok) { if (r.body) r.body.cancel(); throw new RegistryFailed(at, null, r.status); }
+  const o = await json();
 
   const ents = flatEntities(o.entities);
   const str = vstr, has = hasRole;
@@ -4017,12 +4031,13 @@ async function blockData(io, ip, p, pending) {
 }
 
 // Asks the registry for blockData: the answer fills whois's cache entry. A registry that is unavailable (a 429, a 5xx,
-// a timeout or no connection) is paused, keyed by the server that failed: the one ARIN redirected to, when it did. One
-// bad record (another 4xx, JSON that doesn't parse) pauses nothing.
+// a timeout or no connection) is paused, keyed by the server that failed (RegistryFailed's origin): the one ARIN
+// redirected to, when that one answered with the failure, and the one asked otherwise. One bad record (another 4xx,
+// JSON that doesn't parse) pauses nothing.
 function blockAsk(io, ip, p, base, key) {
   const f = { at: Date.now() };
   f.fresh = rdapLookup({ ip, p }, io.url.origin, base).then(d => { cachePut(io, key, d, 86400); return d; }, e => {
-    const why = String((e && e.message) || e), down = /^rdap (?:(429)|5\d\d)$|^rdap: /.exec(why);
+    const why = String((e && e.message) || e), down = /^rdap (?:(429)|5\d\d) |^rdap: /.exec(why);
     const minutes = !down ? 0 : down[1] ? 10 : 1, at = (e && e.origin) || originOf(base);
     if (minutes) blockPause[at] = Date.now() + minutes * 60_000;
     console.error(`[ipterm] registry date skipped (${plain(why)})` + (minutes ? `; ${at} left alone for ${minutes} minute${minutes > 1 ? 's' : ''}` : ''));
@@ -4131,10 +4146,10 @@ async function domainLookup(name, origin) {
   let o = null, url = null, used = null;
   for (const c of tries) {
     url = base + 'domain/' + c;                          // c is a validated, punycoded host name
-    const { r } = await rdapFetch(url, by, tld);
+    const { r, url: at, json } = await rdapFetch(url, by, tld);
     if (r.status === 404 || r.status === 400) { if (r.body) r.body.cancel(); continue; }
-    if (!r.ok) throw new Error('rdap ' + r.status);
-    o = await readJson(r); used = c; break;
+    if (!r.ok) { if (r.body) r.body.cancel(); throw new RegistryFailed(at, tld, r.status); }
+    o = await json(); used = c; break;
   }
   const registry = viaFallback ? null : registryName(base);
   if (!o) {
