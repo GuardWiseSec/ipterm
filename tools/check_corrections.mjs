@@ -345,7 +345,7 @@ const realDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s || '') && new Date(s + 'T00:0
 ok(list.length >= 7 && list.every(c => realDate(c.date) && typeof c.text === 'string' && c.text.trim() && c.pages.every(p => /^\/\S*$/.test(p))),
   `${list.length} entries, each with a real date (not in the future), its text and its pages`);
 ok(list.every((c, i) => !i || list[i - 1].date >= c.date), 'newest first');
-ok(['2026-10-25', '2026-10-27', '2026-10-28'].every(d => list.some(c => c.date === d)), 'seeded with 2026-10-25, 2026-10-27 and 2026-10-28');
+ok(['2026-10-25', '2026-10-27', '2026-10-29'].every(d => list.some(c => c.date === d)), 'seeded with 2026-10-25, 2026-10-27 and 2026-10-29');
 ok(list.every(c => !/@|thanks|thank you|reported by|credit/i.test(c.text) && /^[ -~]*$/.test(c.text)), 'names no one (no handles, no thanks), in plain ASCII');
 // Entries that give numbers or quote the site say what it does: the port pages' (public/ports.js), the line's pages
 // (the ones above that have it), and the terminal's own words when it gets no answer (NO_ANSWER in public/app.js).

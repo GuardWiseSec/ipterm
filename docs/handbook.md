@@ -1840,7 +1840,7 @@ issue already credits whoever reported it. Browsers and crawlers get a page in t
 scripts plain text wrapped to 80 columns with each page's full address (`changesText()`), and `?format=json` the same
 list as JSON (`changesRoute()`). It makes no outside request, is in `/sitemap-pages.xml`, `/help`, `public/llms.txt`
 and the footer, and `public/changes.js` is served as a static file too (`run_worker_first`). When a change alters the port pages, move
-`PORTS.updated` with it (see "Port checker"); the corrections line did, to 2026-10-28.
+`PORTS.updated` with it (see "Port checker"); the corrections line did, to 2026-10-29, the day it went live.
 
 `node tools/check_corrections.mjs` checks all of this with no server (see "Local development").
 
