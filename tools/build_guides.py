@@ -3,17 +3,19 @@
 Run from the project root:  python3 tools/build_guides.py
 Edit the GUIDES list below, then re-run and redeploy. %ORIGIN% is replaced with the site's
 address by the Worker when a page is served, so canonical links and structured data stay correct
-on any domain.
+on any domain, and each guide's <!--FIX--> with its "Something wrong here?" line (fixLine() in
+src/worker.js; nothing on a copy run by someone else).
 
 Each guide's desc is its blurb on /guides; meta, when there is one, is a shorter version (about 155
-characters) for search results, og:description and the Article's structured data.
+characters) for search results, og:description and the Article's structured data. updated, when there is
+one, is the day that guide's text last changed (UPDATED otherwise): its "Updated" line and dateModified.
 """
+import datetime
 import html
 import json
 from pathlib import Path
 
 UPDATED = '2026-10-12'
-UPDATED_LABEL = 'October 12, 2026'
 OUT = Path(__file__).resolve().parent.parent / 'public'
 
 def _subnet_table():
@@ -162,7 +164,11 @@ GUIDES = [
 
 <h2>Showing websites a different address</h2>
 <p>A <strong>VPN</strong> routes your traffic through the VPN provider, so websites see the provider's address instead of yours. Your internet provider then sees only that you're connected to the VPN, while the VPN provider can see where your traffic goes, so choose one you trust. <strong>Tor</strong> spreads traffic across volunteer relays for stronger anonymity at the cost of speed. Neither changes what you reveal by signing in to accounts.</p>
+
+<h2>Who looks up the sites you visit</h2>
+<p>Before your device connects to a site, a <strong>DNS resolver</strong> looks up the site's address, so the resolver sees the names of the sites you visit. Devices use their internet provider's resolver unless they, the router or a VPN are set to use another, such as one of the <a href="/public-dns">public DNS resolvers</a>. <a href="/leaktest">leaktest</a> shows which one your browser actually uses.</p>
 ''',
+        'updated': '2026-10-28',
         'try': 'Run <a href="/" data-cmd="whoami">whoami</a> to see exactly what your own address shows.',
         'related': ['private-ip-ranges', 'what-is-an-asn'],
     },
@@ -200,7 +206,8 @@ GUIDES = [
 <h2>Which one are you using?</h2>
 <p>Many connections are <strong>dual-stack</strong>: they have both an IPv4 and an IPv6 address, and your device picks whichever connects faster for each site. <a href="/" data-cmd="whoami">whoami</a> shows the address your browser used to reach ipterm, marked IPv4 or IPv6. Neither version is inherently faster; the difference comes from the route your traffic takes.</p>
 ''',
-        'try': 'Look up <a href="/2001:4860:4860::8888">2001:4860:4860::8888</a> to see an IPv6 address expanded and its /64 prefix.',
+        'try': 'Look up <a href="/2001:4860:4860::8888">2001:4860:4860::8888</a>, Google Public DNS over IPv6, to see an IPv6 address expanded and its /64 prefix. <a href="/public-dns">Public DNS resolvers</a> lists the IPv4 and IPv6 addresses of the others.',
+        'updated': '2026-10-28',
         'related': ['private-ip-ranges', 'what-is-an-asn'],
     },
     {
@@ -324,14 +331,20 @@ def plain(s):
     return html.unescape(s.replace('<em>', '').replace('</em>', ''))
 
 
+def date_label(day):
+    d = datetime.date.fromisoformat(day)
+    return f'{d:%B} {d.day}, {d.year}'
+
+
 def guide_page(g):
     path = f"/guides/{g['slug']}"
+    updated = g.get('updated', UPDATED)
     words = len(plain(g['body']).split()) + len(plain(g['lede']).split())
     minutes = max(2, round(words / 220))
     ld = {
         '@context': 'https://schema.org',
         '@graph': [
-            {'@type': 'Article', 'headline': g['title'], 'description': g.get('meta', g['desc']), 'datePublished': UPDATED, 'dateModified': UPDATED,
+            {'@type': 'Article', 'headline': g['title'], 'description': g.get('meta', g['desc']), 'datePublished': UPDATED, 'dateModified': updated,
              'author': {'@type': 'Organization', 'name': 'ipterm'}, 'publisher': {'@type': 'Organization', 'name': 'ipterm'},
              'mainEntityOfPage': f'%ORIGIN%{path}', 'image': '%ORIGIN%/og.png'},
             {'@type': 'BreadcrumbList', 'itemListElement': [
@@ -345,12 +358,13 @@ def guide_page(g):
     out = HEAD.format(title=html.escape(g['title']), desc=html.escape(g.get('meta', g['desc']), quote=True), path=path, og_type='article', ld=ld_json(ld), crumbs=crumbs)
     out += f'''    <p class="ln echo"><span class="ps1">guest@ipterm:~$</span> {html.escape(g['cmd'])}</p>
     <h1>{html.escape(g['title'])}</h1>
-    <p class="doc-meta">Updated {UPDATED_LABEL} · {minutes} min read</p>
+    <p class="doc-meta">Updated {date_label(updated)} · {minutes} min read</p>
     <p class="doc-lede">{g['lede']}</p>
 {g['body'].strip()}
     <p class="doc-try"><strong>Try it</strong>{g['try']}</p>
     <h2>Related guides</h2>
     <ul>{related}</ul>
+    <!--FIX-->
 '''
     return out + FOOT
 

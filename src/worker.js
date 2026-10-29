@@ -14,8 +14,13 @@
 //   GET /expect/<ASN|cc>    200 and the value if your address is on that network or in that country, else 412
 //   GET /<ip>               page for any IPv4/IPv6 address        (add ?format=json to force JSON). Pages for
 //                           non-public addresses are noindex, except the router and well-known ones in SITEMAP_PATHS;
-//                           common typos of those (/192.168.l.l, /192,168,1,1) get a 301 to the address in the list.
-//                           A network's first address (x.x.x.0, or an IPv6 /64's) is noindex too, unless it is listed
+//                           common typos of those and of a public DNS resolver's address (/192.168.l.l, /192,168,1,1,
+//                           /l.l.l.3) get a 301 to the address as SITEMAP_PATHS or public/resolvers.js writes it.
+//                           A network's first address (x.x.x.0, or an IPv6 /64's) is noindex too, unless it is listed.
+//                           A public DNS resolver's address (public/resolvers.js) adds its resolver block: the service,
+//                           its variant and filtering, its other addresses, DoH and DoT, and the operator's sources
+//   GET /public-dns         every public DNS resolver in public/resolvers.js as a table: a page for browsers, plain text
+//                           for curl and scripts (?format=json for JSON). See "public DNS resolvers" below
 //   GET /<ip>/<field>       one value for any public address as plain text: asn, org, cc, country, continent,
 //                           hostname. IPinfo Lite only (never Core or proxycheck.io), so no budget is spent
 //   GET /<ip>/text, /<ip>/json, /AS<number>/text, /AS<number>/json   the same as ?format=text and ?format=json, without
@@ -58,10 +63,13 @@
 //                           (same-origin or command-line clients only; off unless DNSLEAK_* is set up)
 //   GET /go?q=              address-bar search: a 302 to the page for an IP, ASN, domain, range, email address,
 //                           port or terminal command (OpenSearch: /opensearch.xml; the form on /api)
+//   GET /changes            real fixes and new pages, newest first, from public/changes.js: a page for browsers, plain
+//                           text for curl and scripts (?format=json for JSON). See "corrections" below
 //   GET /robots.txt
 //   GET /sitemap.xml        a sitemap index: /sitemap-pages.xml (SITEMAP_PATHS), /sitemap-ports.xml (every port page in
-//                           public/ports.js, with its <lastmod>) and /sitemap-asn-<n>.xml, the largest networks in tiers
-//                           (src/asn-sitemap.js, built by tools/build_asn_sitemap.mjs)
+//                           public/ports.js, with its <lastmod>), /sitemap-resolvers.xml (/public-dns and every resolver
+//                           address in public/resolvers.js, with its <lastmod>) and /sitemap-asn-<n>.xml, the largest
+//                           networks in tiers (src/asn-sitemap.js, built by tools/build_asn_sitemap.mjs)
 //   GET /status             for the owner: today's and this hour's IPinfo Core and proxycheck.io budget use, and
 //                           each VPN server list's size and freshness. Needs the STATUS_KEY secret (x-status-key
 //                           header or ?key=); without it, a 404
@@ -100,7 +108,7 @@
 //   - Private and other non-public addresses never reach a provider.
 //   - Bots never spend the IPinfo Core or proxycheck.io budgets: they get the cache or IPinfo Lite (isBot). Nor do they
 //     start routing lookups (RIPEstat's fair use): /cidr and /route give them cached routing or none (routeData).
-//   - Redirects for router-address typos take their Location from SITEMAP_PATHS, never from the request.
+//   - Address-typo redirects take their Location from SITEMAP_PATHS or public/resolvers.js, never from the request.
 //   - Over plain http, pages (browsers, crawlers, link previews) get a 301 to https on the same host; curl and scripts
 //     are answered over http, and every link and cache key says https either way (route()).
 //   - Every value placed into HTML is escaped; embedded JSON cannot close its script tag.
@@ -111,6 +119,8 @@ import { connect } from 'cloudflare:sockets';
 import '../public/cidr.js';                       // shared subnet calculator (also served to the page)
 import '../public/ports.js';                      // what common ports are for (also served to the page)
 import '../public/leakgrade.js';                  // the leak test's grade and share codes (also served to the page)
+import '../public/changes.js';                    // the list of changes, for /changes (also served as /changes.js)
+import '../public/resolvers.js';                  // public DNS resolvers, for their pages and /public-dns (also served to the page)
 import { meCard, ME_WIDTH, ANSI, ansi } from './me.js';   // the /me card and its world map, and its colors
 import { ASN_SITEMAP, ASN_SITEMAP_DATE } from './asn-sitemap.js';   // the largest networks, for /sitemap-asn-*.xml (generated)
 import { holderOf, personReason } from './holder-heuristic.js';     // whether a network's holder may be a private person
@@ -124,6 +134,8 @@ const personName = name => Boolean(name) && personReason(name) !== null;
 const CIDR = globalThis.IPTERM_CIDR;
 const PORTS = globalThis.IPTERM_PORTS;
 const LEAKG = globalThis.IPTERM_LEAK;
+const CHANGES = globalThis.IPTERM_CHANGES;
+const RESOLVERS = globalThis.IPTERM_RESOLVERS;
 
 const CLI_UA = /^(curl|wget|httpie|xh|fetch|libfetch|aria2)\b|powershell/i;
 // Link-preview fetchers for chat apps and social sites, and search engine crawlers. Many send "Accept: */*"
@@ -218,6 +230,7 @@ async function route(request, env, ctx) {
   if (path === '/sitemap.xml') return sitemapIndex(url, env);
   if (path === '/sitemap-pages.xml') return sitemap(url, env, SITEMAP_PATHS);
   if (path === '/sitemap-ports.xml') return sitemap(url, env, portPaths(), PORTS.updated);
+  if (path === '/sitemap-resolvers.xml') return sitemap(url, env, resolverPaths(), RESOLVERS.checked);
   const asnMap = /^\/sitemap-asn-([1-9]\d{0,2})\.xml$/.exec(path);
   if (asnMap && asnSitemapFiles()[asnMap[1] - 1]) return sitemap(url, env, asnSitemapFiles()[asnMap[1] - 1].map(n => '/AS' + n));
   if (path === '/status' && await statusKeyOk(request, url, env)) return statusRoute(io);
@@ -231,6 +244,8 @@ async function route(request, env, ctx) {
   if (path === '/go') return goRoute(io, html);
   if (/^\/leaktest\/r\//i.test(path)) return leakShareRoute(io, path.slice(12), html);
   if (path === '/api/asn') return asnRoute(io, String(url.searchParams.get('asn') || '').trim(), false);
+  if (path === '/changes') return changesRoute(io, html);
+  if (path === '/public-dns') return publicDnsRoute(io, html);
   if (Object.hasOwn(TOOLS, path.slice(1).toLowerCase())) return toolRoute(io, path.slice(1).toLowerCase(), html);
   if (path === '/api/port') return portRoute(io, url.searchParams.get('n'), false);
   if (path.startsWith('/port/')) return portRoute(io, path.slice(6), html);
@@ -263,7 +278,7 @@ async function route(request, env, ctx) {
   if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/mail, /api/grade, /api/cidr, /api/route, /api/port. See /help.' }, 404);
 
   const res = await env.ASSETS.fetch(request);
-  if (res.status !== 404) return withOrigin(res, url);
+  if (res.status !== 404) return withOrigin(res, io, path);
   // Someone typed a domain straight after the slash (ipterm.net/github.com): send them to its DNS page.
   // (An address typo that isn't curated, /10.0.0.13l, gets the 404 page and its "did you mean", not DNS.)
   const dom = !bare.includes('/') && !FILE_EXT.test(bare) && !typoIp(bare) ? normalizeDomain(bare) : null;
@@ -386,16 +401,19 @@ function toolRoute(io, tool, html) {
       `<div class="api-ref"><p class="ln sys">Search from here, or from the address bar: <code>${esc(io.url.host)}/go?q=8.8.8.8</code> opens the page for an IP address, domain, AS number, range, email address or port.</p>` +
       goForm('/go', 'go-form') +
       `<p class="ln sys">A search box for a wiki or intranet page (plain HTML, no script):</p><pre class="doc-pre"><code>${esc(goForm(io.url.origin + '/go'))}</code></pre></div>` +
-      `<p class="ln sys">IP address data powered by <a href="https://ipinfo.io" rel="noopener">IPinfo</a>.</p>` : '');
+      `<p class="ln sys">IP address data powered by <a href="https://ipinfo.io" rel="noopener">IPinfo</a>.</p>` : '') +
+    // the corrections line, on every tool page but the leak test's, which shows the visitor their own results
+    (tool === 'leaktest' ? '' : fixLine(io, '/' + tool));
   return shell(io, { status: 200, path: '/' + tool, title: t.title, desc: t.meta || t.desc, initial: { kind: 'tool', tool },
     body: staticBlock(t.heading, [tool], [['usage', t.usage]], t.desc, extra) });
 }
 
 // The router and well-known addresses with their own indexable pages: the IPv4 and IPv6 entries in
-// SITEMAP_PATHS. Pages for other non-public addresses are noindex. Built on first use (parseIp's regex is
-// defined further down).
+// SITEMAP_PATHS, and every public DNS resolver's address in public/resolvers.js (whose pages are in
+// /sitemap-resolvers.xml instead: resolverPaths()). Pages for other non-public addresses are noindex. Built on first
+// use (parseIp's regex is defined further down).
 let curated = null;
-const curatedIps = () => curated || (curated = new Set(SITEMAP_PATHS.map(p => p.slice(1)).filter(s => parseIp(s))));
+const curatedIps = () => curated || (curated = new Set([...SITEMAP_PATHS.map(p => p.slice(1)).filter(s => parseIp(s)), ...resolverIps()]));
 // A network's first address: IPv4 ending in .0, IPv6 with its low 64 bits zero. Its page places one address of a block
 // that may hold millions, so unless it is curated it is "noindex, follow" (ipPage), and the block's /cidr page is the
 // one to find: whois links that, not the address, for a registry block's first address (whoisPage).
@@ -411,9 +429,9 @@ function typoIp(s) {
   if (o.length !== 4 || !o.every(x => /^\d{1,3}$/.test(x) && Number(x) <= 255)) return null;
   return o.map(Number).join('.');
 }
-// A typo of one of the curated addresses (/192.168.l.l, /192,168,1,1, /10.0.0.l): that address, as written in
-// SITEMAP_PATHS, for a 301. The Location is always taken from the list, never from the request, so this can't
-// redirect anywhere else. Anything else (a valid address, another typo) is null.
+// A typo of one of the curated addresses (/192.168.l.l, /192,168,1,1, /10.0.0.l, /l.l.l.3): that address, as written
+// in SITEMAP_PATHS or public/resolvers.js (curatedIps), for a 301. The Location is always taken from those lists,
+// never from the request, so this can't redirect anywhere else. Anything else (a valid address, another typo) is null.
 function routerTypo(bare) {
   const ip = typoIp(bare);
   if (!ip || ip === bare) return null;
@@ -429,15 +447,16 @@ function routerTypo(bare) {
    from the address bar through public/opensearch.xml, and wikis through the plain form on /api.
    The Location is put together only from values that were parsed and written out again (canonIp, "AS" and
    a number, normalizeDomain, CIDR.calc, routeTarget, PORTS.parse, the DNS type list, dkimSelector, a decoded
-   leak code, a curated address from SITEMAP_PATHS), never from the input itself, and goLocation() refuses
-   anything but a plain path on this site, so /go can't send anyone elsewhere: //evil.com is a 400 like any
-   other input it can't read. /go itself makes no outside request. Hostile inputs: tools/check_go.sh. */
+   leak code, a curated address from SITEMAP_PATHS or public/resolvers.js), never from the input itself, and
+   goLocation() refuses anything but a plain path on this site, so /go can't send anyone elsewhere: //evil.com is a
+   400 like any other input it can't read. /go itself makes no outside request. Hostile inputs: tools/check_go.sh. */
 const GO_TOOLS = {
   '': '/', whoami: '/', myip: '/', me: '/', ip: '/', ifconfig: '/', ipconfig: '/', lookup: '/',
   leaktest: '/leaktest', dnsleak: '/leaktest', vpntest: '/leaktest', whois: '/whois', rdap: '/whois', dig: '/dns', dns: '/dns',
   nslookup: '/dns', mail: '/mail', email: '/mail', spf: '/mail', dmarc: '/mail', dkim: '/mail', cidr: '/cidr', subnet: '/cidr',
   ipcalc: '/cidr', route: '/cidr', bgp: '/cidr', rpki: '/cidr', port: '/port', ports: '/port', api: '/api', help: '/api', curl: '/api',
   privacy: '/privacy', guides: '/guides', grade: '/grade', report: '/grade', reportcard: '/grade', scorecard: '/grade', badge: '/grade',
+  'public-dns': '/public-dns', resolvers: '/public-dns',
 };
 
 async function goRoute(io, html) {
@@ -639,12 +658,13 @@ function notFoundPage(io, path) {
     body: staticBlock('Page not found', ['404'], [], `There is no page at ${shown}.`, links) });
 }
 
-// Static pages carry %ORIGIN% placeholders in canonical links, share tags and structured data.
-async function withOrigin(res, url) {
+// Static pages carry %ORIGIN% placeholders in canonical links, share tags and structured data, and each guide a
+// <!--FIX--> where its corrections line goes (fixLine(); none on a copy run by someone else).
+async function withOrigin(res, io, path) {
   if (!(res.headers.get('content-type') || '').includes('text/html')) return res;
   const t = await res.text();
-  if (!t.includes('%ORIGIN%')) return new Response(t, res);
-  return new Response(t.replaceAll('%ORIGIN%', () => url.origin), res);
+  if (!t.includes('%ORIGIN%') && !t.includes('<!--FIX-->')) return new Response(t, res);
+  return new Response(t.replaceAll('%ORIGIN%', () => io.url.origin).replace('<!--FIX-->', () => fixLine(io, path, null, 'doc-meta')), res);
 }
 
 function wantsHtml(request, url, ua) {
@@ -679,12 +699,15 @@ async function ipRoute(io, q, html) {
   // free listings (withListings). leaktest asks this way for the caller's other IP version, whose network (and whether
   // it goes through iCloud Private Relay) is all it compares.
   const lite = onOff(io.url.searchParams.get('lite')) === true, vpnCheck = d => (lite ? withListings(io, ip, d) : withPrivacy(io, ip, d));
+  // A public DNS resolver's page shows how its address is routed when the cache holds that (someone's route lookup put
+  // it there): no RIPEstat request for anyone here, so none for a crawler (resolverBlock).
+  const route = html && RESOLVERS.get(ip) ? fromCache(io, 'route/' + ip) : null;
   // A bot (isBot) gets what the cache holds or IPinfo Lite: ipData, privacyData and blockData spend nothing for it.
   return guard(
     () => block ? withBlock(io, ip, p, ipData(io, ip, p, { lite }), vpnCheck) : vpnCheck(ipData(io, ip, p, { lite })),
     // Browsers may reuse an answer for 5 minutes; the Worker's own cache (6 hours) keeps repeats cheap.
     // ...except one that went out before its registry date arrived (blockLate): the next lookup should get the date.
-    d => html ? ipPage(io, d, 200) : reply(io, d, 200, { 'cache-control': d.blockLate ? 'no-store' : 'public, max-age=300' }, ipText),
+    async d => html ? ipPage(io, d, 200, await route) : reply(io, d, 200, { 'cache-control': d.blockLate ? 'no-store' : 'public, max-age=300' }, ipText),
     (msg, status) => html ? ipPage(io, { ip, version: p.v, error: msg }, status) : reply(io, { error: msg }, status),
   );
 }
@@ -1155,8 +1178,8 @@ function portIndex(skip = null) {
   return `<p class="ln sys">Common ports:</p><ul class="static-list">${items}</ul>`;
 }
 
-// What a port is for and why it may be closed, plus how to check it. The check itself never runs here:
-// the terminal offers a button, so crawlers and link previews never start one.
+// What a port is for and why it may be closed, plus how to check it, and the corrections line. The check itself never
+// runs here: the terminal offers a button, so crawlers and link previews never start one.
 function portPage(io, d, status) {
   if (d.error) {
     return shell(io, { status, path: '/port/' + String(d.input || '').slice(0, 20), title: 'Port checker | ipterm',
@@ -1185,7 +1208,7 @@ function portPage(io, d, status) {
     p(`3. The router forwards TCP port ${n} to the device's local IP address, which should be fixed (a DHCP reservation).`) +
     p("4. Your provider gives the router a public IPv4 address. If the router's internet (WAN) address isn't the one websites see, or is in 100.64.0.0/10 (100.64.x.x to 100.127.x.x), you are behind carrier-grade NAT and no port forward can work: ask for a public IP, or use IPv6 or a tunnel such as Tailscale or Cloudflare Tunnel.") +
     p(`5. Over IPv6 there is no port forwarding: the router's IPv6 firewall has to allow the port to the device. If your browser connects over IPv6, the check tests your IPv6 address; <code>curl -4</code> tests IPv4.`) +
-    portIndex(n);
+    portIndex(n) + fixLine(io, path);
   return shell(io, { status, path, title, desc, noindex: !s, initial: { kind: 'port', query: n },
     body: staticBlock(s ? `Port ${n} · ${s.name}` : `Port ${n}`, ['port', s ? s.proto : 'tcp'], rows, summary, extra) });
 }
@@ -1558,6 +1581,8 @@ function helpBody(h, env = {}) {
       [`curl ${h}/cidr/10.0.0.0/22`, 'subnet calculator'],
       [`curl ${h}/route/1.1.1.0/24`, 'routing: origin network, RPKI, visibility,'],
       ['', 'AS paths (a prefix or an address)'],
+      [`curl ${h}/public-dns`, 'public DNS resolvers: addresses, filtering,'],
+      ['', 'DoH and DoT (?format=json for JSON)'],
     ]),
     block('README BADGES (THE REPORT CARD GRADE, CACHED AN HOUR)', [
       [`https://img.shields.io/endpoint?url=https://${h}/badge/github.com.json`],
@@ -1593,6 +1618,7 @@ function helpBody(h, env = {}) {
       ['Cloudflare, which hosts it, keeps its own request analytics and security'],
       [`events: ${h}/privacy`],
       [`OpenAPI: ${h}/openapi.json   For AI tools: ${h}/llms.txt`],
+      [`What changed, newest first: ${h}/changes`],
       [`Browsers: ${h} is a terminal; this reference is at ${h}/api`],
       [`Address bar: ${h}/go?q=<IP, domain, ASN, range, email or port n>`],
     ]),
@@ -1632,7 +1658,7 @@ async function fetchRetry(url, init = {}, label = 'upstream', timeout = 8000, by
 
 async function guard(step, ok, fail = (msg, status) => json({ error: msg }, status)) {
   try {
-    return ok(await step());
+    return await ok(await step());                       // awaited: an async ok (ipRoute's) that throws lands below too
   } catch (e) {
     if (e instanceof RateLimited) {
       const r = await fail('Too many lookups from your address. Wait a minute and try again.', 429);
@@ -4405,7 +4431,16 @@ function vpnText(d) {
     : ' (not a guarantee: new VPN servers are often unlisted)');
 }
 
-function ipPage(io, d, status) {
+// An IP page's location comes from IPinfo, which takes corrections itself: the page points there (in place of the
+// corrections line: see "corrections") when it shows a place from IPinfo Core or its free API. Not for an anycast
+// address (its place is one of many), nor for IPinfo Lite, which has no anycast flag and gives a country only (a bot's
+// /1.1.1.1 is "Australia"), nor for a public DNS resolver, whose page names no place and has the corrections line for
+// its resolver block. ipinfoFix() in public/app.js does the same.
+const ipinfoFixes = d => /^ipinfo(-core)?$/.test(d.source || '') && !(d.flags && d.flags.anycast) && !RESOLVERS.get(d.ip) &&
+  [d.city, d.region, d.country, d.countryCode].some(Boolean);
+const IPINFO_FIX = '<p class="ln sys fix">Location wrong? IPinfo takes corrections at <a href="https://ipinfo.io/corrections" rel="nofollow noopener">ipinfo.io/corrections</a>.</p>';
+// route: a public DNS resolver's routing from the cache (ipRoute), or null.
+function ipPage(io, d, status, route = null) {
   const ip = d.ip, v = 'IPv' + d.version;
   const path = '/' + ip;
   if (d.error) {
@@ -4443,20 +4478,23 @@ function ipPage(io, d, status) {
   const place = [d.city, d.region, d.country || d.countryCode].filter(Boolean).join(', ');
   const owner = d.org ? d.org + (d.asn ? ` (${d.asn})` : '') : d.asn || '';
   // An anycast address is answered from many places, and IPinfo's location is one of them, so it is called anycast
-  // instead. IPinfo Lite, which bots get, has no anycast flag and gives only a country, which for a resolver says
-  // little (1.1.1.1: Australia), so the resolver pages in SITEMAP_PATHS, the IP pages search results show most, name
-  // no place for a Lite answer. Other Lite answers keep their country.
+  // instead. A public DNS resolver (public/resolvers.js) is given no place whatever IPinfo says: its page is about the
+  // resolver (resolverText), and IPinfo Lite, which bots get, has no anycast flag and gives one country, which for a
+  // resolver says little (1.1.1.1: Australia). Other Lite answers keep their country.
+  const res = RESOLVERS.get(ip);
   const anycast = Boolean(d.flags && d.flags.anycast);
-  const placed = !anycast && !(d.source === 'ipinfo-lite' && curatedIps().has(ip)) ? place : '';
+  const placed = !anycast && !res ? place : '';
   const lead = `${ip} is a public ${v} address` + (owner ? ` operated by ${owner}` : '') +
     (anycast ? ', anycast (served from many locations)' : placed ? `, located in ${placed}` : '') + '.';
   const host = d.hostname ? `Hostname: ${d.hostname}.` : null, approx = placed ? 'IP location is approximate.' : null;
-  const summary = [lead, host, approx].filter(Boolean).join(' ');
-  const desc = descFit(summary, approx && `${lead} ${approx}`, lead);
-  // "<ip> IP lookup: <org> (<ASN>), <hostname>", without the parts the lookup doesn't have. ipTitle() in public/app.js
-  // words it the same way.
+  // "<ip> IP lookup: <org> (<ASN>), <hostname>", without the parts the lookup doesn't have, or a resolver's own title
+  // ("9.9.9.9 · Quad9 DNS: addresses, DoH, DoT and filtering"). ipTitle() in public/app.js words it the same way.
   const named = [owner, d.hostname].filter(Boolean).join(', ');
-  const title = `${ip} IP lookup${named ? ': ' + named : ''} | ipterm`;
+  const { title, desc, summary } = res ? resolverText(res, owner, d.hostname) : {
+    title: `${ip} IP lookup${named ? ': ' + named : ''} | ipterm`,
+    desc: descFit([lead, host, approx].filter(Boolean).join(' '), approx && `${lead} ${approx}`, lead),
+    summary: [lead, host, approx].filter(Boolean).join(' '),
+  };
   const rows = [
     ['hostname', d.hostname], ['network', owner], ['domain', d.asDomain], ['location', place],
     ['coordinates', d.lat != null && d.lon != null ? `${d.lat}, ${d.lon}` : null], ['time zone', d.timezone],
@@ -4466,10 +4504,12 @@ function ipPage(io, d, status) {
   // lookup has it: the block's /cidr page is the one that answers a search for it.
   const p = parseIp(ip), start = netStart(p) && !curatedIps().has(ip);
   const net = start && d.block ? String(d.block.network || '').split(', ').find(c => c.includes('/') && inPrefix(p, c) >= 0) : null;
-  const links = (net ? `<p class="ln sys">Registered block: <a href="/cidr/${esc(net)}">${esc(net)}</a> (subnet and routing)</p>` : '') +
+  const links = (res ? resolverBlock(io, res, route) : '') +
+    (net ? `<p class="ln sys">Registered block: <a href="/cidr/${esc(net)}">${esc(net)}</a> (subnet and routing)</p>` : '') +
     (/^AS\d{1,10}$/i.test(d.asn || '') ? `<p class="ln sys">More from this network: <a href="/${esc(d.asn)}">${esc(d.asn)}${d.org ? ' ' + esc(d.org) : ''}</a></p>` : '') +
     `<p class="ln sys">Registry record: <a href="/whois/${esc(ip)}">whois ${esc(ip)}</a> (owner and abuse contact)</p>` +
-    `<p class="ln sys">Guide: <a href="/guides/what-your-ip-reveals">What your IP address reveals (and what it doesn't)</a></p>`;
+    `<p class="ln sys">Guide: <a href="/guides/what-your-ip-reveals">What your IP address reveals (and what it doesn't)</a></p>` +
+    (ipinfoFixes(d) ? IPINFO_FIX : '');
   return shell(io, { status, path, title, desc, noindex: start, initial: { kind: 'ip', query: ip, data: d },
     cache: d.blockLate ? 'no-store' : null,                // sent before its registry date arrived (withBlock)
     body: staticBlock(ip, [v, 'public'], rows, summary, links) });
@@ -4766,10 +4806,14 @@ const andList = a => (a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' 
 // rows: [key, value]. A value is made a string and escaped, whatever its shape (upstream JSON can hold anything), unless
 // it is Markup.
 function staticBlock(heading, tags, rows, summary, extra = '') {
-  const tagHtml = tags.map(t => `<span class="tag">${esc(t)}</span>`).join(' ');
+  return `<article class="static" id="static">${headHtml(heading, tags)}${kvHtml(rows)}<p class="ln">${esc(summary)}</p>${extra}</article>`;
+}
+// A result's header line and its rows (dl.kv), as staticBlock() draws them and a section under it does (resolverBlock):
+// the terminal drops both on boot and draws its own. Rows without a value are left out.
+const headHtml = (heading, tags) => `<div class="head"><span class="hip">${esc(heading)}</span> ${tags.map(t => `<span class="tag">${esc(t)}</span>`).join(' ')}</div>`;
+function kvHtml(rows) {
   const dl = rows.filter(r => r[1] != null && r[1] !== '').map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v instanceof Markup ? v.html : esc(v)}</dd>`).join('');
-  return `<article class="static" id="static"><div class="head"><span class="hip">${esc(heading)}</span> ${tagHtml}</div>` +
-    (dl ? `<dl class="kv">${dl}</dl>` : '') + `<p class="ln">${esc(summary)}</p>${extra}</article>`;
+  return dl ? `<dl class="kv">${dl}</dl>` : '';
 }
 // Markup this file wrote and escaped itself (the links in a port page's IANA row), which staticBlock prints as it is.
 // Nothing outside the module can make one, so no value from upstream, { html } or not, is ever taken for markup.
@@ -4780,15 +4824,13 @@ class Markup { constructor(html) { this.html = String(html); } }
 const SITEMAP_PATHS = [
   // pages, tools and guides
   '/', '/whois', '/dns', '/mail', '/cidr', '/leaktest', '/api', '/guides', '/guides/find-router-ip', '/guides/private-ip-ranges', '/guides/what-your-ip-reveals',
-  '/guides/ipv4-vs-ipv6', '/guides/what-is-an-asn', '/privacy',
+  '/guides/ipv4-vs-ipv6', '/guides/what-is-an-asn', '/privacy', '/changes',
   // the port checker's pages have a file of their own: /sitemap-ports.xml (portPaths)
   // router and other private addresses people search for. These are the only non-public addresses whose pages
   // are indexed (curatedIps()), and typos of them redirect here (routerTypo()).
   '/192.168.1.1', '/192.168.0.1', '/10.0.0.1', '/192.168.1.254', '/192.168.100.1', '/192.168.2.1', '/192.168.0.254',
   '/192.168.10.1', '/192.168.8.1', '/10.0.0.138', '/10.1.1.1', '/10.0.1.1', '/172.16.0.1', '/127.0.0.1', '/169.254.1.1',
-  // public DNS resolvers
-  '/8.8.8.8', '/8.8.4.4', '/1.1.1.1', '/1.0.0.1', '/9.9.9.9', '/149.112.112.112', '/208.67.222.222', '/208.67.220.220',
-  '/94.140.14.14', '/2001:4860:4860::8888', '/2001:4860:4860::8844', '/2606:4700:4700::1111', '/2620:fe::fe',
+  // public DNS resolvers have a file of their own: /sitemap-resolvers.xml (resolverPaths), from public/resolvers.js
   // networks (ASNs) have their own sitemap files: /sitemap-asn-<n>.xml, from src/asn-sitemap.js
   // subnet calculator, and routing for the resolvers' prefixes
   '/guides/subnet-cheat-sheet', '/cidr/192.168.1.0/24', '/cidr/192.168.0.0/24', '/cidr/192.168.0.0/16', '/cidr/10.0.0.0/8', '/cidr/10.0.0.0/24',
@@ -4808,6 +4850,13 @@ const SITEMAP_PATHS = [
 // The port checker and each port's page in public/ports.js, for /sitemap-ports.xml. The pages never run a check and
 // draw only on ports.js, so crawling them asks no one anything.
 const portPaths = () => ['/port', ...PORTS.list().map(n => '/port/' + n)];
+// /public-dns and the page of every resolver address in public/resolvers.js, for /sitemap-resolvers.xml, all with the
+// day the rows were last checked (RESOLVERS.checked) as <lastmod>: their own file, as the ports have, so that date is
+// given and Search Console shows how this family is indexed, and so the list can't drift from the data. A crawl of
+// them asks no one for routing (ipRoute) and spends no budget (isBot).
+const addressesOf = s => s.variants.flatMap(x => [...x.ipv4, ...x.ipv6]);
+const resolverIps = () => RESOLVERS.list().flatMap(addressesOf);
+const resolverPaths = () => ['/public-dns', ...resolverIps().map(ip => '/' + ip)];
 
 function robots(url) {
   return text(`User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /go\nDisallow: /badge/\n\nSitemap: ${url.origin}/sitemap.xml\n`, 'public, max-age=86400');
@@ -4833,15 +4882,16 @@ const XML = { 'content-type': 'application/xml; charset=utf-8', 'cache-control':
 // /sitemap.xml: the index of the sitemap files. A copy run by someone else (SELF_HOSTED) lists nothing.
 function sitemapIndex(url, env) {
   if (selfHosted(env)) return sitemap(url, env, []);
-  const files = [['/sitemap-pages.xml', null], ['/sitemap-ports.xml', PORTS.updated],
+  const files = [['/sitemap-pages.xml', null], ['/sitemap-ports.xml', PORTS.updated], ['/sitemap-resolvers.xml', RESOLVERS.checked],
     ...asnSitemapFiles().map((_, i) => [`/sitemap-asn-${i + 1}.xml`, ASN_SITEMAP_DATE])];
   const items = files.map(([p, mod]) => `  <sitemap><loc>${esc(url.origin + p)}</loc>${mod ? `<lastmod>${esc(mod)}</lastmod>` : ''}</sitemap>`).join('\n');
   return new Response(`<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${items}\n</sitemapindex>\n`, { headers: XML });
 }
 
 // A file of 9,000 URLs takes about 7 ms of CPU to build, so each isolate keeps what it built (a few files at most).
-// lastmod: the day these pages' content last changed (PORTS.updated for the port pages), given on each URL. The other
-// files have none: their pages change with live data, and a date that is always new is one search engines ignore.
+// lastmod: the day these pages' content last changed (PORTS.updated for the port pages, RESOLVERS.checked for the
+// resolver pages), given on each URL. The other files have none: their pages change with live data, and a date that is
+// always new is one search engines ignore.
 const sitemapMemo = new Map();
 function sitemap(url, env, paths, lastmod = null) {
   const key = url.origin + url.pathname + (selfHosted(env) ? ' copy' : '');
@@ -4951,7 +5001,8 @@ function statusText(d, o) {
    CF_VERSION_METADATA binding (wrangler.toml) reads it back, so the footer, `about` and /help can name
    the code that is running. SOURCE_URL (wrangler.toml) turns the SHA into a link to that commit.
    SELF_HOSTED = "true" marks a copy run by someone else: every page is noindex, the sitemap is empty,
-   no sponsored line is shown (app.js reads data-copy from the footer) and the footer says it's a copy. */
+   no sponsored line is shown (app.js reads data-copy from the footer), nor the corrections line (fixRepo()), and the
+   footer says it's a copy. */
 const selfHosted = env => String((env && env.SELF_HOSTED) || '').toLowerCase() === 'true';
 function buildOf(env) {
   const tag = env && env.CF_VERSION_METADATA && env.CF_VERSION_METADATA.tag;
@@ -4959,16 +5010,248 @@ function buildOf(env) {
   const src = env && /^https:\/\/[^\s"'<>]+$/.test(String(env.SOURCE_URL || '')) ? String(env.SOURCE_URL).replace(/\/+$/, '') : null;
   return { sha, url: src && sha ? `${src}/commit/${sha.replace(/-dirty$/, '')}` : src };
 }
-// Footer spans for the shell's <!--BUILD-->. app.js reads data-build, data-source and data-copy for `about`.
+// Footer spans for the shell's <!--BUILD-->. app.js reads data-build, data-source and data-copy for `about`, and
+// data-fix and data-fix-mail for the corrections line (fixLine() there), which a copy run by someone else doesn't get.
 function footBuild(env) {
-  const b = buildOf(env), out = [];
+  const b = buildOf(env), out = [], fix = fixRepo(env);
   if (b.sha || b.url) {
     const label = esc(b.sha || 'source code');
-    out.push(`<span class="foot-build" data-build="${esc(b.sha || '')}" data-source="${esc(b.url || '')}">${b.sha ? 'the code we deploy: ' : ''}` +
+    out.push(`<span class="foot-build" data-build="${esc(b.sha || '')}" data-source="${esc(b.url || '')}"` +
+      (fix ? ` data-fix="${esc(fix)}" data-fix-mail="${esc(FIX_MAIL)}"` : '') + `>${b.sha ? 'the code we deploy: ' : ''}` +
       (b.url ? `<a href="${esc(b.url)}" rel="noopener">${label}</a>` : label) + '</span>');
   }
   if (selfHosted(env)) out.push('<span class="foot-copy" data-copy>a copy of ipterm run by someone else, not ipterm.net</span>');
   return out.join('');
+}
+
+/* ---------- corrections ----------
+   Reference pages end with one line: "Something wrong here? Suggest a fix on GitHub (public, needs an account) or by
+   email." They are the port pages and /port (portPage(), and the /port tool page), the tool pages but /leaktest
+   (toolRoute()), the guides (their <!--FIX-->, filled in by withOrigin()), a public DNS resolver's block on its IP page
+   (resolverBlock(), with the field "resolver") and /public-dns (publicDnsRoute()). The terminal draws the same line
+   after the same pages (fixLine() in public/app.js),
+   from the footer's data-fix (footBuild()). The GitHub link opens the correction form
+   (.github/ISSUE_TEMPLATE/correction.yml, whose fields `page` and `field` it fills in) with the page's address in the
+   title, and where a page passes one, the field the line is about; the email link fills in only the subject, the same
+   way. Never anything about the visitor: the line is never on their own results (the homepage, leaktest, a port
+   check), so nobody is asked to post their own IP in public. An IP page points to its data's source instead
+   (IPINFO_FIX, above ipPage()). A copy run by someone else (SELF_HOSTED), or one whose SOURCE_URL isn't a GitHub
+   repository, shows no line. ipterm stores nothing about any of it. */
+const FIX_MAIL = 'contact@ipterm.net';
+const GITHUB_REPO = /^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+const fixRepo = env => { const s = String((env && env.SOURCE_URL) || '').replace(/\/+$/, ''); return !selfHosted(env) && GITHUB_REPO.test(s) ? s : null; };
+// The line's two links for the page at path (on origin), and the field on it, if any: { github, email }, or null.
+function fixLinks(env, origin, path, field = null) {
+  const repo = fixRepo(env);
+  if (!repo) return null;
+  const page = origin + encodePath(path), about = field ? ` (${field})` : '', q = encodeURIComponent;
+  return {
+    github: `${repo}/issues/new?template=correction.yml&title=${q(`Correction: ${path}${about}`)}&page=${q(page)}` + (field ? `&field=${q(field)}` : ''),
+    email: `mailto:${FIX_MAIL}?subject=${q(`Correction: ${page}${about}`)}`,
+  };
+}
+// The line as a paragraph of the page at path: cls is the terminal's (a shell page) or a guide's. '' for no line.
+function fixLine(io, path, field = null, cls = 'ln sys fix') {
+  const l = fixLinks(io.env, io.url.origin, path, field);
+  return l ? `<p class="${cls}">Something wrong here? <a href="${esc(l.github)}" rel="nofollow noopener">Suggest a fix on GitHub</a>` +
+    ` (public, needs an account) or <a href="${esc(l.email)}">by email</a>.</p>` : '';
+}
+
+/* ---------- /changes ----------
+   Real fixes and new pages, newest first, from public/changes.js (written by hand, in the same commit as each change):
+   a page for browsers, plain text for curl and scripts, and JSON with ?format=json. It names no one: the GitHub issue
+   already credits whoever reported a mistake. No outside call, so a crawl costs nothing. */
+function changesRoute(io, html) {
+  const list = CHANGES.list(), cache = 'public, max-age=300', vary = { vary: 'Accept, User-Agent' };
+  const url = p => io.url.origin + encodePath(p);
+  if (!html && io.url.searchParams.get('format') === 'json') {
+    return json({ changes: list.map(c => ({ date: c.date, text: c.text, pages: c.pages.map(url) })) }, 200, { 'cache-control': cache });
+  }
+  if (!html) return text(changesText(list, url), cache, 200, vary);
+  const days = [...new Set(list.map(c => c.date))].map(day => `    <h2><time datetime="${esc(day)}">${esc(day)}</time></h2>\n    <ul>` +
+    list.filter(c => c.date === day).map(c => `<li>${esc(c.text)}` + (c.pages.length ? ` <span class="doc-meta">` +
+      c.pages.map(p => `<a href="${esc(encodePath(p))}">${esc(p)}</a>`).join(' · ') + '</span>' : '') + '</li>').join('') + '</ul>').join('\n');
+  return docPage(io, { path: '/changes', name: 'changes', cmd: 'cat changes.txt', title: 'Changes: fixes and new pages | ipterm',
+    desc: 'Real fixes and new pages on ipterm, newest first, each with its date. The same list is plain text for curl.',
+    body: `    <h1>Changes</h1>
+    <p class="doc-lede">Real fixes and new pages on ipterm, newest first. The same list is plain text for <code>curl ${esc(io.url.host)}/changes</code>.</p>
+${days}` });
+}
+
+// A plain document in the guides' style (.doc in app.css), for /changes and /public-dns: no terminal and no script but
+// the theme's (prefs.js). name: the word in the header and the breadcrumb; cmd: the prompt line above the heading;
+// body: what follows it in <main>, indented by four spaces.
+function docPage(io, { path, name, cmd, title, desc, body }) {
+  const canonical = esc(io.url.origin + encodePath(path));
+  return new Response(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>${esc(title)}</title>
+<meta name="description" content="${esc(desc)}">
+<link rel="canonical" href="${canonical}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ipterm">
+<meta property="og:title" content="${esc(title)}">
+<meta property="og:description" content="${esc(desc)}">
+<meta property="og:url" content="${canonical}">
+<meta property="og:image" content="${esc(io.url.origin)}/og.png">
+<meta name="twitter:card" content="summary_large_image">${selfHosted(io.env) ? '\n<meta name="robots" content="noindex, follow">' : ''}
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#030805">
+<script src="/prefs.js"></script>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="doc">
+  <header class="bar">
+    <div class="brand"><a class="logo" href="/">ip<b>term</b></a><span class="ver">${esc(name)}</span></div>
+    <span class="doc-tools"><button type="button" class="mode-btn" data-theme-toggle>light</button><a class="doc-back" href="/">&larr; back to the terminal</a></span>
+  </header>
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="/">ipterm</a><span aria-hidden="true">/</span><span aria-current="page">${esc(name)}</span></nav>
+  <main class="doc-body">
+    <p class="ln echo"><span class="ps1">guest@ipterm:~$</span> ${esc(cmd)}</p>
+${body}
+  </main>
+</div>
+</body>
+</html>
+`, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=300', vary: 'Accept, User-Agent' } });
+}
+
+// Words wrapped to lines of at most w characters (a word longer than that, a URL, gets a line of its own).
+const wrapText = (s, w) => s.split(' ').reduce((lines, word) => {
+  const last = lines[lines.length - 1];
+  if (last && (last + ' ' + word).length <= w) lines[lines.length - 1] = last + ' ' + word; else lines.push(word);
+  return lines;
+}, []);
+
+// The list as text for a terminal: each day, then its changes wrapped to 80 columns, each followed by its pages'
+// addresses.
+function changesText(list, url) {
+  const wrap = s => wrapText(s, 74);
+  const out = ['ipterm: real fixes and new pages, newest first.'];
+  for (const day of [...new Set(list.map(c => c.date))]) {
+    out.push('', day);
+    for (const c of list.filter(x => x.date === day)) {
+      out.push(...wrap(plain(c.text)).map((l, i) => (i ? '    ' : '  - ') + l), ...c.pages.map(p => '    ' + url(p)));
+    }
+  }
+  return out.join('\n') + '\n';
+}
+
+/* ---------- public DNS resolvers ----------
+   public/resolvers.js holds the well-known public DNS resolvers, from their operators' own documentation: each address's
+   service and operator, its variant and what it filters, the service's other addresses, DoH and DoT, and what the
+   operator says about DNSSEC, ECS and logging, with the pages it says so on and the day they were last checked
+   (RESOLVERS.checked). Each address keeps its own IP page (/9.9.9.9), titled and described as the resolver it is
+   (resolverText), never with a place, and called anycast only where the operator says so. Under the lookup the page
+   adds the resolver block (resolverBlock), and the terminal draws the same after a lookup (resolverAbout() in
+   public/app.js). /public-dns lists them all (publicDnsRoute). None of it asks anyone anything: a crawler's resolver
+   page costs what any IP page costs it (IPinfo Lite and reverse DNS), its routing line is read from the cache alone
+   (ipRoute), and /public-dns and the sitemap draw on public/resolvers.js only. No sponsored line on any of them. */
+
+// A resolver page's title, description and summary: what the address is, the addresses set beside it, and that it is
+// anycast where the operator says so, never a place (IPinfo Lite, which bots get, gives each one country: Australia
+// for 1.1.1.1).
+function resolverText(r, owner, hostname) {
+  const lead = RESOLVERS.lead(r), others = RESOLVERS.others(r), s = r.service, x = r.variant;
+  const has = andList([x.doh && 'DoH', x.dot && 'DoT', s.variants.length > 1 && RESOLVERS.filters(s) && 'filtering variants', 'live routing'].filter(Boolean));
+  const tail = has.charAt(0).toUpperCase() + has.slice(1) + '.';
+  return {
+    title: RESOLVERS.title(r),
+    desc: descFit([lead, others, tail].filter(Boolean).join(' '), [lead, others].filter(Boolean).join(' '), lead),
+    summary: [lead, others, s.anycast && 'Anycast: answered from many locations.', owner && `Network: ${owner}.`, hostname && `Hostname: ${hostname}.`].filter(Boolean).join(' '),
+  };
+}
+
+// A source's address as link text: without https:// and the trailing slash.
+const sourceText = u => u.replace(/^https?:\/\//, '').replace(/\/$/, '');
+
+// The resolver block on an address's page: what the operator documents about it, its sources and when they were
+// checked, a pointer to leaktest, and the corrections line (field "resolver", so a report about these rows isn't
+// taken for one about IPinfo's). The terminal drops its header and rows on boot (.head, dl, .fix) and draws its own
+// (resolverAbout() in public/app.js, row for row). route: its routing from the cache, or null: then a link (nofollow:
+// for a crawler it leads to an address's /cidr page with no routing on it).
+function resolverBlock(io, r, route) {
+  const s = r.service, x = r.variant, ip = r.ip;
+  const link = a => `<a href="/${esc(a)}">${esc(a)}</a>`;
+  const addrs = list => (list.length ? new Markup(list.map(a => (a === ip ? `${esc(a)} (this address)` : link(a))).join(' · ')) : null);
+  const via = `<a href="/route/${esc(ip)}" rel="nofollow">route ${esc(ip)}</a>`;
+  const routing = route && !route.error && route.summary ? `${esc(route.summary)} (${via})` : `${via}: who announces it, RPKI and AS paths, from RIPEstat`;
+  const others = s.variants.filter(o => o !== x).map((o, i) => [i ? '' : 'other variants', new Markup(`${esc(o.name)}: ${[...o.ipv4, ...o.ipv6].map(link).join(' · ')}`)]);
+  const rows = [
+    ['service', s.service], ['operator', s.operator], ['variant', s.variants.length > 1 ? x.name : null], ['filtering', x.filtering],
+    ['IPv4', addrs(x.ipv4)], ['IPv6', addrs(x.ipv6)], ['DNS over HTTPS', x.doh], ['DNS over TLS', x.dot],
+    ['served from', s.anycast && 'anycast: answered from many locations'], ['routing', new Markup(routing)],
+    ['DNSSEC', s.dnssec], ['client subnet', s.ecs], ['logging', s.logging], ...others,
+    ['all resolvers', new Markup(`<a href="/public-dns#${esc(s.id)}">public DNS resolvers</a>: every service, variant and address`)],
+    ...s.sources.map((u, i) => [i ? '' : 'sources', new Markup(`<a href="${esc(u)}" rel="noopener">${esc(sourceText(u))}</a>`)]),
+    ['last checked', RESOLVERS.checked],
+    ['your resolver', new Markup('See which resolver you actually use: <a href="/leaktest">leaktest</a>')],
+  ];
+  return headHtml(s.short, ['public DNS resolver', s.anycast && 'anycast'].filter(Boolean)) + kvHtml(rows) + fixLine(io, '/' + ip, 'resolver');
+}
+
+// /public-dns: every resolver in public/resolvers.js as one table, each address linked to its page, with the sources
+// and the day they were checked. A page for browsers (docPage), plain text for curl and scripts, and JSON with
+// ?format=json. Drawn from public/resolvers.js alone: no outside call, so a crawl costs nothing.
+function publicDnsRoute(io, html) {
+  const list = RESOLVERS.list(), day = RESOLVERS.checked, cache = 'public, max-age=300';
+  if (!html && io.url.searchParams.get('format') === 'json') {
+    return json({ checked: day, services: list.map(s => ({ id: s.id, service: s.service, operator: s.operator,
+      anycast: Boolean(s.anycast), anycastSource: s.anycast || null,
+      variants: s.variants.map(x => ({ name: x.name, filtering: x.filtering || null, ipv4: x.ipv4, ipv6: x.ipv6, doh: x.doh || null, dot: x.dot || null })),
+      dnssec: s.dnssec || null, ecs: s.ecs || null, logging: s.logging || null, sources: s.sources })) }, 200, { 'cache-control': cache });
+  }
+  if (!html) return text(publicDnsText(list, io.url), cache, 200, { vary: 'Accept, User-Agent' });
+  const count = list.reduce((n, s) => n + addressesOf(s).length, 0);
+  const names = list.map(s => s.short.replace(/ (Public )?DNS$/, ''));
+  const brands = `${names.slice(0, 5).join(', ')} and ${list.length - 5} more public DNS resolvers`;
+  const link = a => `<a href="/${esc(a)}">${esc(a)}</a>`;
+  const rows = list.map(s => `    <tbody id="${esc(s.id)}">` + s.variants.map((x, i) => '<tr>' +
+    (i ? '' : `<td${s.variants.length > 1 ? ` rowspan="${s.variants.length}"` : ''}>${esc(s.service)}<br><span class="doc-meta">${esc(s.operator)}</span>` +
+      (s.anycast ? '<br><span class="doc-meta">anycast</span>' : '') + '</td>') +
+    `<td>${esc(x.name)}${x.filtering ? `<br><span class="doc-meta">${esc(x.filtering)}</span>` : ''}</td><td>${x.ipv4.map(link).join('<br>')}</td>` +
+    `<td>${x.ipv6.map(link).join('<br>')}</td><td>${x.doh ? `<code>${esc(x.doh)}</code>` : ''}</td><td>${x.dot ? `<code>${esc(x.dot)}</code>` : ''}</td></tr>`).join('') +
+    '</tbody>').join('\n');
+  const sources = list.map(s => `<li id="${esc(s.id)}-sources">${esc(s.service)}: ` +
+    s.sources.map(u => `<a href="${esc(u)}" rel="noopener">${esc(sourceText(u))}</a>`).join(' · ') + '</li>').join('');
+  return docPage(io, { path: '/public-dns', name: 'public dns', cmd: 'public-dns', title: 'Public DNS resolvers: IP addresses, DoH, DoT and filtering | ipterm',
+    desc: descFit(`${brands}: every IPv4 and IPv6 address, DoH and DoT endpoint and filtering variant.`, `${brands}: addresses, DoH, DoT and filtering.`),
+    body: `    <h1>Public DNS resolvers</h1>
+    <p class="doc-meta">Last checked ${esc(day)} · ${list.length} services · ${count} addresses</p>
+    <p class="doc-lede">A DNS resolver looks up the addresses of the sites you visit. Devices use their internet provider's unless they are set to another, such as one of these. Every address, filtering variant and encrypted endpoint below comes from its operator's own documentation (the sources at the end), checked on ${esc(day)}; what an operator doesn't document is left out. A service marked anycast is one whose operator says each address is answered from many locations.</p>
+    <p>See which resolver you actually use: <a href="/leaktest">leaktest</a>. Each address has its own page, with its network, its routing and what the operator documents about DNSSEC, client subnet (ECS) and logging. DoH is DNS over HTTPS, and DoT DNS over TLS. The same list is plain text for <code>curl ${esc(io.url.host)}/public-dns</code>.</p>
+    <div class="table-wrap"><table class="doc-table dns-table">
+    <thead><tr><th>Service</th><th>Variant and filtering</th><th>IPv4</th><th>IPv6</th><th>DoH</th><th>DoT</th></tr></thead>
+${rows}
+    </table></div>
+    <h2>Sources</h2>
+    <p>Checked on ${esc(day)}.</p>
+    <ul>${sources}</ul>
+    ${fixLine(io, '/public-dns', null, 'doc-meta')}` });
+}
+
+// /public-dns for curl: each service and its variants, wrapped to 80 columns but for a source address too long for a
+// line of its own.
+function publicDnsText(list, url) {
+  // [key, value] as lines whose values start at column 16; none for an empty value
+  const row = (k, v, indent = '    ') => (v ? wrapText(plain(v), 65).map((l, i) => indent + (i ? '' : k).padEnd(15 - indent.length) + l) : []);
+  const out = [...wrapText(`Public DNS resolvers, from each operator's own documentation (last checked ${RESOLVERS.checked}). Anycast where the operator says so: each address is answered from many locations. Each address has its own page: ${url.origin}/<address>`, 80)];
+  for (const s of list) {
+    out.push('', plain(s.service), ...row('operator', s.operator, '  '), ...row('served from', s.anycast && 'anycast: answered from many locations', '  '));
+    for (const x of s.variants) {
+      out.push('  ' + plain(x.name), ...row('filtering', x.filtering), ...row('IPv4', x.ipv4.join('  ')), ...row('IPv6', x.ipv6.join('  ')),
+        ...row('DoH', x.doh), ...row('DoT', x.dot));
+    }
+    out.push(...s.sources.map((u, i) => '  ' + (i ? '' : 'sources').padEnd(13) + u));
+  }
+  out.push('', `See which resolver you actually use: ${url.origin}/leaktest (in a browser).`);
+  return out.join('\n') + '\n';
 }
 
 /* ---------- hardening ---------- */

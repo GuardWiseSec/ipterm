@@ -19,7 +19,7 @@
 <meta name="theme-color" content="#030805">
 <script src="/prefs.js"></script>
 <link rel="stylesheet" href="/app.css">
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Article","headline":"What your IP address reveals (and what it doesn’t)","description":"What a website can learn from your IP address: your provider and an approximate location. What it cannot: your name, street address or browsing history.","datePublished":"2026-10-12","dateModified":"2026-10-12","author":{"@type":"Organization","name":"ipterm"},"publisher":{"@type":"Organization","name":"ipterm"},"mainEntityOfPage":"%ORIGIN%/guides/what-your-ip-reveals","image":"%ORIGIN%/og.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"ipterm","item":"%ORIGIN%/"},{"@type":"ListItem","position":2,"name":"Guides","item":"%ORIGIN%/guides"},{"@type":"ListItem","position":3,"name":"What your IP address reveals (and what it doesn’t)","item":"%ORIGIN%/guides/what-your-ip-reveals"}]}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Article","headline":"What your IP address reveals (and what it doesn’t)","description":"What a website can learn from your IP address: your provider and an approximate location. What it cannot: your name, street address or browsing history.","datePublished":"2026-10-12","dateModified":"2026-10-28","author":{"@type":"Organization","name":"ipterm"},"publisher":{"@type":"Organization","name":"ipterm"},"mainEntityOfPage":"%ORIGIN%/guides/what-your-ip-reveals","image":"%ORIGIN%/og.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"ipterm","item":"%ORIGIN%/"},{"@type":"ListItem","position":2,"name":"Guides","item":"%ORIGIN%/guides"},{"@type":"ListItem","position":3,"name":"What your IP address reveals (and what it doesn’t)","item":"%ORIGIN%/guides/what-your-ip-reveals"}]}]}</script>
 </head>
 <body>
 <div class="doc">
@@ -31,7 +31,7 @@
   <main class="doc-body">
     <p class="ln echo"><span class="ps1">guest@ipterm:~$</span> man ip-privacy</p>
     <h1>What your IP address reveals (and what it doesn’t)</h1>
-    <p class="doc-meta">Updated October 12, 2026 · 2 min read</p>
+    <p class="doc-meta">Updated October 28, 2026 · 2 min read</p>
     <p class="doc-lede">Every website you visit sees your public IP address, because that is where it sends its reply. On its own, the address says less than many people fear, and more than some people assume.</p>
 <h2>What an IP address does reveal</h2>
 <ul>
@@ -59,9 +59,13 @@
 
 <h2>Showing websites a different address</h2>
 <p>A <strong>VPN</strong> routes your traffic through the VPN provider, so websites see the provider's address instead of yours. Your internet provider then sees only that you're connected to the VPN, while the VPN provider can see where your traffic goes, so choose one you trust. <strong>Tor</strong> spreads traffic across volunteer relays for stronger anonymity at the cost of speed. Neither changes what you reveal by signing in to accounts.</p>
+
+<h2>Who looks up the sites you visit</h2>
+<p>Before your device connects to a site, a <strong>DNS resolver</strong> looks up the site's address, so the resolver sees the names of the sites you visit. Devices use their internet provider's resolver unless they, the router or a VPN are set to use another, such as one of the <a href="/public-dns">public DNS resolvers</a>. <a href="/leaktest">leaktest</a> shows which one your browser actually uses.</p>
     <p class="doc-try"><strong>Try it</strong>Run <a href="/" data-cmd="whoami">whoami</a> to see exactly what your own address shows.</p>
     <h2>Related guides</h2>
     <ul><li><a href="/guides/private-ip-ranges">Private IP address ranges explained</a></li><li><a href="/guides/what-is-an-asn">What is an ASN (autonomous system number)?</a></li></ul>
+    <!--FIX-->
   </main>
 </div>
 </body>

@@ -1,0 +1,16 @@
+# The issue template chooser: the two forms in this folder (correction.yml, new-port.yml), and where the questions
+# ipterm can't answer itself go. Blank issues stay open, for bugs and anything else.
+blank_issues_enabled: true
+contact_links:
+  - name: A location is wrong
+    url: https://ipinfo.io/corrections
+    about: The locations of other addresses come from IPinfo, which takes corrections to its data itself.
+  - name: An IP address's or network's whois record is wrong
+    url: https://www.nro.net/about/rirs/
+    about: The record is the regional internet registry's own (ARIN, RIPE NCC, APNIC, LACNIC or AFRINIC, or a national registry under one). Only the registry or the network's holder can change it.
+  - name: A domain's whois record is wrong
+    url: https://lookup.icann.org/
+    about: The record is the domain's registry's or registrar's own. ICANN Lookup shows which registrar a domain is with.
+  - name: Privacy, or a name to remove
+    url: https://ipterm.net/privacy
+    about: Email contact@ipterm.net rather than opening an issue, which is public. The privacy policy says what ipterm handles.

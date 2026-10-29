@@ -109,7 +109,7 @@
   // The day the port pages last changed (a row above, IANA below, or the page itself: portPage() in src/worker.js,
   // portAbout() in public/app.js). /sitemap-ports.xml gives it as every port page's <lastmod>, so search engines
   // recrawl them when it moves: change it with them, and only then.
-  const UPDATED = '2026-10-25';
+  const UPDATED = '2026-10-28';
   // IANA's service names for each port above, on the protocol(s) of its row, from the Service Name and Transport
   // Protocol Port Number Registry (iana.org/assignments/service-names-port-numbers, the CSV of 2026-10-25). Space
   // separated, in the registry's order; '' when IANA has no entry for that port and protocol. For the tcp+udp rows

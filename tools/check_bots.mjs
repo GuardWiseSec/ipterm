@@ -117,6 +117,7 @@ const calls = [];                                        // every outside reques
 const RECORDS = {                                        // RDAP records by address; anything else gets one of its own /32 or /128
   '75.0.0.0': ['75.0.0.0', '75.255.255.255', '75.0.0.0', 8], '75.0.0.7': ['75.0.0.0', '75.255.255.255', '75.0.0.0', 8],
   '104.21.0.0': ['104.16.0.0', '104.31.255.255', '104.16.0.0', 12], '8.8.8.8': ['8.8.8.8', '8.8.8.8', '8.8.8.8', 32],
+  '76.76.2.0': ['76.76.2.0', '76.76.2.255', '76.76.2.0', 24],
   '2603:2000::': ['2603:2000::', '2603:2000:fff:ffff:ffff:ffff:ffff:ffff', '2603:2000::', 20],
   '2600::': ['2600::', '2600:0:ffff:ffff:ffff:ffff:ffff:ffff', '2600::', 32],
 };
@@ -286,6 +287,7 @@ for (const [q, want, what] of [
   ['75.0.0.7', '/75.0.0.7', 'another address in the block'],
   ['104.21.0.0', '/104.21.0.0', 'an x.x.x.0 address inside a larger registry block (104.16.0.0/12)'],
   ['8.8.8.8', '/8.8.8.8', 'a curated address, even as the whole of its block (a /32 here)'],
+  ['76.76.2.0', '/76.76.2.0', "a public DNS resolver's address (public/resolvers.js), though it starts its block (76.76.2.0/24)"],
   ['74.9.9.9', '/74.9.9.9', 'an address registered on its own (a /32 record): a host, not a block'],
   ['2600:1::5', '/2600:1::5', 'an IPv6 address registered on its own (a /128 record)'],
   ['2600::', '/cidr/2600::/32', "an IPv6 /32's first address (a /32 is a block in IPv6)"],
@@ -294,9 +296,9 @@ for (const [q, want, what] of [
   ok(seeAlso(r.body) === want, `/whois/${q}, ${what}: links ${seeAlso(r.body)}`);
 }
 let rows = [];
-const T = Function('CIDRLIB', 'el', 'shareBar', 'out', 'kv', 'cmdLink', 'mailLink', 'line', 'announce',
+const T = Function('CIDRLIB', 'RESLIB', 'el', 'shareBar', 'out', 'kv', 'cmdLink', 'mailLink', 'line', 'announce',
   slice(app, '  function blockStart(d) {', '  async function renderAsn(') + 'return { blockStart, renderWhois };')(
-  globalThis.IPTERM_CIDR, () => ({ append() {} }), () => null, { appendChild() {} }, r => { rows = r; },
+  globalThis.IPTERM_CIDR, globalThis.IPTERM_RESOLVERS, () => ({ append() {} }), () => null, { appendChild() {} }, r => { rows = r; },
   (text, cmd, href) => ({ text, cmd, href }), x => x, () => {}, () => {});
 for (const [d, want] of [
   [{ kind: 'ip', query: '75.0.0.0', cidrs: ['75.0.0.0/8'] }, '/cidr/75.0.0.0/8'],
@@ -306,6 +308,7 @@ for (const [d, want] of [
   [{ kind: 'ip', query: '74.9.9.9', cidrs: ['74.9.9.9/32'] }, '/74.9.9.9'],
   [{ kind: 'ip', query: '2600:1::5', cidrs: ['2600:1::5/128'] }, '/2600:1::5'],
   [{ kind: 'ip', query: '2600::', cidrs: ['2600::/32'] }, '/cidr/2600::/32'],
+  [{ kind: 'ip', query: '76.76.2.0', cidrs: ['76.76.2.0/24'] }, '/76.76.2.0'],
   [{ kind: 'asn', query: 'AS13335' }, '/AS13335'],
 ]) {
   await T.renderWhois({ found: true, org: 'Test', ...d });
@@ -313,7 +316,7 @@ for (const [d, want] of [
   ok(det.href === want, `the terminal's whois ${d.query}: details links ${det.href}`);
 }
 
-console.log("-- a network's first address is noindex unless curated (src/worker.js ipPage, netStart)");
+console.log("-- a network's first address is noindex unless curated or a public DNS resolver's (src/worker.js ipPage, netStart, curatedIps)");
 const robots = body => /<meta name="robots" content="noindex, follow">/.test(body);
 const canonical = body => (/<link rel="canonical" href="([^"]*)">/.exec(body) || [])[1];
 const page = await run('/75.0.0.0', { ua: GOOG });
@@ -326,7 +329,7 @@ for (const ip of ['73.0.0.0', '2603:2000:0:1::']) {
   ok(robots(r.body) && canonical(r.body) === 'https://ipterm.net/' + ip && !r.body.includes('Registered block:'),
     `/${ip} with no registry date in the cache: noindex, no block line`);
 }
-for (const ip of ['75.0.0.7', '2603:2000::1', '8.8.8.8']) {
+for (const ip of ['75.0.0.7', '2603:2000::1', '8.8.8.8', '76.76.2.0', '2606:1a40::']) {   // the last two: resolvers' first addresses
   const r = await run('/' + ip, { ua: GOOG });
   ok(r.status === 200 && !robots(r.body) && canonical(r.body) === 'https://ipterm.net/' + ip && !r.body.includes('Registered block:'),
     `/${ip}: indexed, canonical ${canonical(r.body)}`);

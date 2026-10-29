@@ -1,0 +1,51 @@
+# "Suggest a port" for ipterm's port pages (the LIST in public/ports.js). Each one is checked against its maker's own
+# documentation and IANA's registry before it is added.
+name: Suggest a port
+description: A port the port checker should explain, with what uses it.
+title: "New port: "
+labels: ["new-port"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This issue is public.** Don't paste your own IP address, a port check's result or anything else about you or your network.
+
+        ipterm explains common ports at https://ipterm.net/port: what uses each one, why it may be closed and any risk in opening it.
+  - type: input
+    id: port
+    attributes:
+      label: Port number
+    validations:
+      required: true
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: Protocol
+      options:
+        - TCP
+        - UDP
+        - TCP and UDP
+    validations:
+      required: true
+  - type: input
+    id: service
+    attributes:
+      label: What uses it
+      description: The program, game or device, as its maker names it.
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source
+      description: A link to the maker's own documentation that names this port.
+      placeholder: https://
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Why it may be closed, or a risk in opening it
+      description: Optional. What usually goes wrong, from the maker's documentation or your own setup.
+    validations:
+      required: false

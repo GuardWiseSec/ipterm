@@ -28,6 +28,7 @@
 //   LOOKUPS=1 node tools/check_block.mjs
 import { readFileSync } from 'node:fs';
 import { ANSI, ansi } from '../src/me.js';
+import '../public/resolvers.js';                 // the public DNS resolvers, which ipPage() asks about every address
 
 const root = new URL('..', import.meta.url);
 const read = f => readFileSync(new URL(f, root), 'utf8').replace(/\r\n/g, '\n');   // a Windows checkout has CRLF
@@ -44,15 +45,16 @@ function slice(src, from, to) {
 const REGISTRY = Function(`return ${/const REGISTRY = (\{[^}]*\});/.exec(worker)[1]}`)();
 // The Worker's code as it runs: the registry's name, the block, and the text answer and the page that show its line
 // (shell(), the page around the block, hands back just the block).
-const W = Function('REGISTRY', 'ANSI', 'ansi', 'shell', [slice(worker, 'const IPINFO_CREDIT =', '\n'),
+const W = Function('REGISTRY', 'ANSI', 'ansi', 'shell', 'RESOLVERS', [slice(worker, 'const IPINFO_CREDIT =', '\n'),
   slice(worker, 'function registryOf(', 'async function rdapLookup('), slice(worker, 'const BLOCK_RECENT_DAYS', '/* ---------- domain whois'),
   slice(worker, 'const plain = ', 'function asnText('), slice(worker, 'function connectionText(', 'function cidrPage('),
   slice(worker, 'const DESC_MAX', 'let SHELL = null;'),                              // the page's description (descFit)
   slice(worker, 'function staticBlock(', '/* ---------- robots'), slice(worker, 'const esc = ', 'const safeJson'),
   // what ipPage asks of an address: is it a network's first address (netStart), curated, inside the block
   slice(worker, 'const V4 = ', 'function countryName('), slice(worker, 'let curated = null;', '// What an IPv4 address typed'),
-  slice(worker, 'const SITEMAP_PATHS = [', '\n];') + '\n];', slice(worker, 'function inPrefix(', '// The RDAP base'),
-  'return { registryOf, blockOf, blockText, BLOCK_RECENT_DAYS, ipText, ipPage, esc };'].join('\n'))(REGISTRY, ANSI, ansi, (io, o) => o.body);
+  slice(worker, 'const SITEMAP_PATHS = [', '\n];') + '\n];', slice(worker, 'const addressesOf = ', 'const resolverPaths = '),
+  slice(worker, 'function inPrefix(', '// The RDAP base'),
+  'return { registryOf, blockOf, blockText, BLOCK_RECENT_DAYS, ipText, ipPage, esc };'].join('\n'))(REGISTRY, ANSI, ansi, (io, o) => o.body, globalThis.IPTERM_RESOLVERS);
 // The terminal's line and its lookup, with what render() draws on stubbed: kv() gets the rows it shows.
 let shown = [];
 const T = Function('classify', 'el', 'SRC', 'shareBar', 'out', 'geoBlock', 'connection', 'vpnText', 'computed', 'kv', 'announce',

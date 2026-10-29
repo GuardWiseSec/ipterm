@@ -14,8 +14,9 @@
 //    public/ports.js: 8096, 28015, 51413, 64738), which link IANA alone; a port that isn't listed (9999) has no such
 //    row. Given IANA's CSV (service-names-port-numbers.csv), every stored name is checked against it as well.
 // 3. Titles and descriptions: an IP page is "<ip> IP lookup: <org> (<ASN>), <hostname> | ipterm" with missing parts
-//    left out, an anycast address is called anycast and never "located in", a curated resolver's IPinfo Lite answer
-//    (a bot's /1.1.1.1) names no place, a non-public address is "<ip> · <its kind's word> IPv4 address" (private,
+//    left out, an anycast address is called anycast and never "located in", a public DNS resolver's page is titled
+//    as the resolver and names no place, from IPinfo Core or a bot's IPinfo Lite (/1.1.1.1: "Australia") alike
+//    (tools/check_resolvers.mjs checks the rest of those pages), a non-public address is "<ip> · <its kind's word> IPv4 address" (private,
 //    loopback, documentation ...: kindWord in public/cidr.js; every indexed RFC 1918 router page "private") tagged with
 //    its kind, an address IPinfo calls a bogon is "<ip> IP lookup: IPinfo lists it as a bogon" (below), an ASN page
 //    is "AS<n> <name>: ASN, IP ranges and upstreams | ipterm", and a /32 is "a single address", in the Worker's pages
@@ -74,6 +75,7 @@ globalThis.caches = { default: {
 // number but no name. Anything else is the second one without its hostname.
 const CORE = {
   '8.8.4.4': { hostname: 'dns.google', city: 'Mountain View', region: 'California', as: ['AS15169', 'Google LLC'], anycast: true },
+  '104.16.132.229': { city: 'San Francisco', region: 'California', as: ['AS13335', 'Cloudflare, Inc.'], anycast: true },
   '74.1.2.3': { hostname: 'c-74-1-2-3.hsd1.fl.comcast.net', city: 'Coral Springs', region: 'Florida', as: ['AS7922', 'Comcast Cable Communications, LLC'] },
   '74.1.2.5': { city: null, region: null, as: ['AS7922', null] },
 };
@@ -261,10 +263,11 @@ const node = (tag, text = '') => ({ tag, text, kids: [], append(...xs) { this.ki
 const textOf = x => (x == null ? '' : typeof x === 'string' ? x : (x.text || '') + (x.kids || []).map(textOf).join(''));
 const anchors = x => (!x || typeof x !== 'object' ? [] : [...(x.tag === 'a' ? [x] : []), ...(x.kids || []).flatMap(anchors)]);
 let kvRows = [], titled = '';
-const portAbout = Function('PORTSLIB', 'setUrl', 'portTitle', 'el', 'out', 'shareBar', 'kv', 'cmdButton', 'document', 'announce', 'next',
+// (fixLine, the corrections line after the table, is checked in tools/check_corrections.mjs)
+const portAbout = Function('PORTSLIB', 'setUrl', 'portTitle', 'el', 'out', 'shareBar', 'kv', 'cmdButton', 'document', 'announce', 'next', 'fixLine',
   slice(app, '  async function portAbout(n) {', '  async function portCheck(n) {') + 'return portAbout;')(
   PORTS, () => {}, () => '', (tag, cls, text) => node(tag, text), node('#out'), () => null, r => { kvRows = r; }, t => node('button', t),
-  { createDocumentFragment: () => node('#fragment') }, () => {}, () => {});
+  { createDocumentFragment: () => node('#fragment') }, () => {}, () => {}, () => {});
 for (const [n, key, text] of [[22, 'IANA name', 'ssh (TCP)'], [3478, 'IANA names', 'stun, turn, stun-behavior (TCP and UDP)'], [25565, 'IANA name', 'not registered with IANA'],
   [64738, 'IANA name', 'not registered with IANA']]) {
   await portAbout(n);
@@ -276,7 +279,7 @@ await portAbout(9999);
 ok(!kvRows.some(r => /^IANA/.test(r[0])), "the terminal's port 9999 --info: no IANA row");
 
 console.log('-- titles and descriptions: IP pages (ipPage in src/worker.js, ipTitle in public/app.js)');
-const ipTitle = Function(slice(app, '  const ipTitle =', '  function localTime(') + 'return ipTitle;')();
+const ipTitle = Function('RESLIB', slice(app, '  const ipTitle =', '  function localTime(') + 'return ipTitle;')(globalThis.IPTERM_RESOLVERS);
 for (const [what, ip, opts, title, lead] of [
   ['an address with its hostname', '74.1.2.3', { ua: CHROME, ...NAV }, '74.1.2.3 IP lookup: Comcast Cable Communications, LLC (AS7922), c-74-1-2-3.hsd1.fl.comcast.net | ipterm',
     '74.1.2.3 is a public IPv4 address operated by Comcast Cable Communications, LLC (AS7922), located in Coral Springs, Florida, United States.'],
@@ -290,17 +293,28 @@ for (const [what, ip, opts, title, lead] of [
   ok(h.title === title && ipTitle(ip, r.data) === title, `${what}: ${JSON.stringify(h.title)}, the same in the terminal`);
   fits(`  ${ip}`, h, lead);
 }
-const any = await run('/8.8.4.4', { ua: CHROME, ...NAV }), ah = head(any.body);
-ok(ah.title === '8.8.4.4 IP lookup: Google LLC (AS15169), dns.google | ipterm' && ipTitle('8.8.4.4', any.data) === ah.title, `an anycast address: ${JSON.stringify(ah.title)}`);
-fits('  8.8.4.4', ah, '8.8.4.4 is a public IPv4 address operated by Google LLC (AS15169), anycast (served from many locations).');
+const any = await run('/104.16.132.229', { ua: CHROME, ...NAV }), ah = head(any.body);
+ok(ah.title === '104.16.132.229 IP lookup: Cloudflare, Inc. (AS13335) | ipterm' && ipTitle('104.16.132.229', any.data) === ah.title, `an anycast address: ${JSON.stringify(ah.title)}`);
+fits('  104.16.132.229', ah, '104.16.132.229 is a public IPv4 address operated by Cloudflare, Inc. (AS13335), anycast (served from many locations).');
 ok(!/located in|approximate/.test(ah.desc) && !/located in|IP location is approximate/.test(article(any.body)),
   '  ... and neither its description nor its page says "located in" or "approximate" (IPinfo gives one of its many locations)');
-// Googlebot gets IPinfo Lite, which has no anycast flag and gives 1.1.1.1 Australia: a resolver page in SITEMAP_PATHS
-// names no place for it, while another address's Lite answer keeps its country (74.1.2.6 above).
+// A public DNS resolver's page is the resolver's (public/resolvers.js), with no place whatever IPinfo says: from Core
+// (8.8.4.4, with a city) or from IPinfo Lite, which Googlebot gets, with no anycast flag and 1.1.1.1 in Australia.
+// Neither names a place, while another address's Lite answer keeps its country (74.1.2.6 above). Google filters
+// nothing, so its title says no "filtering".
+const res = await run('/8.8.4.4', { ua: CHROME, ...NAV }), rh = head(res.body);
+ok(rh.title === '8.8.4.4 · Google Public DNS: addresses, DoH and DoT | ipterm' && ipTitle('8.8.4.4', res.data) === rh.title,
+  `a resolver, from IPinfo Core: ${JSON.stringify(rh.title)}, the same in the terminal`);
+fits('  8.8.4.4', rh, "8.8.4.4 is Google's public DNS resolver. Also 8.8.8.8, IPv6 2001:4860:4860::8888.");
 const lite = await run('/1.1.1.1', { ua: GOOG }), lh = head(lite.body);
-ok(lite.kinds.includes('lite') && !lite.kinds.includes('core') && lh.desc === '1.1.1.1 is a public IPv4 address operated by Cloudflare, Inc. (AS13335).' &&
-  !/located in|approximate/.test(article(lite.body)) && rowOf(article(lite.body), 'location') === 'Australia',
-  `a curated resolver's Lite answer, /1.1.1.1 for Googlebot: ${JSON.stringify(lh.desc)}, no "located in" on the page, the location row kept`);
+ok(lite.kinds.includes('lite') && !lite.kinds.includes('core') && lh.title === '1.1.1.1 · Cloudflare DNS: addresses, DoH, DoT and filtering | ipterm' &&
+  lh.desc === "1.1.1.1 is Cloudflare's public DNS resolver. Secondary 1.0.0.1, IPv6 2606:4700:4700::1111. DoH, DoT, filtering variants and live routing." &&
+  /Anycast: answered from many locations\./.test(article(lite.body)) && rowOf(article(lite.body), 'location') === 'Australia',
+  `a resolver, from IPinfo Lite (/1.1.1.1 for Googlebot): ${JSON.stringify(lh.desc)}, the location row kept`);
+for (const [what, r] of [['8.8.4.4', res], ['1.1.1.1 for Googlebot', lite]]) {
+  ok(!/located in|approximate|Mountain View|Australia/.test(head(r.body).title + head(r.body).desc + (/<p class="ln">[^<]*<\/p>/.exec(article(r.body)) || [''])[0]),
+    `  ... ${what}: no place in its title, description or summary`);
+}
 // A non-public address's title names its kind in the word people search for (kindWord in public/cidr.js), and the
 // terminal's lookup() titles its tab the same way.
 const terminalNonPublic = "setUrl('/' + ipText, `${ipText} · ${CIDRLIB.kindWord(cls)} IPv${p.v} address | ipterm`)";

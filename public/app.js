@@ -597,6 +597,7 @@
         const d = CIDRLIB && CIDRLIB.calc(a);
         return d && !d.error && d.range === 'public' ? '/cidr/' + d.cidr : null;
       }
+      case 'public-dns': return '/public-dns';                 // a document page, not the terminal's (the click runs the command)
       case 'port': {                                           // the page explains the port; the link's click runs the check
         if (!a) return '/port';
         const n = PORTSLIB && PORTSLIB.parse(a);
@@ -649,9 +650,12 @@
     const a = el('a', '', addr); a.href = 'mailto:' + addr; return a;
   }
   // "<ip> IP lookup: <org> (<ASN>), <hostname>", without the parts the lookup doesn't have, as ipPage() in worker.js,
-  // or what IPinfo says of an address it calls a bogon (IPINFO_BOGON)
+  // a public DNS resolver's own title ("9.9.9.9 · Quad9 DNS: addresses, DoH, DoT and filtering", from resolvers.js), or
+  // what IPinfo says of an address it calls a bogon (IPINFO_BOGON)
   const ipTitle = (ip, d) => {
     if (d.bogon) return `${ip} IP lookup: IPinfo lists it as a bogon | ipterm`;
+    const r = RESLIB && RESLIB.get(ip);
+    if (r) return RESLIB.title(r);
     const named = [d.org ? d.org + (d.asn ? ` (${d.asn})` : '') : d.asn, d.hostname].filter(Boolean).join(', ');
     return `${ip} IP lookup${named ? ': ' + named : ''} | ipterm`;
   };
@@ -1376,9 +1380,17 @@
       d = DEMO[ipText] ? { ...DEMO[ipText], source: 'demo' } : null;
       if (!d) line('Preview mode has sample data for 8.8.8.8, 1.1.1.1 and 9.9.9.9 only. Owner and location for other addresses appear once the Worker is deployed. Computed details below.', 'warn');
     }
+    // A public DNS resolver's address is a reference page: its resolver block and corrections line, and no sponsored
+    // line (resolverAbout), shown from resolvers.js even when the lookup itself failed. The lookup's rows and map are
+    // IPinfo's, as on its page (ipPage() in worker.js); the resolver block says it is anycast where the operator does.
+    const res = RESLIB && !(d && d.bogon) ? RESLIB.get(ipText) : null;
     if (d) setUrl(ipPath(ipText), ipTitle(ipText, d));
     await render(p, ipText, d, false);
-    if (d && !d.bogon) await sponsor('ip');      // none for IPinfo's bogon, as for a non-public address
+    if (res) await resolverAbout(res);
+    else if (d && !d.bogon) {
+      ipinfoFix(d);                              // where its place is IPinfo's: IPinfo's corrections form
+      await sponsor('ip');                       // none for IPinfo's bogon, as for a non-public address
+    }
     if (!d && live) return;                      // the lookup failed: retry is offered instead
     const block = `${ipText}/${p.v === 4 ? 24 : 64}`;
     next(d && [`whois ${ipText}`, `whois ${ipText}`, 'registry record: owner and abuse contact'],
@@ -1579,6 +1591,7 @@
       PORTSLIB.list().forEach((n, i) => { if (i) c.append('  ·  '); c.append(cmdLink(`${n} ${PORTSLIB.get(n).name}`, `port ${n} --info`, `/port/${n}`)); });
       out.appendChild(c);
     }
+    fixLine('/port');
     scroll();
     announce('Port checker. Type port and a number to check whether that port is open on your own IP address.');
   }
@@ -1609,6 +1622,7 @@
     f.append(cmdButton(`check port ${n} now`, `port ${n}`), '  on the address you are visiting from (one connection; nothing is stored)');
     rows.push(['check', blocked ? `ipterm can't check this port: ${blocked}` : f]);
     await kv(rows);
+    fixLine('/port/' + n);
     const then = blocked ? `ipterm can't check this port: ${blocked}` : 'Use the check button to test it on your address.';
     announce(s ? `Port ${n}, ${s.name}: ${s.use} ${then}` : `Port ${n}. ${then}`);
     next(['port', 'port', 'common ports and how the check works'], ['man port', 'man port', 'the manual']);
@@ -1659,6 +1673,102 @@
     return portCheck(n);
   }
 
+  /* ---------- public DNS resolvers ----------
+     A lookup of a public DNS resolver's address adds its resolver block (resolverAbout): the service and its variant,
+     the other addresses, DoH and DoT, what the operator documents about DNSSEC, ECS and logging, its sources and when
+     they were checked, and leaktest to see which resolver you actually use, then the corrections line. Row for row the
+     Worker's resolverBlock(), but for routing: the page shows it only when cached, the terminal asks for it (route).
+     public-dns lists them all, as /public-dns does. The data is resolvers.js, shared with the Worker; it names no
+     place for these addresses, and calls one anycast only where its operator says so. No sponsored line after either. */
+  const RESLIB = window.IPTERM_RESOLVERS || null;
+  const sourceText = u => u.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  async function resolverAbout(r) {
+    const s = r.service, x = r.variant;
+    const head = el('div', 'head');
+    head.append(el('span', 'hip', s.short), el('span', 'tag', 'public DNS resolver'));
+    if (s.anycast) head.append(el('span', 'tag', 'anycast'));
+    out.appendChild(head);
+    const look = a => cmdLink(a, 'lookup ' + a, '/' + a);
+    const addrs = list => joined(list.map(a => (a === r.ip ? document.createTextNode(a + ' (this address)') : look(a))));
+    const routing = el('span', live ? 'ttl' : '', live ? 'asking RIPEstat…' : '');
+    const routeLink = () => runnable(`route ${r.ip}`, `route ${r.ip}`);
+    if (!live) routing.append(routeLink(), ': who announces it, RPKI and AS paths, from RIPEstat');
+    const rows = [['service', s.service], ['operator', s.operator], s.variants.length > 1 && ['variant', x.name], x.filtering && ['filtering', x.filtering],
+      x.ipv4.length && ['IPv4', addrs(x.ipv4)], x.ipv6.length && ['IPv6', addrs(x.ipv6)], x.doh && ['DNS over HTTPS', x.doh], x.dot && ['DNS over TLS', x.dot],
+      s.anycast && ['served from', 'anycast: answered from many locations'], ['routing', routing],
+      s.dnssec && ['DNSSEC', s.dnssec], s.ecs && ['client subnet', s.ecs], s.logging && ['logging', s.logging],
+      ...s.variants.filter(o => o !== x).map((o, i) => [i ? '' : 'other variants', joinFrag([o.name + ': ', joined([...o.ipv4, ...o.ipv6].map(look))])]),
+      ['all resolvers', joinFrag([cmdLink('public DNS resolvers', 'public-dns', '/public-dns#' + s.id), ': every service, variant and address'])],
+      ...s.sources.map((u, i) => { const a = el('a', '', sourceText(u) + ' ↗'); a.href = u; a.target = '_blank'; a.rel = 'noopener'; return [i ? '' : 'sources', a]; }),
+      ['last checked', RESLIB.checked],
+      ['your resolver', joinFrag(['See which resolver you actually use: ', cmdLink('leaktest', 'leaktest', '/leaktest')])]].filter(Boolean);
+    await kv(rows);
+    // How it is routed, from RIPEstat through the Worker (cached there for six hours), while the rest is already shown
+    if (live) {
+      apiRoute(r.ip).then(d => {
+        routing.textContent = ''; routing.className = '';
+        if (d && !d.error && d.summary) routing.append(d.summary + '  ', routeLink());
+        else routing.append(routeLink(), ': who announces it, RPKI and AS paths, from RIPEstat');
+      });
+    }
+    fixLine('/' + r.ip, 'resolver');
+    announce([RESLIB.lead(r), RESLIB.others(r), s.anycast && 'Anycast: answered from many locations.'].filter(Boolean).join(' '));   // in place of render()'s, which names a place
+  }
+
+  // public-dns [service]: the services, their variants with what they filter, and every address, linked to its page
+  async function publicDns(args = []) {
+    if (!RESLIB) return line('The resolver list did not load. Reload the page and try again.', 'err');
+    const want = args.join(' ').trim().toLowerCase(), all = RESLIB.list();
+    const list = want ? all.filter(s => s.id === want || s.short.toLowerCase().includes(want) || s.service.toLowerCase().includes(want)) : all;
+    if (!list.length) return line(`No public DNS resolver here matches "${args.join(' ')}". Try one of: ${all.map(s => s.id).join(', ')}`, 'warn');
+    const path = '/public-dns' + (list.length === 1 ? '#' + list[0].id : ''), cmd = 'public-dns' + (want ? ' ' + want : '');
+    const head = el('div', 'head');
+    head.append(el('span', 'hip', cmd), el('span', 'tag', `${list.length} service${list.length > 1 ? 's' : ''}`), el('span', 'tag', 'checked ' + RESLIB.checked));
+    head.append(shareBar({ cmd, value: location.origin + path, what: 'the link to the list', path }));
+    out.appendChild(head);
+    line(`Public DNS resolvers, from each operator's own documentation (last checked ${RESLIB.checked}). Anycast where the operator says so: each address is answered from many locations. Click an address for its page: DoH and DoT, DNSSEC, logging and sources.`, 'sys');
+    const look = a => cmdLink(a, 'lookup ' + a, '/' + a);
+    for (const s of list) {
+      out.appendChild(el('div', 'ln', `${s.service} · ${s.operator}` + (s.anycast ? ' · anycast' : '')));
+      await kv(s.variants.flatMap(x => [[x.name, joined([...x.ipv4, ...x.ipv6].map(look))], ...(x.filtering ? [['', x.filtering]] : [])]));
+    }
+    const d = el('div', 'ln sys'), a = el('a', 'cmd', path + ' ↗');
+    a.href = path; d.append('the full table, with DoH, DoT and the sources: ', a); out.appendChild(d); scroll();
+    fixLine('/public-dns');
+    announce(`Public DNS resolvers: ${list.map(s => s.service).join(', ')}.`);
+    next(['leaktest', 'leaktest', 'see which resolver you actually use'], list.length > 1 && ['public-dns quad9', 'public-dns quad9', 'one service'],
+      ['man public-dns', 'man public-dns', 'the manual']);
+  }
+
+  /* ---------- corrections ----------
+     Reference pages end with "Something wrong here? Suggest a fix on GitHub (public, needs an account) or by email.":
+     after a port's page (port <n> --info), the port checker's (port), the tool pages (whois, dig, mail, grade, cidr
+     and api, on their own), a public DNS resolver's block (resolverAbout, with the field "resolver") and the list of
+     them (public-dns). The links fill in only the page's address and the field, where one is passed, as fixLinks() in
+     worker.js does, from the footer's data-fix and data-fix-mail (footBuild() there): a copy run by someone else has
+     neither, and shows no line. Never after your own results (whoami, leaktest, a port check). A looked-up address's
+     location points to IPinfo instead (ipinfoFix). copy md leaves both out (.fix). */
+  function fixLine(path, field = null) {
+    const b = document.querySelector('[data-fix]');
+    if (!b) return;
+    const page = location.origin + path, about = field ? ` (${field})` : '', q = encodeURIComponent;
+    const gh = el('a', '', 'Suggest a fix on GitHub ↗'), mail = el('a', '', 'by email');
+    gh.href = `${b.dataset.fix}/issues/new?template=correction.yml&title=${q(`Correction: ${path}${about}`)}&page=${q(page)}` + (field ? `&field=${q(field)}` : '');
+    gh.target = '_blank'; gh.rel = 'nofollow noopener';
+    mail.href = `mailto:${b.dataset.fixMail}?subject=${q(`Correction: ${page}${about}`)}`;
+    const d = el('div', 'ln sys fix'); d.append('Something wrong here? ', gh, ' (public, needs an account) or ', mail, '.');
+    out.appendChild(d); scroll();
+  }
+  // Where a looked-up address's place comes from IPinfo Core or its free API: IPinfo takes corrections itself. Not
+  // for an anycast address (one place of many) or IPinfo Lite (no anycast flag, a country only), as ipinfoFixes() and
+  // ipPage() in worker.js. Nor for a public DNS resolver, which lookup() gives its resolver block instead.
+  function ipinfoFix(d) {
+    if (!d || !/^ipinfo(-core)?$/.test(d.source || '') || (d.flags && d.flags.anycast) || ![d.city, d.region, d.country, d.countryCode].some(Boolean)) return;
+    const a = el('a', '', 'ipinfo.io/corrections ↗'); a.href = 'https://ipinfo.io/corrections'; a.target = '_blank'; a.rel = 'nofollow noopener';
+    const note = el('div', 'ln sys fix'); note.append('Location wrong? IPinfo takes corrections at ', a, '.');
+    out.appendChild(note); scroll();
+  }
+
   /* ---------- tool intros (/whois, /dns, /cidr, or the command on its own) ---------- */
   const TOOL_INTRO = {
     whois: { url: '/whois', title: 'Whois lookup: who owns a domain, IP address or network | ipterm',
@@ -1691,6 +1801,7 @@
     t.ex.forEach(([c, href], i) => { if (i) d.append('  ·  '); d.append(cmdLink(c, c, href)); });
     out.appendChild(d); scroll();
     if (tool === 'cidr' && CIDRLIB) await cidrTable();
+    fixLine(t.url);
     announce(t.text + ' ' + t.usage);
   }
 
@@ -2145,10 +2256,10 @@
 
   // The registry block whose first address a whois record's query is, or null. Its whois leads to that block's subnet
   // page rather than a lookup of the address (mostly a noindex page: netStart() in the Worker). whoisPage() in the
-  // Worker does the same, and keeps the lookup for curated addresses, none of which starts a block, and for a record of
-  // one address (a /32 or /128 reassignment), which is a host, not a block.
+  // Worker does the same, and keeps the lookup for curated addresses (a public DNS resolver's, such as 76.76.2.0, has a
+  // page of its own) and for a record of one address (a /32 or /128 reassignment), which is a host, not a block.
   function blockStart(d) {
-    if (d.kind !== 'ip' || !CIDRLIB) return null;
+    if (d.kind !== 'ip' || !CIDRLIB || (RESLIB && RESLIB.get(d.query))) return null;
     return (d.cidrs || []).find(c => { const x = CIDRLIB.calc(c); return !x.error && x.prefix < (x.v === 4 ? 32 : 128) && x.network === d.query; }) || null;
   }
 
@@ -2261,6 +2372,7 @@
     ['whois <ip|ASN|domain>', 'registry record: owner, registrar, dates, name servers, abuse contact', 'whois example.com'],
     ['asn <number>', 'network details, address blocks and upstreams, e.g. asn AS13335', 'asn AS13335'],
     ['route <prefix|ip>', 'how it is routed: origin network, RPKI, visibility, AS paths', 'route 1.1.1.0/24'],
+    ['public-dns [service]', 'public DNS resolvers: addresses, filtering variants, DoH and DoT', 'public-dns'],
     ['port <number>', 'is a TCP port open on your IP? (tests your own address only)', 'port'],
     ['<ip> or <ASN>', 'same as lookup', null],
     ['ping [count]', 'round trip from your browser to the nearest Cloudflare data center', 'ping'],
@@ -2283,7 +2395,7 @@
     vpncheck: 'leaktest', dnsleak: 'leaktest', dnsleaktest: 'leaktest', rdap: 'whois', subnet: 'cidr', ipcalc: 'cidr', dns: 'dig', nslookup: 'dig', host: 'dig', geo: 'lookup',
     spf: 'mail', dmarc: 'mail', dkim: 'mail', email: 'mail', mailcheck: 'mail', report: 'grade', reportcard: 'grade', scorecard: 'grade', badge: 'grade',
     as: 'asn', bgp: 'route', rpki: 'route', iplookup: 'lookup', link: 'share', cls: 'clear', fx: 'crt', curl: 'api', '?': 'help', a11y: 'access', accessibility: 'access',
-    portcheck: 'port', shortcuts: 'keys', bindkey: 'keys', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', trace: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
+    portcheck: 'port', resolvers: 'public-dns', publicdns: 'public-dns', shortcuts: 'keys', bindkey: 'keys', tracert: 'traceroute', mtr: 'traceroute', tracepath: 'traceroute', trace: 'traceroute', dir: 'ls', logout: 'exit', quit: 'exit' };
   // man <command>: [synopsis, description, examples, see also, curl paths]
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
@@ -2330,6 +2442,8 @@
       ['route 1.1.1.0/24', 'route 8.8.8.8', 'route 8.8.0.0/16', 'route 2001:4860::/32'], ['asn', 'cidr', 'whois'], ['/route/1.1.1.0/24', '/route/8.8.8.8?format=text']],
     port: ['port <number>   or   port <number> --info', "checks whether a TCP port is open on your own public IP address: ipterm's server connects to the address you are visiting from, on the one port you name, and reports open (something accepted), closed (turned away at once: nothing is listening, or a firewall rejected it) or no answer (dropped, usually by a router that isn't forwarding the port). It never tests any other address, sends nothing over the connection and stores nothing; 10 checks a minute. Port 25 can't be checked: Cloudflare, which runs ipterm, blocks it. Over IPv6 it tests your IPv6 address, where port forwards don't apply: curl -4 tests IPv4. --info explains a port without checking it.",
       ['port 25565', 'port 22', 'port 32400 --info'], ['whoami', 'ping'], ['-4 /port/22', '-4 /port/22?format=text']],
+    'public-dns': ['public-dns [service]', "the public DNS resolvers ipterm describes: each service's variants, what each filters, and their IPv4 and IPv6 addresses, all from the operator's own documentation (last checked on the date shown), and none placed in one city (anycast, answered from many locations, where the operator says so). With a service (quad9, cloudflare, google...), just that one. Click an address for its page, also what lookup shows after the address's own details: its DoH and DoT, the other variants, what the operator documents about DNSSEC, client subnet (ECS) and logging, its sources and its routing. leaktest shows which resolver you actually use.",
+      ['public-dns', 'public-dns quad9', 'lookup 1.1.1.3'], ['lookup', 'leaktest', 'dig'], ['/public-dns', '/public-dns?format=json']],
     ping: ['ping [count]', "times HTTPS round trips from your browser to the Cloudflare data center serving ipterm (4 by default, up to 10). Browsers can't send ICMP, so other hosts can't be pinged from a web page.",
       ['ping', 'ping 10'], ['whoami', 'traceroute']],
     traceroute: ['traceroute', "not possible from a browser: tracing a route needs raw ICMP or UDP packets. ping times the connection to ipterm's edge instead.", ['ping'], ['ping', 'asn']],
@@ -2356,7 +2470,7 @@
   const guideLink = slug => { const g = GUIDES.find(x => x[0] === slug), a = el('a', 'cmd', g ? g[1] : slug); a.href = '/guides/' + slug; return a; };
   // Ties go to the earlier entry, so plain commands come before their aliases ("iplookup" -> lookup, not nslookup),
   // unless the caller names one to prefer ("mal gmail.com" -> mail, not man).
-  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'grade', 'lookup', 'nslookup', 'asn', 'route', 'port', 'ping', 'traceroute', 'dmarc',
+  const KNOWN = ['help', 'man', 'whoami', 'myip', 'leaktest', 'dnsleak', 'whois', 'cidr', 'subnet', 'dig', 'mail', 'grade', 'lookup', 'nslookup', 'asn', 'route', 'port', 'public-dns', 'resolvers', 'ping', 'traceroute', 'dmarc',
     'share', 'copy', 'privacy', 'clear', 'history', 'keys', 'theme', 'crt', 'reset', 'access', 'motion', 'screen', 'api', 'about', 'ifconfig', 'ipconfig'];
   // Edit distance, with two swapped neighbors ("cdir") counting as one edit.
   function osa(a, b) {
@@ -2532,15 +2646,15 @@
      buttons still act on it; share, copy and copy md at the prompt act on the newest result (`current`).
      share opens the phone's share sheet where there is one and copies the link everywhere else. copy takes
      the result's main value (the address, domain, range or AS number). copy md takes a fenced Markdown
-     block for GitHub issues, Discord or Stack Overflow: the command, the result's lines, then its
-     permalink. Nothing copied carries the sponsored line or the next: line. A result about your own
-     connection never shares your address: after whoami or a port check its link is the page itself, which
+     block for GitHub issues, Discord or Stack Overflow: the command, the result's lines, then its permalink.
+     Nothing copied carries the sponsored line, the next: line or the corrections line. A result about your
+     own connection never shares your address: after whoami or a port check its link is the page itself, which
      shows each visitor their own ("check yours"); after leaktest it is the grade's /leaktest/r/<code> (only
      the grade and per-check flags, see leakgrade.js), or /leaktest when the run has no grade. Its Markdown
      leaves out your addresses and everything that names or places you: your provider and the networks
      involved (with their AS numbers), the place, the time zones and the data center. Rows that hold only
-     those go; in sentences they read [hidden] (leaktest's: also its resolvers and the previous run's, and
-     its compare prints only each line's status). */
+     those go; in sentences they read [hidden] (leaktest's: also its resolvers and the previous run's, and its
+     compare prints only each line's status). */
   let current = null;              // { cmd, value, what, path, self, hide: [your addresses], terms: [names and places], drop: [row labels], bar, text, note }
   // Rows of your own result that are your address in another form (or would point at it), or that only
   // name your provider or place you: its network, domain and connection type, the location, local time
@@ -2659,7 +2773,7 @@
         body.push('', ...rows.map(x => (x ? x[0].padEnd(w) + '  ' + x[1] : '')), '');
       } else if (n.classList.contains('head')) {   // a section's own header, like the routing under a cidr result
         body.push('', [...n.querySelectorAll('.hip, .tag')].map(t => t.textContent).join(' · '));
-      } else if (n.classList.contains('ln') && !['sponsor', 'next', 'run-yours', 'badge-snip'].some(c => n.classList.contains(c))) {
+      } else if (n.classList.contains('ln') && !['sponsor', 'next', 'run-yours', 'badge-snip', 'fix'].some(c => n.classList.contains(c))) {
         const t = textOf(n);
         if (t && !NOT_RESULT.test(t)) body.push(t);
       }
@@ -2764,6 +2878,7 @@
     credit.append('IP address data powered by ', ipinfo);
     out.append(d, go, form, el('div', 'ln snippet', html), credit); scroll();
     if (!live) line('These routes work once the Worker is deployed.', 'sys');
+    fixLine('/api');
     announce('API reference: curl commands for your IP, one value at a time, any IP, network, DNS name, registry record or subnet.');
     next(['whoami', 'whoami', 'your own IP, as /json returns it'], ['lookup 8.8.8.8', 'lookup 8.8.8.8', 'what /8.8.8.8 returns, drawn in the terminal']);
   }
@@ -2780,7 +2895,7 @@
     out.appendChild(d); scroll();
   }
 
-  const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'route', 'dig', 'mail', 'grade', 'lookup', 'asn', 'port']);
+  const RESULTS = new Set(['whoami', 'ifconfig', 'ipconfig', 'ip', 'leaktest', 'whois', 'cidr', 'route', 'dig', 'mail', 'grade', 'lookup', 'asn', 'port', 'public-dns']);
   // save: false for what the page runs by itself (a tool page's command, Back and Forward), which isn't saved.
   async function run(raw, save = true) {
     let cmd = raw.trim(); echo(raw);
@@ -2822,6 +2937,7 @@
       case 'asn': return args[0] ? asn(args[0]) : line('usage: asn <number>   example: asn AS13335', 'warn');
       case 'route': return route(args.join(' '));
       case 'port': return portCmd(args);
+      case 'public-dns': return publicDns(args);
       case 'ping': return ping(args);
       case 'traceroute': return traceroute(args[0]);
       case 'share': return share();
@@ -3088,9 +3204,10 @@
     // so only those go; the summary sentence and links stay for crawlers that run scripts. A 404 and
     // the homepage's whoami are drawn in full by the terminal, so their server copies go entirely.
     const stat = document.getElementById('static');
-    // The /api page's plain-text reference goes too: the terminal prints it with links (`api`).
+    // The /api page's plain-text reference goes too: the terminal prints it with links (`api`). So does the corrections
+    // line (.fix), which the terminal prints after the result it belongs to (fixLine, ipinfoFix).
     if (stat && (selfP || (init && (init.kind === 'notfound' || init.kind === 'leakshare')))) stat.remove();
-    else if (stat) stat.querySelectorAll('.head, dl, .api-ref, .badge-ref').forEach(n => n.remove());   // the report card prints its own badge Markdown
+    else if (stat) stat.querySelectorAll('.head, dl, .api-ref, .badge-ref, .fix').forEach(n => n.remove());   // the report card prints its own badge Markdown
     fast = hold = !!selfP;                                // swap the server's copy for the terminal's in one frame
     await lines(['ipterm 0.2 · IP address lookup', 'type help for commands, or enter any IP address, domain or ASN'], 'sys');
 

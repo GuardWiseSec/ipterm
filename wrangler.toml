@@ -21,6 +21,8 @@ run_worker_first = [
   "!/land.js",
   "!/cidr.js",
   "!/ports.js",
+  "!/resolvers.js",
+  "!/changes.js",
   "!/leakgrade.js",
   "!/prefs.js",
   "!/sponsors.json",
@@ -48,12 +50,15 @@ run_worker_first = [
 PUBLIC_API = "false"
 
 # Running your own copy? Set this to "true": every page is marked noindex (so the copy doesn't compete
-# with ipterm.net in search), the sitemap is empty, sponsors.json is ignored (no sponsored line), and the
-# footer, `about` and /help say the site is a copy of ipterm. See "Self-hosting" in docs/handbook.md.
+# with ipterm.net in search), the sitemap is empty, sponsors.json is ignored (no sponsored line), reference pages
+# show no "Something wrong here?" line, and the footer, `about` and /help say the site is a copy of ipterm. See
+# "Self-hosting" in docs/handbook.md.
 SELF_HOSTED = "false"
 
 # Where the source code lives. The footer, `about` and /help link the deployed build's commit here
 # (<SOURCE_URL>/commit/<sha>), so anyone can read the code that is running. Leave it empty for no link.
+# A GitHub repository here also gets reference pages a line that opens its correction form
+# (.github/ISSUE_TEMPLATE/correction.yml); empty, or anywhere else, means no line.
 SOURCE_URL = "https://github.com/GuardWiseSec/ipterm"
 
 # Which IPinfo plan your IPINFO_TOKEN is on: "lite" (free: country and network only) or

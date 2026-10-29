@@ -19,7 +19,7 @@
 <meta name="theme-color" content="#030805">
 <script src="/prefs.js"></script>
 <link rel="stylesheet" href="/app.css">
-<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Article","headline":"IPv4 vs IPv6: what’s the difference?","description":"How IPv4 and IPv6 addresses differ, why IPv4 ran out, how to read shortened IPv6 addresses, and which one your connection is using.","datePublished":"2026-10-12","dateModified":"2026-10-12","author":{"@type":"Organization","name":"ipterm"},"publisher":{"@type":"Organization","name":"ipterm"},"mainEntityOfPage":"%ORIGIN%/guides/ipv4-vs-ipv6","image":"%ORIGIN%/og.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"ipterm","item":"%ORIGIN%/"},{"@type":"ListItem","position":2,"name":"Guides","item":"%ORIGIN%/guides"},{"@type":"ListItem","position":3,"name":"IPv4 vs IPv6: what’s the difference?","item":"%ORIGIN%/guides/ipv4-vs-ipv6"}]}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Article","headline":"IPv4 vs IPv6: what’s the difference?","description":"How IPv4 and IPv6 addresses differ, why IPv4 ran out, how to read shortened IPv6 addresses, and which one your connection is using.","datePublished":"2026-10-12","dateModified":"2026-10-28","author":{"@type":"Organization","name":"ipterm"},"publisher":{"@type":"Organization","name":"ipterm"},"mainEntityOfPage":"%ORIGIN%/guides/ipv4-vs-ipv6","image":"%ORIGIN%/og.png"},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"ipterm","item":"%ORIGIN%/"},{"@type":"ListItem","position":2,"name":"Guides","item":"%ORIGIN%/guides"},{"@type":"ListItem","position":3,"name":"IPv4 vs IPv6: what’s the difference?","item":"%ORIGIN%/guides/ipv4-vs-ipv6"}]}]}</script>
 </head>
 <body>
 <div class="doc">
@@ -31,7 +31,7 @@
   <main class="doc-body">
     <p class="ln echo"><span class="ps1">guest@ipterm:~$</span> man ipv6</p>
     <h1>IPv4 vs IPv6: what’s the difference?</h1>
-    <p class="doc-meta">Updated October 12, 2026 · 2 min read</p>
+    <p class="doc-meta">Updated October 28, 2026 · 2 min read</p>
     <p class="doc-lede">IPv4 and IPv6 are two versions of the Internet Protocol. Both do the same job, giving every connection an address, but IPv6 has vastly more addresses and writes them differently.</p>
 <h2>IPv4</h2>
 <p>An IPv4 address is 32 bits, written as four numbers from 0 to 255, like <a href="/8.8.8.8">8.8.8.8</a>. That allows about 4.3 billion addresses, which turned out to be far too few. The central pool run by IANA ran out in 2011, and the regional registries have since run out of fresh blocks as well.</p>
@@ -58,9 +58,10 @@
 
 <h2>Which one are you using?</h2>
 <p>Many connections are <strong>dual-stack</strong>: they have both an IPv4 and an IPv6 address, and your device picks whichever connects faster for each site. <a href="/" data-cmd="whoami">whoami</a> shows the address your browser used to reach ipterm, marked IPv4 or IPv6. Neither version is inherently faster; the difference comes from the route your traffic takes.</p>
-    <p class="doc-try"><strong>Try it</strong>Look up <a href="/2001:4860:4860::8888">2001:4860:4860::8888</a> to see an IPv6 address expanded and its /64 prefix.</p>
+    <p class="doc-try"><strong>Try it</strong>Look up <a href="/2001:4860:4860::8888">2001:4860:4860::8888</a>, Google Public DNS over IPv6, to see an IPv6 address expanded and its /64 prefix. <a href="/public-dns">Public DNS resolvers</a> lists the IPv4 and IPv6 addresses of the others.</p>
     <h2>Related guides</h2>
     <ul><li><a href="/guides/private-ip-ranges">Private IP address ranges explained</a></li><li><a href="/guides/what-is-an-asn">What is an ASN (autonomous system number)?</a></li></ul>
+    <!--FIX-->
   </main>
 </div>
 </body>

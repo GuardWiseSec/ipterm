@@ -28,6 +28,7 @@ IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Regis
 - [One value for an IP](https://ipterm.net/8.8.8.8/country): `/<ip>/<field>` with asn, org, cc, country, continent or hostname, as plain text
 - [Network (ASN)](https://ipterm.net/AS13335): holder, registry, announced prefixes and main upstream networks (`/AS<number>`)
 - [Routing](https://ipterm.net/route/1.1.1.0/24): how a public prefix or address is routed (BGP): the route that carries it, the network that announces it, RPKI validity, how many RIS peers see it and sample AS paths, from RIPEstat (`/route/<prefix>` or `/route/<ip>`; for a prefix not looked up recently, AI assistants and crawlers get a 403 saying RIPEstat isn't asked for them, and the `/cidr` page the calculation without routing; 1.1.1.0/24, 8.8.8.0/24 and 9.9.9.0/24 always answer when asked by prefix, such as `/route/8.8.8.0/24`, not by an address in them)
+- [Public DNS resolvers](https://ipterm.net/public-dns): Google, Cloudflare, Quad9, OpenDNS, AdGuard, CleanBrowsing, Control D, Yandex, 114DNS, AliDNS and DNS.SB: each variant, what it filters, its IPv4 and IPv6 addresses, DoH URL and DoT host, from the operators' own documentation, with the sources and the day they were last checked. Plain text for curl, `?format=json` for JSON (fields an operator doesn't document are null). Each address also has its own page (`/9.9.9.9`), which adds what the operator documents about DNSSEC, EDNS Client Subnet and logging. No single place is given for these addresses, and one is called anycast (answered from many locations) only where its operator says so (`anycast` and `anycastSource` in the JSON)
 - [As text](https://ipterm.net/8.8.8.8/text): `/<ip>/text` and `/AS<number>/text` give aligned key/value lines (`/json` for JSON); add `?format=text` to any other lookup for the same
 
 ## Tools
@@ -46,3 +47,4 @@ IP address data powered by IPinfo (https://ipinfo.io). Networks: RIPEstat. Regis
 ## Optional
 
 - [Guides](https://ipterm.net/guides): private IP ranges, finding a router's address, what an IP address reveals, IPv4 vs IPv6, ASNs, subnet masks
+- [Changes](https://ipterm.net/changes): real fixes and new pages, newest first, each dated; plain text with `curl ipterm.net/changes`

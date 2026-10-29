@@ -1,0 +1,45 @@
+# The form behind "Something wrong here? Suggest a fix on GitHub" on ipterm's reference pages (fixLinks() in
+# src/worker.js, fixLine() in public/app.js). Those links open it as ?template=correction.yml and fill in `page` (the
+# page's address) and, where a page passes one, `field`, by these ids, and nothing else: rename an id or this file and
+# the links stop working (tools/check_corrections.mjs checks). Labels that don't exist in the repository are skipped.
+name: Correction
+description: Something on an ipterm reference page is wrong (a port, a guide, a tool page, a public DNS resolver or /public-dns).
+title: "Correction: "
+labels: ["correction"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This issue is public.** Don't paste your own IP address, your results or anything else about you or your network. For a privacy matter, or to have a name removed, email contact@ipterm.net instead.
+
+        If the mistake is in data ipterm passes on from someone else (IPinfo's locations, a registry's whois record), the issue gets the `upstream` label: the fix has to be made at that source, and the issue says where. Fixes made here are listed, with their date, at https://ipterm.net/changes.
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      description: The address of the page with the mistake.
+      placeholder: https://ipterm.net/port/22
+    validations:
+      required: true
+  - type: input
+    id: field
+    attributes:
+      label: Field
+      description: The line or field that is wrong, if it is one in particular.
+    validations:
+      required: false
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What's wrong
+      description: What the page says, and what it should say.
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source
+      description: A link to the documentation, standard or registry entry that shows the right answer. Every correction is checked against its source first.
+      placeholder: https://
+    validations:
+      required: true

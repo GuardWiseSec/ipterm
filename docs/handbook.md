@@ -16,7 +16,10 @@ ipterm is a terminal-style IP lookup site that runs on a single Cloudflare Worke
   pages are noindex): `src/holder-heuristic.js`
 - Settings: `wrangler.toml`
 - What each common port is for, and IANA's names for it: `public/ports.js` (see "Port checker"); the table of
-  special-purpose addresses: `public/cidr.js` (see "Subnet calculator")
+  special-purpose addresses: `public/cidr.js` (see "Subnet calculator"); the public DNS resolvers, from their
+  operators' own documentation: `public/resolvers.js` (see "Public DNS resolvers")
+- The list of changes (`/changes`): `public/changes.js`; the GitHub issue forms behind the corrections line:
+  `.github/ISSUE_TEMPLATE/` (see "Corrections and changes")
 - Scripts: `tools/` (deploy, land mask, guides, ASN sitemap, link-preview and SEO checks)
 - The DNS leak test's own DNS server: `dnsleak-server/` (runs on a small VPS outside Cloudflare; see
   [dnsleak-server/README.md](../dnsleak-server/README.md))
@@ -359,6 +362,9 @@ people too. So a bot never starts a routing lookup (`routeData()`):
   `curatedRoutes()`): their pages are in the sitemap and their titles are their routing ("1.1.1.0/24: announced by
   AS13335 ..."), so crawlers get the real page. That is five RIPEstat calls each at most every six hours per data
   center, and no request can add to the list.
+- A public DNS resolver's page (`/9.9.9.9`) shows its routing only when it is cached, read with no RIPEstat request
+  for anyone, and otherwise a `nofollow` link to `/route/<ip>`; the terminal asks for it live for a person (see "Public
+  DNS resolvers"). Their prefixes are not in `curatedRoutes()`, on purpose.
 - People keep live routing as before: a browser navigation, the terminal's `cidr` and `route` (its fetch asks for
   JSON, so it is a person's unless the user agent says otherwise), curl and scripts. A browser too old to send
   `Sec-Fetch-*` gets the bot's page, whose data marks the missing routing `bot: true`, so its terminal asks
@@ -443,6 +449,7 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | Which DNS resolvers a visitor uses (leaktest) | ipterm's own DNS server for `dl.ipterm.net` (`dnsleak-server/`), plus IPinfo Lite for the resolvers' networks | The VPS, about $4 to $6 a month |
 | Known VPN servers: whether a VPN provider's own list names an address (lookups, leaktest) | The lists Mullvad, Private Internet Access, IVPN and AirVPN publish, downloaded every 6 hours by a cron trigger (see "Known VPN servers") | Free; four subrequests a run. Lookups search a copy in memory, so bots get it too |
 | iCloud Private Relay: whether an address is one of Private Relay's addresses (lookups, leaktest) | Apple's list (`mask-api.icloud.com/egress-ip-ranges.csv`), asked every 6 hours with its ETag (see "iCloud Private Relay") | Free; one subrequest a run, usually a 304 |
+| Public DNS resolvers: services, variants, filtering, addresses, DoH and DoT, DNSSEC, ECS and logging | The operators' own documentation, checked by hand into `public/resolvers.js` (see "Public DNS resolvers") | Free; no request at all |
 | Whether the visitor's address is a Tor exit (leaktest) | The Tor Project's exit list, cached an hour per data center | Free; at most one subrequest an hour per data center |
 | Cloudflare WARP, TLS and HTTP versions, key exchange (leaktest) | Cloudflare's `/cdn-cgi/trace`, read by the browser | Free; the edge answers it, not the Worker |
 
@@ -465,9 +472,11 @@ ipterm is MIT-licensed, so you can run your own copy. Follow "Deploy" above, the
 
 1. In `wrangler.toml`, set `SELF_HOSTED = "true"`. Every page then carries `noindex` (an `X-Robots-Tag` header on
    everything the Worker answers, and a robots meta tag in the pages), `/sitemap.xml` and the other sitemap files are empty, `public/sponsors.json`
-   is ignored so no sponsored line appears, and the footer, `about` and `/help` say the site is a copy of ipterm,
-   not ipterm.net. Copies shouldn't compete with ipterm.net in search or carry its affiliate links.
+   is ignored so no sponsored line appears, reference pages show no "Something wrong here?" line (it would send
+   reports about your copy to ipterm's GitHub and email), and the footer, `about` and `/help` say the site is a copy
+   of ipterm, not ipterm.net. Copies shouldn't compete with ipterm.net in search or carry its affiliate links.
 2. Set `SOURCE_URL` to your fork (or leave it empty), so the footer links the code you actually run.
+   `public/changes.js` (`/changes`) is ipterm's own list; keep it, empty it or write your own.
 3. Change the two `namespace_id`s under `[[ratelimits]]` if your account already uses 1001 or 1002.
    `DNSLEAK_ZONE` and `DNSLEAK_API` point at ipterm.net's own leak-test server: the test stays off without the
    `DNSLEAK_KEY` secret, but change them to your own (`dnsleak-server/README.md`) or delete both lines.
@@ -536,6 +545,8 @@ curl https://your-domain/mail/gmail.com  # a domain's email security (SPF, DMARC
 curl https://your-domain/grade/github.com  # a domain's report card: DNSSEC, email, expiry, security headers, graded
 curl -4 https://your-domain/port/22   # is TCP port 22 open on your own IP? (see "Port checker")
 curl https://your-domain/help         # the command-line reference as plain text
+curl https://your-domain/changes      # real fixes and new pages, newest first, as text (see "Corrections and changes")
+curl https://your-domain/public-dns   # public DNS resolvers: addresses, filtering, DoH and DoT (see "Public DNS resolvers")
 curl -L 'https://your-domain/go?q=AS13335'  # address-bar search: a redirect to that page (see "Address-bar search")
 ```
 
@@ -654,7 +665,8 @@ one (`shareBar()` and `current` in `public/app.js`).
 - `copy md` copies a fenced Markdown block for a GitHub issue, Discord or Stack Overflow: `$ <command>`, the header's
   tags, the table and the notes under it, then the permalink on the line after the fence, where it stays clickable.
   The fence is longer than any run of backticks in the result, so a TXT record can't end it early.
-- Nothing copied carries the sponsored line, the `next:` line, the map or buttons.
+- Nothing copied carries the sponsored line, the `next:` line, the corrections line (see "Corrections and changes"),
+  the map or buttons.
 - Results about the visitor's own connection (whoami, leaktest, a port check) never share their address. After
   whoami or a port check the link is the page itself (`/`, `/port/<n>`), which shows each visitor their own result,
   so the share sheet says "check yours". After leaktest it is the grade's link (`/leaktest/r/<code>`, with the text
@@ -1467,6 +1479,90 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   covers a whole zone. So it needs a second domain (zone) with IPv6 Compatibility off, routed to this
   Worker, plus a `connect-src` entry in the CSP and CORS for that one route. It is not set up here.
 
+### Public DNS resolvers
+
+`public/resolvers.js` holds eleven public DNS services and every address they document, 118 in all: Google Public DNS,
+Cloudflare (1.1.1.1 and 1.1.1.1 for Families), Quad9, OpenDNS (with FamilyShield and Sandbox), AdGuard DNS,
+CleanBrowsing, Control D, Yandex DNS, 114DNS, AliDNS and DNS.SB. For each service: its operator, its variants (each
+with what it filters, its IPv4 and IPv6 addresses, DoH URL and DoT host), what the operator documents about DNSSEC,
+EDNS Client Subnet (ECS) and logging, the operator's page that says it is anycast where one does (`anycast`), and the
+operator's pages all of it comes from (`sources`). It is shared by the page and the Worker, like `ports.js`, and served
+as a static file (`run_worker_first`).
+
+- **Only what the operator documents.** Every fact is from the operator's own pages, listed with its service. What an
+  operator doesn't document is `''` or `[]`, and the pages leave its line out: no DNSSEC line for CleanBrowsing (its
+  pages say it validates, but tests on 2026-10-28 disagreed between its addresses), no ECS or logging line for
+  OpenDNS, no DoT host for OpenDNS (Cisco says DoT runs on all its resolvers but names no host), and no filtering for
+  OpenDNS's Sandbox or AliDNS (no row on the page, no line in the text, and the variant's name alone in the table).
+  What a variant filters starts with "none" where the operator says it blocks nothing (`filters()` tells the two
+  apart). Where an operator's own pages disagree, the line says both (Quad9's DNSSEC); where several give an endpoint,
+  the newest does (OpenDNS's DoH URL is from Cisco's document 224705 of 2025-10-17). Short comments above a service in
+  the file say why its rows read as they do.
+- **Anycast only where the operator says so.** `anycast` is the operator's page saying its addresses are anycast, one
+  of its `sources`, and 9 of them have one: Google's FAQ, Cloudflare's report on its 2025-07-14 outage (the 1.1.1.1
+  docs say only that it runs in hundreds of cities), Quad9's FAQ, Cisco's Umbrella DoH article for OpenDNS ("our
+  well-known anycast addresses"), AdGuard's list of DNS providers ("Public anycast resolvers"), CleanBrowsing's "How it
+  works", Control D's free-DNS docs, 114DNS's FAQ and DNS.SB's FAQ. Only their pages get the "served from" row, the `anycast` tag and "Anycast:
+  answered from many locations." in the summary, and only they are marked anycast on `/public-dns` (`anycast` and
+  `anycastSource` in its JSON). Yandex and AliDNS get none of it. To add one, put the page in
+  `anycast` and in `sources`.
+- **Checking it again.** `LAST_CHECKED` (`RESOLVERS.checked`) is the day every row was last checked against its
+  sources. To check again: open each service's sources; compare each variant's addresses, filtering, DoH URL and DoT
+  host, the DNSSEC, ECS and logging lines, and the `anycast` page; fix what changed, with the page that says so in
+  `sources`; then move `LAST_CHECKED` to the day it goes live, add a line to `public/changes.js` for what changed, and
+  run `node tools/check_resolvers.mjs`. Move the date only after checking them all: the resolver pages and `/public-dns`
+  say "last checked <date>", and `/sitemap-resolvers.xml` gives it as every page's `<lastmod>`. Addresses are in the
+  operator's order, IPv6 in its short form (RFC 5952), as the pages write them; `RESOLVERS.get()` finds an address
+  however it is written (`2606:1a40::0`, `2606:1a40:0:0:0:0:0:0`).
+- **Their pages.** Each address keeps its IP page (`/9.9.9.9`), with its lookup as before, and adds the resolver block
+  (`resolverBlock()` in `src/worker.js`; `resolverAbout()` in `public/app.js` draws the same after a `lookup`): the
+  service and operator, the variant and what it filters, the variant's IPv4 and IPv6 addresses, DoH and DoT, "served
+  from: anycast: answered from many locations" where the operator says so, its routing, the DNSSEC, ECS and logging
+  lines where documented, the other variants with their addresses, a link to `/public-dns#<id>` (the terminal's too),
+  the sources and "last checked", "See which resolver you actually use: leaktest", and the corrections line with the
+  field `resolver`. The title is `9.9.9.9 · Quad9 DNS: addresses, DoH, DoT
+  and filtering` (DoH and DoT only where the variant has them, and filtering only where one of the service's variants
+  filters: Google's, AliDNS's and DNS.SB's titles end "addresses, DoH and DoT"), and the description says what the
+  address is and the addresses set beside it: "9.9.9.9 is Quad9's public DNS resolver (Recommended / Secure).
+  Secondary 149.112.112.112, IPv6 2620:fe::fe. DoH, DoT, filtering variants and live routing." (`RESOLVERS.title()`,
+  `lead()` and `others()`, which the terminal's `ipTitle()` shares; `resolverText()`; "filtering variants" on the same
+  terms). The summary adds "Anycast: answered from many locations." where the operator says so. None of it names a
+  place, anycast or not, from IPinfo Core or a bot's IPinfo Lite alike (Lite places 1.1.1.1 in Australia), and the
+  "Location wrong?" pointer to IPinfo is left out; IPinfo's location row stays with the lookup's other rows.
+  "Secondary" is the operator's second address and "Primary" its first; Google says either can be primary, and
+  Yandex's two pages order them differently, so theirs say "Also" (`either`). A resolver's address is curated
+  (`curatedIps()`), so one that starts a network (76.76.2.0, 2606:1a40::, 2a09::) is indexed, whois links its page,
+  and a typo of it (`/l.l.l.3`) gets a 301 to it, as a router address's does (`routerTypo()`). No sponsored line
+  follows any of it, on the page or in the terminal.
+- **Routing, and what a crawl costs.** The page shows how the address is routed only when the cache has it (someone's
+  `route` in the last six hours, per data center), read in `ipRoute()` with no RIPEstat request for anyone, and
+  otherwise a `nofollow` link to `/route/<ip>`. The terminal asks for it live (`/api/route`) for a person, counted and
+  cached like any routing lookup. So a crawler's resolver page costs what any IP page costs it, IPinfo Lite and reverse
+  DNS, and never Core, proxycheck.io or RIPEstat (see "Bots never spend the budgets"). The resolvers' prefixes are not
+  in the curated routing list (`curatedRoutes()`), on purpose.
+- **`/public-dns`** lists every service in one table: service and operator (marked anycast where the operator says so),
+  variant and filtering, IPv4 (the operator's first and second), IPv6, DoH and DoT, each address linked to its page,
+  each service's rows anchored by its `id` (`/public-dns#quad9`, which the resolver pages link). Then the sources and
+  the corrections line. Its description counts the services itself ("Google, Cloudflare, Quad9, OpenDNS, AdGuard and 6
+  more public DNS resolvers"), and so does the line under its heading (11 services, 118 addresses).
+  Browsers get a document page like `/changes` (`docPage()`), curl plain text (`publicDnsText()`: 80 columns but for
+  long source addresses), and `?format=json` the list as JSON, with `null` for what isn't documented. It asks no one
+  anything. The guides "What your IP address reveals" and "IPv4 vs IPv6" link it, and so do `/help`, `public/llms.txt`
+  and `openapi.json`. The terminal's `public-dns` (or `resolvers`; `public-dns quad9` for one service) prints the same
+  list with each address linked.
+- **Sitemap.** `/public-dns` and the resolver pages have a file of their own, `/sitemap-resolvers.xml`
+  (`resolverPaths()`), as the ports do: so every URL can carry `RESOLVERS.checked` as its `<lastmod>`, Search Console
+  shows how this family is indexed, and the list can't drift from the data. The thirteen resolver addresses
+  `SITEMAP_PATHS` used to list moved there. It holds 119 URLs: `/public-dns` and the 118 addresses.
+- **Control D.** Only its own six variants are here (Unfiltered, Malware, Ads & Tracking, Social, Family Friendly and
+  Uncensored). Its docs also list 13 presets that only apply third-party blocklists it doesn't maintain (OISD, Hagezi,
+  1Hosts, StevenBlack, AdGuard); their addresses are ordinary IP pages.
+- **Adding a service.** Add it to `LIST` with every field from the operator's pages and its `sources`, plus `short` and
+  `brand` for the titles and descriptions; `id` is its anchor on `/public-dns`. Its addresses get the resolver block
+  and join the sitemap and `curatedIps()` by themselves.
+
+`node tools/check_resolvers.mjs` checks all of this with no server (see "Local development").
+
 ## Shareable pages and search
 
 - `/<ip>` and `/AS<number>` are real pages with their own title, h1, description, canonical link,
@@ -1496,12 +1592,14 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   registry block's first address (`/whois/75.0.0.0` when the record is 75.0.0.0/8) links that block's `/cidr` page
   instead of the address, on the page and in the terminal (`whoisPage()`; `blockStart()` in `public/app.js`); other
   addresses, curated ones included, keep their "location and network" link.
-- Router-address typos get a 301 to the exact address in that list: `/192.168.l.l`, `/192.168.1.l`, `/192,168,1,1`,
-  `/192.168.0.l`, `/10.0.0.l`, `/l92.168.1.1`, `/192.168.o.1`, `/192.168.001.001`, `/192;168;1;1`, `/192.168.1.1.`
-  (l, i, I, `|` and `!` read as 1, o and O as 0, commas, semicolons, underscores and spaces as dots). The Location is
-  always the list's own string, never built from the request, so it can't redirect anywhere else, and a query string
-  is dropped (`routerTypo()`). A typo of an address that isn't in the list (`/192.168.5.l`) gets the 404 page with
-  "did you mean lookup 192.168.5.1", not a redirect. `tools/check_seo.sh` tests valid, typo and hostile paths.
+- Typos of the addresses in `SITEMAP_PATHS`, and of every public DNS resolver's address in `public/resolvers.js`, get a
+  301 to the exact address as that list writes it (`curatedIps()`): `/192.168.l.l`, `/192.168.1.l`, `/192,168,1,1`,
+  `/192.168.0.l`, `/10.0.0.l`, `/l92.168.1.1`, `/192.168.o.1`, `/192.168.001.001`, `/192;168;1;1`, `/192.168.1.1.`,
+  `/l.l.l.3`, `/9.9.9.l0` (l, i, I, `|` and `!` read as 1, o and O as 0, commas, semicolons, underscores and spaces as
+  dots). The Location is always the list's own string, never built from the request, so it can't redirect anywhere
+  else, and a query string is dropped (`routerTypo()`). A typo of an address in neither list (`/192.168.5.l`) gets the
+  404 page with "did you mean lookup 192.168.5.1", not a redirect. `tools/check_seo.sh` tests valid, typo and hostile
+  paths, and `tools/check_resolvers.mjs` a typo of every resolver IPv4 address.
 - `/whois`, `/dns`, `/mail`, `/grade` and `/cidr` on their own are landing pages for each tool (what it does, usage and
   example links), and typing `whois`, `dig`, `mail`, `grade` or `cidr` with nothing after it shows the same thing.
   `/api` is the API docs page (the terminal runs `api`; the plain-text reference stays in the HTML for
@@ -1566,21 +1664,24 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
 
   | File | What | URLs (October 2026) |
   | --- | --- | --- |
-  | `/sitemap-pages.xml` | `SITEMAP_PATHS` in `src/worker.js`: the home page, tools, guides, router and resolver addresses, subnet and routing examples, DNS, mail, report card and whois pages | 85 |
+  | `/sitemap-pages.xml` | `SITEMAP_PATHS` in `src/worker.js`: the home page, tools, guides, `/privacy` and `/changes`, router addresses, subnet and routing examples, DNS, mail, report card and whois pages | 73 |
   | `/sitemap-ports.xml` | `/port` and every port page in `public/ports.js` (`portPaths()`), each with its `<lastmod>` | 43 |
+  | `/sitemap-resolvers.xml` | `/public-dns` and every resolver address in `public/resolvers.js` (`resolverPaths()`), each with its `<lastmod>` | 119 |
   | `/sitemap-asn-1.xml` | the 1,000 largest networks by announced IPv4 space | 1,000 |
   | `/sitemap-asn-2.xml` | the rest of the 10,000 largest | 9,000 |
 
   More ASN files, up to 40,000 URLs each (a sitemap file may hold 50,000), follow automatically if the list grows
   (`ASN_TIERS`, `asnSitemapFiles()`). The tiers let Search Console show how each is indexed. The index gives each ASN
   file a `<lastmod>`: the day the list was generated. The ports file's URLs carry the day the port pages last changed
-  (`PORTS.updated`: see "Port checker"), and the index gives the file the same. `/sitemap-pages.xml` has no
+  (`PORTS.updated`: see "Port checker"), and the index gives the file the same; so do the resolver pages' file and
+  `RESOLVERS.checked` (see "Public DNS resolvers"). `/sitemap-pages.xml` has no
   `<lastmod>`: its pages change with live data, and a date that is always today is one search engines ignore. Every
   file is checked against the sitemaps.org schemas.
 - **Titles and descriptions.** A title says what the page is for, its subject first, and ends in ` | ipterm`; the
   h1 is the title without that, and `og:title` the same. An IP page is `<ip> IP lookup: <org> (<ASN>), <hostname>`,
   leaving out what the lookup doesn't have (`8.8.8.8 IP lookup: Google LLC (AS15169), dns.google`, or just
-  `<ip> IP lookup`); `ipTitle()` in `public/app.js` words it the same. A non-public address's page is titled with
+  `<ip> IP lookup`); `ipTitle()` in `public/app.js` words it the same. A public DNS resolver's is the resolver's own,
+  `9.9.9.9 · Quad9 DNS: addresses, DoH, DoT and filtering` (see "Public DNS resolvers"). A non-public address's page is titled with
   its kind's word from the special-purpose table (`kindWord()` in `public/cidr.js`; see "Subnet calculator"):
   `192.168.1.1 · private IPv4 address` for RFC 1918 and unique local (fc00::/7) space, the word the router pages'
   searches use, and `loopback`, `link-local`, `carrier-grade NAT (shared)`, `documentation`, `benchmarking`,
@@ -1596,10 +1697,10 @@ button (`UNTESTABLE` in `public/ports.js`). `public/ports.js` is shared by the p
   `DESC_MAX` (155); one still too long is cut at a word. The page itself keeps the whole summary, and `og:description`
   is the same as the description. An IP page's description says where IPinfo locates the address, except for an
   anycast one (`flags.anycast`), which is answered from many places: it says "anycast (served from many locations)"
-  instead. IPinfo Lite, which bots get, has no anycast flag and gives only a country, which for a resolver says
-  little (Lite places 1.1.1.1 in Australia), so the resolver pages in `SITEMAP_PATHS` (`curatedIps()`) name no place
-  for a Lite answer: a bot's /1.1.1.1 is "a public IPv4 address operated by Cloudflare, Inc. (AS13335). Hostname:
-  one.one.one.one." Other Lite answers keep their country, and the location row is there either way. The tool
+  instead. A public DNS resolver's page names no place either, whatever IPinfo says: IPinfo Lite, which bots get, has
+  no anycast flag and gives only a country (Lite places 1.1.1.1 in Australia), and the page is about the resolver,
+  "1.1.1.1 is Cloudflare's public DNS resolver. Secondary 1.0.0.1, IPv6 2606:4700:4700::1111. ..." Other Lite answers
+  keep their country, and the location row is there either way. The tool
   pages keep their longer summary as `desc` and give search results `meta`; a guide's `meta` (in
   `tools/build_guides.py`) does the same where its blurb on `/guides` runs long. `node tools/check_pages.mjs` checks
   the titles, the descriptions and the terminal's titles.
@@ -1677,10 +1778,71 @@ Network data comes from [RIPEstat](https://stat.ripe.net/) (free, no key). Resul
   popular lookups and the guides, so search engines see real text and links. Clicking a lookup there runs it
   in the terminal.
 - **Share image:** `public/og.png` (1200×630) is used when any page is shared, except a shared leak test result, which uses its grade's `public/og-leak-<a-f>.png` (made by `tools/build_og_leak.mjs`).
-- **Placeholders:** static pages use `%ORIGIN%`, which the Worker replaces with your site's https address.
+- **Placeholders:** static pages use `%ORIGIN%`, which the Worker replaces with your site's https address, and each
+  guide ends with `<!--FIX-->`, which it replaces with the guide's corrections line (see "Corrections and changes").
 - **Sitemap:** `/sitemap.xml` is an index of `/sitemap-pages.xml` (`SITEMAP_PATHS` in `src/worker.js`: guides,
-  router addresses, public DNS resolvers and more), `/sitemap-ports.xml` (every port page, with `<lastmod>`) and the
-  ASN files (`/sitemap-asn-<n>.xml`, from `src/asn-sitemap.js`). See "Shareable pages and search".
+  router addresses and more), `/sitemap-ports.xml` (every port page, with `<lastmod>`), `/sitemap-resolvers.xml`
+  (`/public-dns` and the resolver pages, with `<lastmod>`) and the ASN files (`/sitemap-asn-<n>.xml`, from
+  `src/asn-sitemap.js`). See "Shareable pages and search".
+
+## Corrections and changes
+
+**The line.** Reference pages end with "Something wrong here? Suggest a fix on GitHub (public, needs an account) or by
+email." They are `/port` and every port page (`portPage()`, and the `/port` tool page), the tool pages `/whois`,
+`/dns`, `/mail`, `/grade`, `/cidr` and `/api` (`toolRoute()`), every guide (the `<!--FIX-->` that
+`tools/build_guides.py` puts at its end, filled in by `withOrigin()`), a public DNS resolver's block on its IP page
+(`resolverBlock()`) and `/public-dns` (`publicDnsRoute()`). The terminal prints the same line after the same pages
+(`port <n> --info`, `port`, `whois`, `dig`, `mail`, `grade`, `cidr` and `api` on their own, a resolver's `lookup`
+and `public-dns`), and drops the server's copy (`.fix`) on boot so it doesn't show twice; `copy md` leaves it out.
+
+- **What it sends.** The GitHub link opens the correction form in `SOURCE_URL`'s repository,
+  `<SOURCE_URL>/issues/new?template=correction.yml&title=Correction: <path>&page=<the page's address>`, and the email
+  link is `mailto:contact@ipterm.net?subject=Correction: <the page's address>`. Nothing else: never the visitor's
+  address, results or anything about them, and no `labels=` (GitHub answers 404 to a visitor who can't set a label).
+  A page can name the field the line is about (`fixLine(io, path, field)` in `src/worker.js`, `fixLine(path, field)`
+  in `public/app.js`): it goes into the title, the subject and the form's `field`. A resolver's block passes
+  `resolver`, so a report about its rows isn't taken for one about IPinfo's. ipterm
+  stores nothing about any of it; the GitHub link is `rel="nofollow noopener"`.
+- **Where it never goes.** Not on the visitor's own results: the homepage (`whoami`), `/leaktest` and a port check, so
+  nobody is invited to post their own IP in public. Nor on IP (but a resolver's), ASN, `/cidr`, DNS, whois, mail or
+  report card results, shared leak test results, 404s, `/guides`, `/privacy` or `/changes`, and never in the text or
+  JSON that curl gets (curl gets a guide as HTML, line and all). A request to remove a person's name goes by email only
+  (the form says so).
+- **IP pages point to the data's source instead:** "Location wrong? IPinfo takes corrections at ipinfo.io/corrections",
+  where the page shows a place from IPinfo Core or IPinfo's free API (`ipinfoFixes()` and `IPINFO_FIX` in
+  `src/worker.js`, `ipinfoFix()` after `lookup` in `public/app.js`). Not for an anycast address, whose place is one of
+  many, nor for IPinfo Lite (bots get it), which has no anycast flag and gives only a country (a bot's `/1.1.1.1` would
+  read "Australia"), nor for a public DNS resolver, whose block has the corrections line instead. Copies show it too:
+  it points to IPinfo, not to ipterm.
+- **Copies.** `SELF_HOSTED = "true"`, an empty `SOURCE_URL` or one that isn't a GitHub repository
+  (`https://github.com/<owner>/<repo>`) leave the line out everywhere (`fixRepo()`): the pages, the guides, and the
+  footer's `data-fix` and `data-fix-mail`, which is how the terminal knows where the line goes (`footBuild()`).
+
+**The issue forms** live in `.github/ISSUE_TEMPLATE/` and take effect once they are on the default branch:
+
+| File | What |
+| --- | --- |
+| `correction.yml` | "Correction": a notice that issues are public and not to paste your own IP, then Page (required; the link fills it in), Field (optional; filled in where a page names one), What's wrong (required) and Source (required). Label `correction` |
+| `new-port.yml` | "Suggest a port": the same notice, then the port, protocol, what uses it, the maker's own documentation (required) and notes. Label `new-port` |
+| `config.yml` | the template chooser: locations go to IPinfo (`ipinfo.io/corrections`), whois records of addresses and networks to the regional internet registries (`nro.net/about/rirs`), domains' to ICANN Lookup, and privacy matters to `contact@ipterm.net` (the link opens `/privacy`, which gives the address too). Blank issues stay open for bugs |
+
+The links fill in the form's fields by their `id`s (`page`, `field`), so renaming one, or the file, breaks the
+prefill; `tools/check_corrections.mjs` checks they match. The forms name three labels, which GitHub only applies
+if they exist in the repository: `correction` and `new-port` (each form adds its own) and `upstream`, which the owner
+adds to a correction whose fix belongs to the data's source (IPinfo, a registry) and says where in the issue. To
+create them: on GitHub, open the repository's **Issues** tab, then **Labels**, then **New label**, and add
+`correction`, `new-port` and `upstream` (any colors), or run `gh label create correction`, and so on, with the GitHub
+CLI. Each fix is checked against the source given before anything changes.
+
+**`/changes`** lists real fixes and new pages, newest first, from `public/changes.js`: `[date, what changed, pages]`
+rows, written by hand in the same commit as the change and dated the day it goes live. It names no one: the GitHub
+issue already credits whoever reported it. Browsers and crawlers get a page in the style of `/privacy`, curl and
+scripts plain text wrapped to 80 columns with each page's full address (`changesText()`), and `?format=json` the same
+list as JSON (`changesRoute()`). It makes no outside request, is in `/sitemap-pages.xml`, `/help`, `public/llms.txt`
+and the footer, and `public/changes.js` is served as a static file too (`run_worker_first`). When a change alters the port pages, move
+`PORTS.updated` with it (see "Port checker"); the corrections line did, to 2026-10-28.
+
+`node tools/check_corrections.mjs` checks all of this with no server (see "Local development").
 
 ## Sponsored line (ads)
 
@@ -1818,7 +1980,7 @@ Worker sends with stat@ripe.net, as RIPEstat asks of regular users, before a lar
 | The mail check's one outside fetch, the MTA-STS policy, goes only to `https://mta-sts.<domain>/.well-known/mta-sts.txt` for a validated domain name: no redirects followed, 5-second limit, 64 KB cap. Policy lines, report addresses and logo links are checked before use (host names, plain emails, https URLs only) | `stsPolicy()`, `parseSts()`, `reportUris()`, `httpsUrl()` in `src/worker.js` | |
 | Cross-site browser access (CORS) off by default. Only the static `/openapi.json` and `/llms.txt` allow any origin | `PUBLIC_API` in `wrangler.toml`; `public/_headers` for the two documents | Set to `"true"` to offer a public browser API |
 | Private, loopback, CGNAT, multicast, documentation and other special-purpose addresses rejected before any upstream call; an address IPinfo answers `bogon` for goes no further (no proxycheck.io, no registry) | `nonPublicReason()` in `src/worker.js` (the table in `public/cidr.js`), `withPrivacy()`, `blockData()` | See "Special-purpose ranges" and "IPinfo's bogons" |
-| Redirects for router-address typos take their Location from `SITEMAP_PATHS`, never from the request, so they can't be pointed anywhere else; the query string is dropped | `routerTypo()` in `src/worker.js`, tested by `tools/check_seo.sh` | |
+| Redirects for address typos take their Location from `SITEMAP_PATHS` or `public/resolvers.js` (`curatedIps()`), never from the request, so they can't be pointed anywhere else; the query string is dropped | `routerTypo()` in `src/worker.js`, tested by `tools/check_seo.sh` and `tools/check_resolvers.mjs` | |
 | Plain http: pages (browsers, crawlers, link previews) get a 301 to the same path on https and the same host; curl and scripts are answered over http (`curl ipterm.net`, the `/expect` kill switch), and every link and cache key names https either way. HSTS on every answer, not preloaded | `route()` in `src/worker.js`; `tools/check_https.mjs` | Don't turn on Cloudflare's "Always Use HTTPS": see "One copy of the site, on https" |
 | RIPEstat answers are read with a size cap (a big network's answer can run to megabytes, which would use up the CPU limit), the AS paths come from three collectors only, and every value is checked before use (AS numbers, prefixes, dates) | `ripestat()`, `routeLookup()`, `upstreams()` in `src/worker.js` | |
 | Strict Content-Security-Policy (no inline scripts or styles; the only outside hosts are ipify, for the visitor's other IP version, and, once the DNS leak test is set up, `https://*.dl.ipterm.net` (the configured zone) for its lookups; forms may only submit to this site), nosniff, no framing, HSTS, no referrer, locked-down browser permissions | `secure()` and `cspFor()` in `src/worker.js` | Loosen the CSP if you add ads or analytics |
@@ -1941,8 +2103,10 @@ npx wrangler dev
 (address-bar search, hostile inputs included) and `node tools/check_block.mjs` (a lookup's registry date) run
 against it. `node tools/check_bots.mjs` (bots never spend the budgets), `node tools/check_https.mjs` (plain http),
 `node tools/check_vpnlists.mjs` (the known VPN servers), `node tools/check_pages.mjs` (the ports sitemap, the IANA
-row, titles and descriptions, special-purpose ranges) and `node tools/check_timeouts.mjs` (silent registries and the
-terminal's time limit) need no server (Node 22.15 or later).
+row, titles and descriptions, special-purpose ranges), `node tools/check_timeouts.mjs` (silent registries and the
+terminal's time limit), `node tools/check_corrections.mjs` (the corrections line, the issue forms and `/changes`)
+and `node tools/check_resolvers.mjs` (the public DNS resolvers' data, pages, sitemap, `/public-dns` and the terminal)
+need no server (Node 22.15 or later).
 
 Under `wrangler dev` the first lookup starts the VPN lists' first download (the Durable Object's alarm), from the
 providers' real lists. To run the cron trigger itself, start it with `npx wrangler dev --test-scheduled` and ask
@@ -2109,6 +2273,52 @@ query. Then the terminal's `getJson()` and `RETRYABLE`, read out of `public/app.
 its own abort says "No answer from ipterm within 9 seconds", with no word about the connection; a `TypeError`, or an
 abort while the browser is offline, "Couldn't reach ipterm"; answers that came pass as before; and these messages and
 the Worker's offer `retry`, while a typo doesn't.
+
+`node tools/check_corrections.mjs` (Node 22.15 or later) checks the corrections line, the IPinfo pointer, the issue
+forms and `/changes` (see "Corrections and changes"), with no server and no network: the whole Worker in Node with its
+static files read from `public/` and `fetch` stubbed, and the terminal's `fixLine()` and `ipinfoFix()` run against a
+stand-in DOM. First the line: `/port`, all 42 port pages, a port outside the list, the tool pages but `/leaktest` and
+every guide end with it once, its GitHub link holding only the form, the title and the page's address (`SOURCE_URL`
+from `wrangler.toml`) and its email link only the subject, never the visitor's address; the port pages still make no
+outside request; `/public-dns` and a resolver's block (with the field `resolver`) have it too. None on the homepage,
+`/leaktest`, a shared leak test result, other IP pages, ASN, `/cidr` and 404 pages, `/guides`, `/privacy`, `/changes`
+or in curl's text and JSON (a guide, which curl gets as HTML, keeps it), and in `src/worker.js` only `portPage()`,
+`toolRoute()`, `withOrigin()`, `resolverBlock()` and `publicDnsRoute()` call `fixLine()`. A copy (`SELF_HOSTED`, no
+`SOURCE_URL`, or one that isn't a GitHub repository) gets no line, no `data-fix` and no placeholder left behind. Then
+the terminal: the same links as the page from the footer's `data-fix`, with a field too (against the Worker's
+`fixLinks()`), nothing without it, and only `portAbout`, `portIntro`, `toolIntro`, `apiHelp`, `resolverAbout` and
+`publicDns` call it; the server's copy goes on boot and `copy md` leaves it out. Then IP pages: IPinfo's corrections
+for IPinfo Core and its free API with a place, none for anycast, a resolver, IPinfo Lite, non-public addresses or a
+bogon, the terminal's `ipinfoFix()` the same, and only after `lookup`. Then the issue forms: the fields and labels the
+links and the owner use, the public notice, a required source, a description naming every kind of page whose line
+opens it, and the contact links. Last `/changes`: real dates, newest first, no names, the entries with numbers or the
+site's own words agreeing with it (the port pages' counts, the line's pages, the terminal's timeout); the page
+(indexable, no outside request, Googlebot's the same), the text (80 columns, every entry and address), the JSON, every
+linked page answering, the sitemap, `/help`, the footer and the static file.
+
+`node tools/check_resolvers.mjs` (Node 22.15 or later) checks the public DNS resolvers (see "Public DNS resolvers")
+with no server and no network, as above. The data: every address public, in its short form and listed once, found
+however it is written; every service with an operator, variants, sources and only ASCII text; `LAST_CHECKED` a real
+date; `anycast` for exactly the seven services whose operator says so, its page among their sources; Control D's own
+six variants only; filtering left empty only for OpenDNS's Sandbox and AliDNS; and the rows the last check against the
+sources fixed (OpenDNS's DoH URL, 114.114.114.110's name, Google's ECS line, Cloudflare's aggregates). Every resolver
+page, as Googlebot sees it: indexable, titled and described as the resolver with no place ("filtering" only for a
+service with a variant that filters), the anycast sentence only where the operator says so, its block row for row
+(the service, variant, filtering where documented, its own addresses, DoH and DoT, "served from" and the anycast tag
+where the operator says so, the other variants' addresses, the DNSSEC, ECS and logging lines only where documented,
+the sources, "last checked", leaktest, `/public-dns#<id>` and the corrections line), no sponsored line, and no request
+but IPinfo Lite and reverse DNS. A person's page: no RIPEstat request, then the routing a `route` lookup cached, which
+Googlebot then sees too; a page that throws while it is drawn still gets `guard()`'s 502 page and log line
+(`ipRoute()`'s `ok` is async, so `guard()` awaits it). `/public-dns` as a page (every address linked once, the counts,
+anycast marked where the operator says so, every source, the line), as text (every address, endpoint and source, no
+empty filtering line, 80 columns but for long source addresses) and as JSON (the same as `public/resolvers.js`), with
+no outside request. The sitemaps: the index, `/sitemap-resolvers.xml` (every address, each with `RESOLVERS.checked`)
+and none of them in `/sitemap-pages.xml`, and the curated routing list unchanged. Then the terminal, read out of
+`public/app.js` against a stand-in DOM: `resolverAbout()` draws the Worker's rows and tags in the same order, links
+`/public-dns#<id>` and asks for the routing, `lookup()` draws it in place of IPinfo's pointer and the sponsored line,
+`public-dns` lists every address and takes a service, and the command is in `help`, `man`, the aliases and the
+did-you-mean list. Last the wiring (`index.html`, `wrangler.toml`), the guides' links, `/help`, `llms.txt`,
+`openapi.json`, `/changes` (its count) and this handbook (its counts).
 
 ## License
 
