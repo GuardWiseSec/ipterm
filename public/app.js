@@ -2267,7 +2267,7 @@
     const head = el('div', 'head');
     head.append(el('span', 'hip', 'whois ' + d.query), el('span', 'tag pub', 'registry'));
     if (d.registry) head.append(el('span', 'tag', d.registry));
-    head.append(el('span', 'tag', d.sample ? 'sample data' : 'rdap'));
+    head.append(el('span', 'tag', d.sample ? 'sample data' : d.source === 'ripestat' ? 'ripestat' : 'rdap'));
     head.append(shareBar({ cmd: 'whois ' + d.query, value: d.query, what: d.kind === 'asn' ? 'the AS number' : 'the address', path: '/whois/' + d.query }));
     out.appendChild(head);
     const date = v => (v ? String(v).slice(0, 10) : null);
@@ -2284,6 +2284,8 @@
     if (d.registered) rows.push(['registered', date(d.registered)]);
     if (d.updated) rows.push(['last changed', date(d.updated)]);
     if (d.description) rows.push(['description', d.description]);
+    // ARIN's record through RIPEstat when ARIN's own server failed: relayText() in the Worker words it the same
+    if (d.source === 'ripestat') rows.push(['source', "ARIN's whois data, relayed by RIPEstat" + (d.registryError ? ` (${d.registryError})` : '')]);
     rows.push('sep');
     if (d.abuse && d.abuse.email) {
       const a = mailLink(d.abuse.email);
@@ -2974,7 +2976,7 @@
       case 'about':
         return lines([
           'ipterm shows who operates an IP address or network and roughly where it sits.',
-          "Your own address comes from Cloudflare's edge data. Other addresses come from IPinfo. Networks come from RIPEstat. Registry records (whois) come from the regional internet registries, and for domains from the domain's registry and registrar, via RDAP. DNS answers come from Cloudflare's public resolver (1.1.1.1), and so do mail checks, apart from the MTA-STS policy file, which comes from the domain's own server. A report card (grade) also reads the headers of the domain's own website.",
+          "Your own address comes from Cloudflare's edge data. Other addresses come from IPinfo. Networks come from RIPEstat. Registry records (whois) come from the regional internet registries, and for domains from the domain's registry and registrar, via RDAP; when ARIN's server fails, ARIN's record comes through RIPEstat instead. DNS answers come from Cloudflare's public resolver (1.1.1.1), and so do mail checks, apart from the MTA-STS policy file, which comes from the domain's own server. A report card (grade) also reads the headers of the domain's own website.",
           "IP location is approximate. It usually points at the ISP's routing hub, not a street address.",
           'The map shows that uncertainty as lit dots. Click a map to switch between world view and zoomed in.',
           'Map data: Natural Earth (public domain).',

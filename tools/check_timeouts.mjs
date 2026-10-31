@@ -15,7 +15,9 @@
 //    mid-read) "couldn't be reached" too, while one that isn't JSON (a maintenance page) is one bad record, not the
 //    registry's silence. None of them pauses its server: ARIN answering 525 and then a record gives the record through
 //    the retry, right after the 525s, and AFRINIC is asked again. A redirect that answers (LACNIC to NIC.br) gives
-//    NIC.br's record, and no RDAP request goes out with redirect: 'manual'.
+//    NIC.br's record, and no RDAP request goes out with redirect: 'manual'. ARIN's failures also ask RIPEstat for its
+//    copy of ARIN's record (arinRelay, checked in tools/check_relay.mjs): here RIPEstat has no match for any address,
+//    so ARIN's failure stands, as quickly; a silent ARIN (2.) leaves no time for it, and RIPEstat isn't asked.
 // 2. Silent registries, side by side. whois of a domain whose registry is silent (.ng: IANA's list sends it to
 //    rdap.nic.net.ng, which answered nothing on 2026-10-25): /api/whois answers 502 within the deadline, well inside
 //    the terminal's 9 seconds, after one request to that server (no second try, no second name), naming the .ng
@@ -132,6 +134,8 @@ async function serve(u, init) {
     if (/name=[^&]*silent/.test(u)) return never(init);
     return reply({ Status: 0, Answer: [] });             // every other name: no records
   }
+  // RIPEstat: no match for ARIN's record (arinRelay), so whois reports ARIN's failure; routing never answers
+  if (u.startsWith('https://stat.ripe.net/data/whois/')) return reply({ data: { authorities: ['arin'], records: [[{ key: 'No match found for + ! x', value: '' }]] } });
   if (u.startsWith('https://stat.ripe.net/')) return never(init);
   return new Response('not stubbed in tools/check_timeouts.mjs', { status: 404 });
 }
@@ -206,8 +210,10 @@ const [r525, busy, reset, r429, ripe, nicbrOk, cut, notJson] = await Promise.all
   run('/api/whois?q=69.1.2.3', API),
   run('/api/whois?q=71.1.2.3', API),
 ]);
-ok(r525.status === 502 && r525.data.error === ARIN525 && quick(r525) && asked('https://rdap.arin.net/registry/ip/66.') === 2,
-  `whois 66.1.2.3 (ARIN's handshake fails, a 525, twice): ${r525.status} after ${secs(r525.ms)}, ${asked('https://rdap.arin.net/registry/ip/66.')} requests, ${JSON.stringify(r525.data.error)}`);
+ok(r525.status === 502 && r525.data.error === ARIN525 && quick(r525) && asked('https://rdap.arin.net/registry/ip/66.') === 2 &&
+  asked('https://stat.ripe.net/data/whois/data.json?resource=66.1.2.3%2F32') === 1,
+  `whois 66.1.2.3 (ARIN's handshake fails, a 525, twice): ${r525.status} after ${secs(r525.ms)}, ${asked('https://rdap.arin.net/registry/ip/66.')} requests, ` +
+  `then RIPEstat's copy (no match here), ${JSON.stringify(r525.data.error)}`);
 ok(busy.status === 502 && busy.data.error === NG503 && quick(busy) && asked('https://rdap.nic.net.ng/domain/busy.ng') === 2,
   `whois busy.ng (the .ng registry answers 503 twice): ${busy.status} after ${secs(busy.ms)}, ${JSON.stringify(busy.data.error)}`);
 ok(reset.status === 502 && reset.data.error === RESET && quick(reset) && asked('https://rdap.afrinic.net/') === 2,
@@ -253,8 +259,9 @@ const ngAsked = asked('https://rdap.nic.net.ng/domain/unijos');
 ok(ng.status === 502 && ng.data.error === NG, `whois unijos.edu.ng (the .ng server never answers): ${ng.status}, ${JSON.stringify(ng.data.error)}`);
 ok(inTime(ng) && ng.ms < TERMINAL_WAIT, `... after ${secs(ng.ms)}: the deadline, well inside the terminal's ${TERMINAL_WAIT / 1000} s (it took about 17 s before)`);
 ok(ngAsked === 1, `... after one request to rdap.nic.net.ng, not two tries or a second name (and busy.ng's 503s paused nothing): ${ngAsked}`);
-ok(arin.status === 502 && arin.data.error === ARIN && inTime(arin) && asked('https://rdap.arin.net/registry/ip/63.') === 1,
-  `whois 63.1.2.3 (ARIN never answers): ${arin.status} after ${secs(arin.ms)}, one request, ${JSON.stringify(arin.data.error)}`);
+ok(arin.status === 502 && arin.data.error === ARIN && inTime(arin) && asked('https://rdap.arin.net/registry/ip/63.') === 1 &&
+  !asked('https://stat.ripe.net/data/whois/data.json?resource=63.'),
+  `whois 63.1.2.3 (ARIN never answers): ${arin.status} after ${secs(arin.ms)}, one request and none to RIPEstat (no time left for it), ${JSON.stringify(arin.data.error)}`);
 ok(lacnic.status === 502 && lacnic.data.error === LACNIC && inTime(lacnic) && asked('https://rdap.lacnic.net/rdap/ip/200.') === 1 && asked('https://rdap.registro.br/ip/200.') === 1,
   `curl /whois/200.160.2.3 (LACNIC redirects to NIC.br, which never answers): ${lacnic.status} after ${secs(lacnic.ms)}, names LACNIC, the server asked: ${JSON.stringify(lacnic.data.error)}`);
 ok(stall.status === 502 && stall.data.error === STALL && inTime(stall) && asked('https://rdap.stall.test/') === 1,

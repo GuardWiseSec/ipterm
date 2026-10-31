@@ -662,7 +662,9 @@
           "registered": { "type": ["string", "null"] }, "expires": { "type": ["string", "null"] }, "updated": { "type": ["string", "null"] },
           "status": { "type": "array", "items": { "type": "string" } }, "nameservers": { "type": "array", "items": { "type": "string" } },
           "abuse": { "type": ["object", "null"], "properties": { "email": { "type": ["string", "null"] }, "phone": { "type": ["string", "null"] }, "handle": { "type": ["string", "null"] } } },
-          "message": { "type": "string" }, "rdapUrl": { "type": "string" }
+          "message": { "type": "string" }, "rdapUrl": { "type": "string" },
+          "source": { "type": "string", "enum": ["rdap", "ripestat"], "description": "Where the record came from: the registry over RDAP, or, when ARIN's RDAP server failed a whois of an address or AS number, ARIN's whois data relayed by RIPEstat (registryError says how ARIN failed; such a record has no updated date and is kept an hour). Not for AI assistants and crawlers, which get ARIN's failure unless the record is cached" },
+          "registryError": { "type": "string", "example": "rdap.arin.net failed to answer: HTTP 525", "description": "With source ripestat only: how ARIN's RDAP server failed" }
         }
       },
       "Cidr": {

@@ -92,7 +92,8 @@
 //   Routing of a prefix: RIPEstat's prefix-overview, routing-status, rpki-validation and bgp-state (AS paths from
 //   three RIS collectors only, rrcs=), cached six hours.
 //   Registry records (whois): RDAP from the regional internet registries (addresses, networks) and the
-//   domain registries and registrars (domains), all found via IANA's bootstrap files.
+//   domain registries and registrars (domains), all found via IANA's bootstrap files. When ARIN's RDAP server fails a
+//   whois, ARIN's whois data through RIPEstat's whois call instead (arinRelay).
 //   Reverse DNS: Cloudflare DNS-over-HTTPS.
 //   Mail check: Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file (https://mta-sts.<domain>).
 //   Report card (grade): the DNS, mail and registry reads above, plus HEAD requests to the domain's own site.
@@ -915,7 +916,7 @@ async function whoisRoute(io, q, html) {
     }
   }
   return guard(
-    () => cached(io, 'whois/' + query, 86400, () => rdapLookup(asnM ? { asn: Number(asnM[1]) } : { ip: query, p }, io.url.origin)),
+    () => cached(io, 'whois/' + query, 86400, () => whoisLookup(io, asnM ? { asn: Number(asnM[1]) } : { ip: query, p })),
     d => html ? whoisPage(io, d, d.found ? 200 : 404) : reply(io, d, d.found ? 200 : 404, { 'cache-control': 'public, max-age=300' }, whoisText),
     (msg, status) => html ? whoisPage(io, { query, kind: asnM ? 'asn' : 'ip', error: msg }, status) : reply(io, { error: msg }, status),
   );
@@ -1470,6 +1471,9 @@ function gradeText(d, o) {
 const gradeProblem = d => (d.status === 'NXDOMAIN' ? `${d.domain} does not exist (NXDOMAIN), so there is nothing to grade.`
   : `The report card for ${d.domain} could not run: the resolver answered ${d.status}.`);
 
+// The source line of ARIN's record when it came through RIPEstat (arinRelay), with ARIN's failure; null otherwise.
+// app.js (renderWhois) words it the same.
+const relayText = d => (d.source === 'ripestat' ? "ARIN's whois data, relayed by RIPEstat" + (d.registryError ? ` (${d.registryError})` : '') : null);
 function whoisText(d, o) {
   if (!d.found) return (d.message || `No registry record was found for ${d.query}.`) + '\n';
   const date = s => (s ? String(s).slice(0, 10) : null), abuse = d.abuse || {};
@@ -1488,7 +1492,7 @@ function whoisText(d, o) {
   }
   return kvText([
     ['query', d.query], ['owner', d.org], ['network name', d.name], ['handle', d.handle && !/ - /.test(d.handle) ? d.handle : null],
-    ['registry', d.registry], ['address block', d.cidrs || []], ['range', d.range ? `${d.range.start} - ${d.range.end}` : null],
+    ['registry', d.registry], ['source', relayText(d)], ['address block', d.cidrs || []], ['range', d.range ? `${d.range.start} - ${d.range.end}` : null],
     ['ASN range', d.asnRange && d.asnRange.start !== d.asnRange.end ? `AS${d.asnRange.start} - AS${d.asnRange.end}` : null],
     ['type', d.type], ['country', d.country], ['registered', date(d.registered)], ['last changed', date(d.updated)], ['description', d.description],
     ['abuse email', abuse.email], ['abuse contact', !abuse.email && abuse.handle ? `${abuse.handle} (email not published in RDAP; see the registry)` : null],
@@ -1622,7 +1626,7 @@ function helpBody(h, env = {}) {
       [`Browsers: ${h} is a terminal; this reference is at ${h}/api`],
       [`Address bar: ${h}/go?q=<IP, domain, ASN, range, email or port n>`],
     ]),
-    `${IPINFO_CREDIT}. Networks: RIPEstat.\nRegistry records: RDAP. DNS: Cloudflare's 1.1.1.1.` +
+    `${IPINFO_CREDIT}. Networks: RIPEstat.\nRegistry records: RDAP (ARIN's through RIPEstat when ARIN's server fails). DNS: Cloudflare's 1.1.1.1.` +
       (b.sha || b.url ? `\nThe code we deploy: ${[b.sha, b.url].filter(Boolean).join('  ')}` : ''),
   ].join('\n\n') + '\n';
 }
@@ -4012,6 +4016,134 @@ async function rdapLookup(target, origin, base) {   // base: rdapBase's answer, 
   };
 }
 
+/* ---------- ARIN's records through RIPEstat ----------
+   ARIN's RDAP server often fails Cloudflare's TLS handshake (HTTP 525), and a retry rarely helps (see "When something
+   fails" in the handbook). RIPEstat's whois call reads ARIN's whois database over a connection that works, so when
+   rdap.arin.net fails a whois of an address or AS number with a RegistryFailed (an error status after the retry, no
+   connection, no answer, or left alone after a silence), with RELAY_MIN or more of the deadline left, whois asks
+   RIPEstat for ARIN's record instead (whoisLookup), and its abuse-contact-finder beside it (relayAbuse). Only for whois
+   itself, and not for bots (isBot, AI assistants included), as for routing (RIPEstat's fair use): a lookup's registry
+   date (blockData) never asks RIPEstat, though it reads a relayed record whois left in the cache like any other. An
+   address is asked as a prefix, its /32 or its /64 (a bare IPv6 address gets "no match"), which gives every ARIN network
+   around it; the record is the smallest, as RDAP's is: of two the same size (a network reassigned whole), the one
+   reassigned, in either order. RIPEstat leaves out when a record last changed, and a record it hasn't read lately can
+   take it longer than the deadline (a few seconds later it has it). The answer has rdapLookup's shape, with source
+   'ripestat' and registryError, ARIN's failure, and is kept an hour, not a day (ten minutes when its abuse contact
+   couldn't be told), so RDAP's fuller record comes back soon. A block ARIN passed on to another registry, which RIPEstat
+   answers for that registry, or an answer that isn't usable gives null: whois then reports ARIN's failure as before.
+   RIPEstat failing (an error, or no answer while abuse-contact-finder failed too) is left alone for RDAP_PAUSE
+   (relayQuiet, per isolate), so while it is down ARIN's failures are reported at once; one slow record pauses nothing. */
+const RELAY_MIN = 1500;
+let relayQuiet = 0;                      // per isolate: until when RIPEstat is taken as down for whois
+const unent = s => String(s).replace(/&(?:(amp)|(lt)|(gt)|(quot)|(apos)|#(\d{1,7})|#x([0-9a-f]{1,6}));/gi, (m, amp, lt, gt, quot, apos, d, h) => {
+  if (amp) return '&'; if (lt) return '<'; if (gt) return '>'; if (quot) return '"'; if (apos) return "'";
+  const n = d ? Number(d) : parseInt(h, 16);
+  return n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : m;
+});
+const ipBig = p => (p.v === 4 ? BigInt(p.o.reduce((a, x) => a * 256 + x, 0)) : p.g.reduce((a, x) => (a << 16n) | BigInt(x), 0n));
+const ARIN_TYPES = { reassigned: 'ASSIGNMENT', reallocated: 'ALLOCATION' };   // whois's words for RDAP's ARIN types
+// ARIN's own records, in every answer: the networks it keeps for itself (ARIN) and for the early registrations (VR-ARIN,
+// "Various Registries"), and their contacts, its hostmaster and "No, Contact Known" (nobody@example.com)
+const ARIN_ORGS = new Set(['ARIN', 'VR-ARIN']), ARIN_POCS = new Set(['ARIN-HOSTMASTER', 'CKN23-ARIN']);
+async function arinRelay(target, by) {
+  const asn = target.asn || null, query = asn ? 'AS' + asn : target.ip;
+  const prefix = asn ? query : target.p.v === 4 ? `${target.ip}/32` : target.p.g.slice(0, 4).map(x => x.toString(16)).join(':') + '::/64';
+  // abuse-contact-finder is asked at once but waited for only when the whois records leave the contact open
+  const finder = ripestat('abuse-contact-finder', 'resource=' + encodeURIComponent(query), { max: 50_000, timeout: 3000, retry: false, by }).catch(() => null);
+  let w;                                 // up to ripestat()'s 1 MB: a root server's answer, its route objects, runs past 500 KB
+  try { w = await ripestat('whois', 'resource=' + encodeURIComponent(prefix), { timeout: DEADLINE, by }); } catch (e) {
+    // RIPEstat down, not one slow record (abuse-contact-finder answered meanwhile) or one too large
+    const slow = e && (e.timedOut || isTimeout(e)), big = /too large/.test(String(e && e.message));
+    if (!big && (!slow || !(await finder))) relayQuiet = Date.now() + RDAP_PAUSE;
+    throw e;
+  }
+  if (!Array.isArray(w.authorities) || !w.authorities.includes('arin') || !Array.isArray(w.records)) return null;
+  // Each record as { key: first value }, its text cut to 1000 characters and unescaped (RIPEstat sends "AT&amp;T")
+  const recs = w.records.filter(Array.isArray).slice(0, 100).map(r => {
+    const o = {};
+    for (const f of r) if (f && typeof f.key === 'string' && typeof f.value === 'string' && !Object.hasOwn(o, f.key)) o[f.key] = unent(f.value.slice(0, 1000)).trim();
+    return o;
+  });
+  const inParens = s => (/\(([^()]+)\)\s*$/.exec(s || '') || [])[1] || null;
+  const holder = s => clean((s || '').replace(/\s*\([^()]*\)\s*$/, '')) || null;    // "Google LLC (GOGL)" -> "Google LLC"
+  const day = s => (/^\d{4}-\d{2}-\d{2}$/.test(s || '') ? s : null);
+  let rec;
+  if (asn) {
+    rec = recs.find(r => { const m = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(r.ASNumber || ''); return m && asn >= Number(m[1]) && asn <= Number(m[2] || m[1]); });
+  } else {
+    const at = ipBig(target.p);
+    const nets = recs.map(r => {
+      const [a, b] = String(r.NetRange || '').split(/\s+-\s+/).map(x => parseIp(x));
+      return a && b && a.v === target.p.v && b.v === a.v ? { r, lo: ipBig(a), hi: ipBig(b), a, b } : null;
+    }).filter(n => n && n.lo <= at && at <= n.hi);
+    const size = nets.reduce((s, n) => (s === null || n.hi - n.lo < s ? n.hi - n.lo : s), null);
+    const smallest = nets.filter(n => n.hi - n.lo === size);
+    const parents = new Set(smallest.map(n => inParens(n.r.Parent)).filter(Boolean));
+    const net = smallest.find(n => !parents.has(n.r.NetHandle)) || smallest[0];
+    rec = net && net.r;
+    if (net) rec = { ...rec, range: { start: canonIp(net.a), end: canonIp(net.b) } };
+  }
+  if (!rec) return null;
+  const orgs = recs.filter(r => r.OrgName && !ARIN_ORGS.has(r.OrgId));
+  const { abuse, unsure } = await relayAbuse(recs, orgs, finder);
+  const type = (rec.NetType || '').toLowerCase();
+  return {
+    query, kind: asn ? 'asn' : 'ip', found: true, source: 'ripestat', registry: 'ARIN',
+    handle: clean(asn ? (/^\d+$/.test(rec.ASHandle || '') ? 'AS' + rec.ASHandle : rec.ASHandle) : rec.NetHandle),
+    name: clean(asn ? rec.ASName : rec.NetName),
+    type: asn || !type ? null : clean(Object.hasOwn(ARIN_TYPES, type) ? ARIN_TYPES[type] : rec.NetType.toUpperCase()),
+    country: null,                                       // as in RDAP, where ARIN's networks have none
+    range: rec.range || null,
+    asnRange: asn ? (m => ({ start: Number(m[1]), end: Number(m[2] || m[1]) }))(/^(\d+)(?:\s*-\s*(\d+))?$/.exec(rec.ASNumber)) : null,
+    cidrs: asn ? [] : String(rec.CIDR || '').split(/,\s*/).map(c => c.trim()).filter(c => /^[0-9a-f.:]+\/\d{1,3}$/i.test(c) && parseIp(c.split('/')[0]))
+      .sort((x, y) => { const d = ipBig(parseIp(x.split('/')[0])) - ipBig(parseIp(y.split('/')[0])); return d < 0n ? -1 : d > 0n ? 1 : 0; }).slice(0, 8),
+    org: holder(rec.Organization || rec.Customer) || (asn && orgs.length === 1 ? clean(orgs[0].OrgName) : null),
+    abuse,
+    registered: day(rec.RegDate),
+    updated: day(rec.Updated),
+    description: null,                                   // as in RDAP, where ARIN's comments have a title of their own
+    rdapUrl: 'https://rdap.arin.net/registry/' + (asn ? 'autnum/' + asn : 'ip/' + target.ip),
+    _ttl: unsure ? 600 : 3600,
+  };
+}
+
+// The abuse contact of ARIN's record through RIPEstat, { abuse, unsure }: one of the holder's own, as RDAP gives it
+// first, though not always the same one when the holder has several (RIPEstat lists them in another order, each with
+// one email and phone). RIPEstat sorts the records by kind, so a contact can't be placed by where it is. ARIN's own
+// are left out (ARIN_POCS); then, in this order: the holder's (OrgAbuse) when there is only one; the one the network
+// names too (its own, RAbuse); with one holder, the first of its contacts; the first of the holder's, then of the
+// network's, whose email abuse-contact-finder names (asked beside the whois call, waited for only here), or else the
+// first email it names; and with no holder's contact at all, the network's own if it has just one. A customer's network
+// has none of its own: as RDAP does, it gets its provider's. unsure: abuse-contact-finder failed when it was needed.
+async function relayAbuse(recs, orgs, finder) {
+  const poc = p => r => { const email = r[p + 'Email'] || null; return { email: validEmail(email) ? email : null, phone: clean(r[p + 'Phone'], 40), handle: clean(r[p + 'Handle']) }; };
+  const own = c => ARIN_POCS.has(c.handle) || /@arin\.net$/i.test(c.email || '');
+  const list = p => { const seen = new Set(); return recs.filter(r => r[p + 'Handle']).map(poc(p)).filter(c => !own(c) && !seen.has(c.handle) && seen.add(c.handle)); };
+  const held = list('OrgAbuse'), net = list('RAbuse');
+  if (held.length === 1) return { abuse: held[0] };
+  const both = held.find(c => net.some(n => n.handle === c.handle));
+  if (both) return { abuse: both };
+  if (held.length && orgs.length === 1) return { abuse: held[0] };
+  const f = await finder, emails = (f && Array.isArray(f.abuse_contacts) ? f.abuse_contacts : []).filter(validEmail);
+  const named = new Set(emails.map(e => e.toLowerCase()));
+  if (emails.length) return { abuse: [...held, ...net].find(c => c.email && named.has(c.email.toLowerCase())) || { email: emails[0], phone: null, handle: null } };
+  if (!held.length && net.length === 1) return { abuse: net[0] };
+  return { abuse: null, unsure: !f && held.length + net.length > 0 };
+}
+
+// whois of an address or AS number: RDAP, and ARIN's record through RIPEstat when rdap.arin.net fails (arinRelay)
+async function whoisLookup(io, target) {
+  const by = Date.now() + DEADLINE;                      // rdapLookup's deadline, started at the same moment
+  try { return await rdapLookup(target, io.url.origin); } catch (e) {
+    if (!(e instanceof RegistryFailed) || e.host !== 'rdap.arin.net' || io.bot || by - Date.now() < RELAY_MIN || Date.now() < relayQuiet) throw e;
+    let d = null, why = "it had no usable copy of ARIN's record";
+    try { d = await arinRelay(target, by); } catch (x) { why = 'it failed too: ' + plain(String((x && x.message) || x)); }
+    console.error(`[ipterm] ${e.brief}; ` + (d ? "whois answered from RIPEstat's copy of ARIN's record" : `RIPEstat not used: ${why}`));
+    if (!d) throw e;
+    return { ...d, registryError: e.brief };
+  }
+}
+
 /* ---------- a lookup's block: its registry date ----------
    Location databases (IPinfo, IP2Location, MaxMind...) place a block from its registration, its holder's geofeed
    and their own measurements. For months after a block goes to someone new (a new customer, or a lease through a
@@ -4632,7 +4764,7 @@ function whoisPage(io, d, status) {
   const desc = descFit(summary, lead, who + '.');
   const rows = [
     ['owner', d.org], ['network name', d.name], ['handle', d.handle && !/ - /.test(d.handle) ? d.handle : null], ['registry', d.registry],
-    ['address block', block], ['range', d.range ? `${d.range.start} – ${d.range.end}` : null], ['type', d.type], ['country', d.country],
+    ['source', relayText(d)], ['address block', block], ['range', d.range ? `${d.range.start} – ${d.range.end}` : null], ['type', d.type], ['country', d.country],
     ['registered', date(d.registered)], ['last changed', date(d.updated)],
     ['abuse email', d.abuse && d.abuse.email], ['abuse phone', d.abuse && d.abuse.phone], ['description', d.description],
   ];
@@ -4651,7 +4783,7 @@ function whoisPage(io, d, status) {
   const personal = personName(d.org) || personName(d.name) || (Boolean(d.org) && personHeld(`${d.name || d.handle || ''} ${d.org}`));
   return shell(io, { status, path, title: `whois ${q}` + (d.org ? ` · ${d.org}` : '') + ' | ipterm', desc, noindex: personal,
     initial: { kind: 'whois', query: q, data: d },
-    body: staticBlock(`whois ${q}`, ['whois', d.registry || 'rdap'], rows, summary,
+    body: staticBlock(`whois ${q}`, ['whois', d.registry || 'rdap', ...(d.source === 'ripestat' ? ['ripestat'] : [])], rows, summary,
       `<p class="ln sys">See also: ${back} · <a href="/guides/what-is-an-asn">What is an ASN?</a></p>`) });
 }
 

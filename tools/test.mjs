@@ -6,11 +6,12 @@
 //
 //   npm test                     (or: node tools/test.mjs)
 //
-// The checks: tools/check_bots.mjs, check_vpnlists.mjs, check_https.mjs, check_pages.mjs, check_timeouts.mjs (about 11
-// seconds: its deadlines are real), check_corrections.mjs, check_resolvers.mjs, the first part of check_block.mjs (the
-// logic, with no server: it gets http://127.0.0.1:1, where nothing can answer, since fetch never connects to port 1,
-// so its part against a running copy says SKIP) and dnsleak-server's own tests (node --test, run in dnsleak-server/).
-// Never side by side: dnsleak-server's tests open ports, and check_timeouts.mjs times real waits.
+// The checks: tools/check_bots.mjs, check_vpnlists.mjs, check_https.mjs, check_pages.mjs, check_timeouts.mjs (about 9
+// seconds: its deadlines are real), check_relay.mjs (about 7, for the same reason), check_corrections.mjs,
+// check_resolvers.mjs, the first part of check_block.mjs (the logic, with no server: it gets http://127.0.0.1:1, where
+// nothing can answer, since fetch never connects to port 1, so its part against a running copy says SKIP) and
+// dnsleak-server's own tests (node --test, run in dnsleak-server/). Never side by side: dnsleak-server's tests open
+// ports, and check_timeouts.mjs and check_relay.mjs time real waits.
 //
 // The checks against a running copy stay manual, with `npx wrangler dev` running (or against the live site):
 // tools/check_previews.sh, tools/check_go.sh, tools/check_seo.sh and the second part of tools/check_block.mjs. See
@@ -28,7 +29,7 @@ if (typeof Module.registerHooks !== 'function') {
 const root = fileURLToPath(new URL('..', import.meta.url));
 const check = (file, ...args) => ({ name: file, args: [file, ...args] });
 const SUITES = [
-  ...['bots', 'vpnlists', 'https', 'pages', 'timeouts', 'corrections', 'resolvers'].map(c => check(`tools/check_${c}.mjs`)),
+  ...['bots', 'vpnlists', 'https', 'pages', 'timeouts', 'relay', 'corrections', 'resolvers'].map(c => check(`tools/check_${c}.mjs`)),
   check('tools/check_block.mjs', 'http://127.0.0.1:1'),   // port 1, a "bad port" fetch never connects to: the part with no server only
   // --test-force-exit: a server test whose server failed to start leaves a socket open, and would otherwise hang here
   // until LIMIT (on Windows, TCP can be refused the port UDP was given, reserved or another program's: listen EACCES)

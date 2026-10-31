@@ -442,6 +442,7 @@ errored or refused the token (those are logged; watch with `npx wrangler tail`).
 | VPN / proxy / Tor second opinion, VPN service name (optional) | proxycheck.io, with the `PROXYCHECK_KEY` secret | Free, 1,000 a day; falls back to IPinfo alone. Never for bots, which get it from the cache or not at all |
 | Reverse DNS (hostname) | Cloudflare DNS-over-HTTPS | Free |
 | An address lookup's `block`: when its network's registry record was created (see "Recently registered blocks") | RDAP, the record and cache entry of `whois <ip>` | Free |
+| whois of an ARIN address or AS number when ARIN's RDAP server fails (see "ARIN's records through RIPEstat") | RIPEstat's `whois` and `abuse-contact-finder` data calls, which read ARIN's whois database; never for bots | Free |
 | Mail checks: MX, SPF, DMARC, DKIM, MTA-STS, TLS-RPT, BIMI | Cloudflare DNS-over-HTTPS, plus the domain's own MTA-STS policy file | Free |
 | Report cards (grade): DNSSEC, AAAA, CAA and HTTPS records, the site's redirect and security headers | Cloudflare DNS-over-HTTPS, the mail check, RDAP, plus up to five header-only requests to the domain's own site (`HEAD`, or a `GET` dropped unread when `HEAD` is refused) | Free |
 | Networks (ASNs): holder, prefixes, main upstreams | RIPEstat (`as-overview`, `announced-prefixes`, `asn-neighbours`) | Free, no key |
@@ -1165,7 +1166,8 @@ same, and a page opened that way keeps the address as yours for Back and Forward
 What it costs, and the limits on it (`blockData()` in `src/worker.js`):
 
 - No IPinfo or proxycheck.io budget: RDAP only, and from the same cache entry as `whois <ip>` (a day), so a whois
-  and a lookup of the same address share one registry request. An uncached address adds one RDAP request (plus
+  and a lookup of the same address share one registry request. It never asks RIPEstat for ARIN's record itself, but a
+  record whois got that way (kept an hour) gives it its date like any other. An uncached address adds one RDAP request (plus
   IANA's bootstrap file, kept a day, when an isolate has no copy yet). Lookups of an address that arrive while its
   registry request is still out share that request (per isolate) instead of sending their own.
 - It can hold a lookup up by 0.3 seconds at most (`BLOCK_GRACE`). The registry request starts once the IPinfo
@@ -2059,6 +2061,7 @@ the deadline out. That is the server asked even when the silent one is behind it
 own addresses fail at once too, for that minute. A 5xx, a 525, a 429, a refused connection or an answer cut off pauses
 nothing for whois (the registry date keeps its own pause, see "Recently registered blocks"), so one bad handshake
 doesn't block a minute of lookups. A registry that answers within the deadline, however slowly, is not affected.
+While ARIN is left alone, whois of its addresses and AS numbers goes to RIPEstat at once instead (below).
 
 From 25 October 2026 `rdapFetch()` followed redirects by hand (`redirect: 'manual'`, three at most), so that the
 silent server behind a redirect could be named. ARIN lookups then often failed with HTTP 525 (Cloudflare's TLS
@@ -2071,6 +2074,48 @@ and 3 of 25 after a 2-second one, so the retry stays at 0.4 seconds. The 525s do
 Node connect to ARIN directly, so `tools/check_timeouts.mjs` checks the logic only. Try a change to how registries
 are asked on a throwaway Worker on workers.dev, against fresh ARIN lookups, before it serves visitors: Cloudflare
 makes no preview address for a version of a Worker with Durable Objects, as ipterm is.
+
+**ARIN's records through RIPEstat.** RIPEstat's `whois` data call reads ARIN's whois database, and Cloudflare reaches
+RIPEstat without trouble, so when rdap.arin.net fails a whois of an address or AS number with a `RegistryFailed` (an
+error status such as a 525 after the retry, a refused or reset connection, no answer, or being left alone for a minute
+after it went silent), and at least 1.5 seconds of the deadline are left (`RELAY_MIN`), whois asks RIPEstat for ARIN's
+record instead (`whoisLookup()`, `arinRelay()` and `relayAbuse()` in `src/worker.js`). An ARIN answer that isn't JSON
+is one bad record, as before, and gets no second way. An address is asked as its /32 or its /64 (RIPEstat has no match
+for a bare IPv6 address), which gives every ARIN network around it, and the record is the smallest of them, as RDAP's
+is: a customer's network inside its provider's, which gets the provider's abuse contact as in RDAP, or of two the same
+size the one reassigned, whichever RIPEstat lists first. RIPEstat sorts the records by kind, so which contact belongs
+to which holder is lost, and ARIN's own records come with every answer: the networks it keeps for itself and, in
+early-registration space (as in 128/8, 156/8, 157/8 and 192/8), its "Various Registries" network and that one's "No, Contact Known"
+placeholder (nobody@example.com), all left out (`ARIN_ORGS`, `ARIN_POCS`). The abuse contact is then, in this order:
+the holder's only one; the holder's that the network names too; with one holder, its first; the first of the
+holder's, then of the network's, whose email RIPEstat's `abuse-contact-finder` lists (asked beside the whois call,
+waited for only here), or else the first email it lists; and with no holder's contact at all, the network's own if it
+has just one. The answer says where it came from: `source: "ripestat"` and `registryError` (ARIN's failure) in JSON,
+and a source line, "ARIN's whois data, relayed by RIPEstat (rdap.arin.net failed to answer: HTTP 525)", as text, on
+the page and in the terminal (with a `ripestat` tag). It is kept an hour rather than a day, ten minutes when the abuse
+contact couldn't be told because abuse-contact-finder failed, so RDAP's fuller record comes back soon: RIPEstat leaves
+out when a record last changed. Only whois itself does this, and not for bots, AI assistants included, as with routing
+(RIPEstat's fair use). A lookup's registry date ("Recently registered blocks") never asks RIPEstat, but uses a relayed
+record whois left in the cache like any other.
+
+ARIN's failure stands, in the same words as before, when RIPEstat answers for another registry (a block ARIN passed on
+to RIPE NCC), has no match, fails too, or takes past the deadline. A large network's record that RIPEstat hasn't read
+lately can take it several seconds (five, Level 3's, Amazon's, Microsoft's, a hosting company's and a root
+server's, ran past 6.5 seconds once, and came in about half a second a few minutes later), so trying again a moment later usually works; a fresh
+address in an ordinary network took 0.8 seconds (the median of 16, none over 1.5). A silent ARIN at the deadline
+leaves no time for it. RIPEstat failing (an error, or no answer while abuse-contact-finder failed too) is left alone
+for a minute (`relayQuiet`, per isolate, like `RDAP_PAUSE`), so while it is down ARIN's failures are reported at once;
+one slow record, or one past `ripestat()`'s 1 MB cap, pauses nothing (a root server's answer runs past 500 KB with its
+route objects).
+
+Compared on 31 October 2026, from a machine that reaches ARIN directly, with ARIN made to fail: of 40 addresses and AS
+numbers (IPv4 and IPv6, customers' networks, reassignments, early-registration space, AS ranges, root servers), the 35
+that RIPEstat answered in time and the 5 retried gave ARIN's record, field for field but the last-changed date, for
+37; the other 3 got another of the holder's contacts than RDAP's first: AS701 another of Verizon's abuse contacts, and
+157.240.1.1 and 156.154.70.1 the same contact with another of its emails (RIPEstat gives one email and one phone
+each). On Cloudflare's network, a throwaway Worker running this code from IAD the same day made 100 fresh
+ARIN lookups: ARIN failed 14 of them even after its retry, and RIPEstat answered all 14, in 1.2 to 2.9 seconds; none
+failed. `tools/check_relay.mjs` checks it (see "Local development").
 
 **The terminal's own message** doesn't blame the visitor's connection when ipterm is slow. When its 9-second timer
 fires it says "No answer from ipterm within 9 seconds: a registry or data source may be slow or down. Try again in a
@@ -2110,14 +2155,15 @@ npx wrangler dev
 or later), and `npm test` runs them all: `node tools/check_bots.mjs` (bots never spend the budgets),
 `node tools/check_https.mjs` (plain http), `node tools/check_vpnlists.mjs` (the known VPN servers),
 `node tools/check_pages.mjs` (the ports sitemap, the IANA row, titles and descriptions, special-purpose ranges),
-`node tools/check_timeouts.mjs` (silent registries and the terminal's time limit), `node tools/check_corrections.mjs`
-(the corrections line, the issue forms and `/changes`), `node tools/check_resolvers.mjs` (the public DNS resolvers'
-data, pages, sitemap, `/public-dns` and the terminal), the first part of `node tools/check_block.mjs` and
-dnsleak-server's own tests (`npm test` in `dnsleak-server/`).
+`node tools/check_timeouts.mjs` (silent registries and the terminal's time limit), `node tools/check_relay.mjs`
+(ARIN's records through RIPEstat when ARIN fails), `node tools/check_corrections.mjs` (the corrections line, the issue
+forms and `/changes`), `node tools/check_resolvers.mjs` (the public DNS resolvers' data, pages, sitemap,
+`/public-dns` and the terminal), the first part of `node tools/check_block.mjs` and dnsleak-server's own tests
+(`npm test` in `dnsleak-server/`).
 
 **`npm test`** (`tools/test.mjs`) runs those one at a time, each in its own Node process (never side by side:
-dnsleak-server's tests open ports, and `check_timeouts.mjs` times real waits), and prints a line for each and a
-total, in about 20 seconds. It exits 1 if any of them fails, crashes or runs over 5 minutes, and prints what that
+dnsleak-server's tests open ports, and `check_timeouts.mjs` and `check_relay.mjs` time real waits), and prints a line
+for each and a total, in about 30 seconds. It exits 1 if any of them fails, crashes or runs over 5 minutes, and prints what that
 one printed, less the lines that passed. `check_block.mjs` gets `http://127.0.0.1:1`, which `fetch` never connects
 to, so its part against a running copy says SKIP even while `wrangler dev` runs. Nothing to install: no check needs
 a package, wrangler included. On older Node it stops at once and says which version it needs. On Windows,
@@ -2296,7 +2342,24 @@ record; with IANA's file silent, whois of an AS number gets its record through r
 query. Then the terminal's `getJson()` and `RETRYABLE`, read out of `public/app.js`:
 its own abort says "No answer from ipterm within 9 seconds", with no word about the connection; a `TypeError`, or an
 abort while the browser is offline, "Couldn't reach ipterm"; answers that came pass as before; and these messages and
-the Worker's offer `retry`, while a typo doesn't.
+the Worker's offer `retry`, while a typo doesn't. ARIN's failures there also ask RIPEstat for its copy of the record,
+which has no match for any of them, so ARIN's failure stands, as quickly; the silent ARIN must not ask it.
+
+`node tools/check_relay.mjs` (Node 22.15 or later) checks ARIN's records through RIPEstat (see "When something
+fails"), the same way, with ARIN answering 525 and RIPEstat answering from records shaped like its real ones, cut down
+to what whois reads. It takes about 7 seconds, for a silent ARIN's deadline. Each record must be RDAP's: a customer's
+network inside Comcast's, with Comcast's abuse contact; Linode's reassignment of a whole Akamai block, with Linode's
+own, in either order; AT&T's name unescaped; two CIDRs in address order; an answer of about 900 KB; an IPv6 address
+asked as its /64, its CIDR as ARIN writes it; an AS range; early-registration space, where ARIN's "Various Registries"
+placeholder must not hide the holder's own contact (one or two of them), whether abuse-contact-finder answers or
+fails; and two holders sorted out by the email abuse-contact-finder lists (not just its first), or no abuse contact
+when it fails, which is then kept ten minutes. abuse-contact-finder must be waited for only then. Each must carry
+`source` and `registryError`, the source line as text and on the page (and app.js must word it the same), and be kept
+an hour. ARIN's failure must stand when RIPEstat answers for RIPE NCC, has no match, sends more than 1 MB or takes past
+the deadline, for a bot, and with no time left after a silent ARIN; the next whois, ARIN left alone, gets RIPEstat's
+copy at once (the slow and the oversized answers paused nothing), and after RIPEstat fails twice the one after that
+gets ARIN's failure at once, RIPEstat left alone. APNIC failing asks RIPEstat nothing, and neither does a lookup's
+registry date, ARIN failing.
 
 `node tools/check_corrections.mjs` (Node 22.15 or later) checks the corrections line, the IPinfo pointer, the issue
 forms and `/changes` (see "Corrections and changes"), with no server and no network: the whole Worker in Node with its

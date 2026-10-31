@@ -5,6 +5,8 @@
    linked on the page; optional)]. */
 (function (root) {
   const LIST = [
+    ['2026-10-31', 'whois of an ARIN address or AS number answers even when ARIN\'s own server fails, as it often does for Cloudflare: ARIN\'s record comes through RIPEstat instead, marked "relayed by RIPEstat" with how ARIN failed. Before, whois said ARIN\'s server had failed and to try again.',
+      ['/whois/8.8.8.8']],
     ['2026-10-29', 'New: public DNS resolver pages. Every address of 11 public DNS services (Google, Cloudflare, Quad9, OpenDNS, AdGuard and more) shows its service, its filtering variant, its other addresses, DoH and DoT, and what the operator documents about DNSSEC, client subnet (ECS) and logging, with the operator\'s pages as sources and the day they were checked. /public-dns lists them all, also as plain text for curl. Their titles, descriptions and summaries no longer name one place (IPinfo\'s location row stays), and an address is called anycast only where its operator says so.',
       ['/public-dns', '/9.9.9.9', '/1.1.1.3']],
     ['2026-10-29', 'Reference pages (the port pages, the tool pages but leaktest, the guides, /public-dns and a DNS resolver\'s details on its IP page) end with a line to suggest a fix: on GitHub (public, needs an account) or by email. It fills in only the page\'s address, and "resolver" for a resolver\'s details. Other IP pages point to IPinfo instead, which takes corrections to its locations.',
