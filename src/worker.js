@@ -1629,27 +1629,27 @@ function helpBody(h, env = {}) {
 
 // Runs a data step and maps rate limiting and provider failures to friendly responses.
 // Outside services occasionally hiccup. Every upstream call gets a time limit and one retry
-// (after a short pause) on network errors, timeouts, 5xx and 429 responses. by (a Date.now() time, optional) is a
-// deadline for both tries together: each try gets what is left of it at most, and the retry comes only with a second
-// left after the pause, so a server that doesn't answer gets one try, not two. The error says whether the last try
-// timed out (timedOut).
+// (after a short pause: 0.4 seconds, or pause) on network errors, timeouts, 5xx and 429 responses. by (a Date.now()
+// time, optional) is a deadline for both tries together: each try gets what is left of it at most, and the retry comes
+// only with a second left after the pause, so a server that doesn't answer gets one try, not two. The registries wait
+// longer (RDAP_RETRY_PAUSE, rdapFetch). The error says whether the last try timed out (timedOut).
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // How long whois, dig and routing may wait on the outside services they ask, every try and redirect included (by,
 // above): well inside the 9 seconds the terminal waits (getJson in public/app.js), so it shows the Worker's message,
 // not its own. The handbook ("When something fails") lists the worst case of every other route.
 const DEADLINE = 6500;
 const isTimeout = e => !!e && (e.name === 'TimeoutError' || e.name === 'AbortError');
-async function fetchRetry(url, init = {}, label = 'upstream', timeout = 8000, by = Infinity) {
+async function fetchRetry(url, init = {}, label = 'upstream', timeout = 8000, by = Infinity, pause = 400) {
   let last;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const again = () => attempt === 0 && by - Date.now() >= 1400;      // the pause, and a second for the retry
+    const again = () => attempt === 0 && by - Date.now() >= pause + 1000;   // the pause, and a second for the retry
     try {
       const r = await fetch(url, { ...init, signal: AbortSignal.timeout(Math.max(0, Math.min(timeout, by - Date.now()))) });
-      if (again() && (r.status >= 500 || r.status === 429)) { last = new Error(`${label} HTTP ${r.status}`); await sleep(400); continue; }
+      if (again() && (r.status >= 500 || r.status === 429)) { last = new Error(`${label} HTTP ${r.status}`); await sleep(pause); continue; }
       return r;
     } catch (e) {
       last = e;
-      if (again()) { await sleep(400); continue; }
+      if (again()) { await sleep(pause); continue; }
       break;
     }
   }
@@ -3864,15 +3864,22 @@ const RDAP_INIT = { headers: { accept: 'application/rdap+json, application/json'
 // known by its answer's URL (r.url). A server still silent at the deadline gets no second try (fetchRetry):
 // RegistryFailed names it, and one that had RDAP_FAIR or more to answer is then taken as silent for RDAP_PAUSE (per
 // isolate, keyed by the origin asked), so the requests after it fail at once instead of each waiting the deadline out.
-// A quick failure (a 5xx such as a 525, a 429, a refused or reset connection) gets fetchRetry's one retry and pauses
-// nothing: one bad handshake doesn't hold up a minute of lookups. A connection that still fails is a RegistryFailed
-// here; an answer that is still a failure is one in the lookup that reads it (rdapLookup, domainLookup). tld: a
-// domain's, whose registry the message names. Returns { r, url, json }: the answer, the server it came from, and
-// json(max), its body read (readJson) within the same deadline, since the fetch's time limit covers the body too. A
-// body that fails is the server's failure as well: one still unread at the deadline is that server gone silent (named,
-// and paused as above), and one cut off is a lost connection; JSON that doesn't parse, or a body past the cap, is one
-// bad record and stays an error of its own.
+// A quick failure (a 5xx such as a 525, a 429, a refused or reset connection) gets fetchRetry's one retry, after
+// RDAP_RETRY_PAUSE, and pauses nothing: one bad handshake doesn't hold up a minute of lookups. A connection that still
+// fails is a RegistryFailed here; an answer that is still a failure is one in the lookup that reads it (rdapLookup,
+// domainLookup). tld: a domain's, whose registry the message names. Returns { r, url, json }: the answer, the server it
+// came from, and json(max), its body read (readJson) within the same deadline, since the fetch's time limit covers the
+// body too. A body that fails is the server's failure as well: one still unread at the deadline is that server gone
+// silent (named, and paused as above), and one cut off is a lost connection; JSON that doesn't parse, or a body past
+// the cap, is one bad record and stays an error of its own.
 const RDAP_FAIR = 3000, RDAP_PAUSE = 60_000;
+// The pause before a registry's retry, where every other service's is 0.4 seconds (fetchRetry). ARIN's server
+// (rdap.arin.net, an old Apache and OpenSSL 1.0.2k) often fails Cloudflare's TLS handshake, HTTP 525: a test Worker in
+// October 2026 saw about half of its first tries from Cloudflare's EWR fail that way, and 40% still failed after a
+// retry 0.4 seconds later, so the retry waits longer. It still comes only while the pause and a second fit before the
+// deadline (by), so a silent server gets one try. Whether 2 seconds rescues more of ARIN's 525s is still to be measured
+// on Cloudflare's network (see "When something fails" in the handbook).
+const RDAP_RETRY_PAUSE = 2000;
 const rdapQuiet = {};                    // per isolate: RDAP server (origin) -> until when it is taken as silent
 const rdapSilent = u => Date.now() < (rdapQuiet[originOf(u)] || 0);
 async function rdapFetch(url, by, tld = null) {
@@ -3883,7 +3890,7 @@ async function rdapFetch(url, by, tld = null) {
     return new RegistryFailed(at, tld);
   };
   let r;
-  try { r = await fetchRetry(url, RDAP_INIT, 'rdap', DEADLINE, by); } catch (e) {
+  try { r = await fetchRetry(url, RDAP_INIT, 'rdap', DEADLINE, by, RDAP_RETRY_PAUSE); } catch (e) {
     throw e.timedOut ? silent(url) : new RegistryFailed(url, tld, 0);
   }
   const at = r.url || url;

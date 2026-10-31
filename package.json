@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "node tools/deploy.mjs",
+    "test": "node tools/test.mjs",
     "landmask": "node tools/build_landmask.mjs",
     "asn-sitemap": "node tools/build_asn_sitemap.mjs"
   },

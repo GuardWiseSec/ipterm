@@ -265,7 +265,8 @@ npm test
 runs the tests (`node --test`, nothing to install): the DNS answers (every case above, 0x20 mixed case,
 EDNS and Client Subnet, malformed and oversized queries), the store's two-minute expiry and memory caps,
 and the running server over UDP, TCP and the API, including that a flood of calls without the key leaves
-the Worker's whole allowance untouched.
+the Worker's whole allowance untouched. `npm test` at the top of the repository runs them too, after the
+Worker's checks, and GitHub runs that on every push to `master` and every pull request.
 
 To try it by hand on a high port:
 

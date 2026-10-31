@@ -20,7 +20,8 @@ ipterm is a terminal-style IP lookup site that runs on a single Cloudflare Worke
   operators' own documentation: `public/resolvers.js` (see "Public DNS resolvers")
 - The list of changes (`/changes`): `public/changes.js`; the GitHub issue forms behind the corrections line:
   `.github/ISSUE_TEMPLATE/` (see "Corrections and changes")
-- Scripts: `tools/` (deploy, land mask, guides, ASN sitemap, link-preview and SEO checks)
+- Scripts: `tools/` (deploy, land mask, guides, ASN sitemap, and the checks: `npm test` runs those that need no
+  server, as GitHub does on every push and pull request, `.github/workflows/test.yml`; see "Local development")
 - The DNS leak test's own DNS server: `dnsleak-server/` (runs on a small VPS outside Cloudflare; see
   [dnsleak-server/README.md](../dnsleak-server/README.md))
 
@@ -2011,7 +2012,8 @@ Notes:
 ## When something fails
 
 Every call to an outside service (IPinfo, RIPEstat, the registries, DNS) has a time limit and is retried
-once after a short pause, so brief hiccups don't reach visitors. If IANA's registry directory is down,
+once after a short pause (0.4 seconds, 2 for a registry: see "Deadlines" below), so brief hiccups don't reach
+visitors. If IANA's registry directory is down,
 whois falls back to rdap.org. When a lookup still fails, the visitor sees "A data source didn't respond"
 (HTTP 502; whois names the registry server instead, below) and the Worker logs which service failed. Watch live with:
 
@@ -2024,10 +2026,12 @@ Logs name the service and error only: never the visitor's IP or your API token.
 **Deadlines.** The terminal waits 9 seconds for an answer (`getJson()` in `public/app.js`). whois, dig and routing
 give up sooner, so the visitor gets the Worker's own words: the whole answer, every try and redirect included, gets
 `DEADLINE` (6.5 seconds, the `by` of `fetchRetry()` in `src/worker.js`). Within it a server that doesn't answer gets
-one try, not two: the retry comes only after a quick failure (a 5xx, a 429, a refused connection) with a second left.
-For whois, IANA's file gets 3 seconds of it at most (`BOOT_WAIT`), so rdap.org still has time when IANA is down, and
-the registrar's record 4 seconds or what is left. Until October 2026 a silent registry took about 17 seconds (8
-seconds, twice), so the terminal gave up first and said "network error. Check your connection".
+one try, not two: the retry comes only after a quick failure (a 5xx, a 429, a refused connection), after a pause of
+0.4 seconds, 2 seconds for a registry (`RDAP_RETRY_PAUSE`), and only when the pause and a second for the retry still
+fit before the deadline. For whois, IANA's file gets 3 seconds of it at most (`BOOT_WAIT`), so rdap.org still has
+time when IANA is down, and the registrar's record 4 seconds or what is left. Until October 2026 a silent registry
+took about 17 seconds (8 seconds, twice), so the terminal gave up first and said "network error. Check your
+connection".
 
 **A registry that fails is named** (`rdapFetch()`, `RegistryFailed`), whatever the failure. One that doesn't answer
 within the deadline: "The .ng registry's whois server (rdap.nic.net.ng) didn't answer. That's on their side; try again
@@ -2067,6 +2071,16 @@ the manual redirects were the main change in how it was asked (the other, the de
 locally: `wrangler dev` and Node connect to ARIN directly, so `tools/check_timeouts.mjs` checks the logic only. Try a change to
 how registries are asked on a preview address, against fresh ARIN lookups, before it serves visitors.
 
+ARIN's 525s haven't gone away, so a registry's retry waits longer than other services': 2 seconds
+(`RDAP_RETRY_PAUSE`) for every RDAP request (`rdapFetch()`: whois, the report card's registration and a lookup's
+registry date), against 0.4 for IANA's file and everything else. A test Worker on Cloudflare's network saw about half
+of its first requests to rdap.arin.net from EWR fail with a 525, and 40% still failed after a retry 0.4 seconds later,
+so that retry rarely rescued a lookup. The retry still comes only while the pause and a second fit before the
+deadline, so whois still answers within 6.5 seconds and a silent server still gets one try; a registry that fails
+twice is named as before, about 2 seconds in rather than half a second. Whether the longer pause rescues more of
+ARIN's 525s still has to be measured on Cloudflare's network, against fresh ARIN lookups as above:
+`tools/check_timeouts.mjs` only checks the timing.
+
 **The terminal's own message** doesn't blame the visitor's connection when ipterm is slow. When its 9-second timer
 fires it says "No answer from ipterm within 9 seconds: a registry or data source may be slow or down. Try again in a
 moment."; when the request itself fails (a `TypeError`: no connection, or ipterm can't be reached), or the browser
@@ -2100,13 +2114,32 @@ npx wrangler dev
 ```
 
 `sh tools/check_previews.sh` (link previews and crawlers get pages, scripts get JSON), `sh tools/check_go.sh`
-(address-bar search, hostile inputs included) and `node tools/check_block.mjs` (a lookup's registry date) run
-against it. `node tools/check_bots.mjs` (bots never spend the budgets), `node tools/check_https.mjs` (plain http),
-`node tools/check_vpnlists.mjs` (the known VPN servers), `node tools/check_pages.mjs` (the ports sitemap, the IANA
-row, titles and descriptions, special-purpose ranges), `node tools/check_timeouts.mjs` (silent registries and the
-terminal's time limit), `node tools/check_corrections.mjs` (the corrections line, the issue forms and `/changes`)
-and `node tools/check_resolvers.mjs` (the public DNS resolvers' data, pages, sitemap, `/public-dns` and the terminal)
-need no server (Node 22.15 or later).
+(address-bar search, hostile inputs included), `sh tools/check_seo.sh` and the second part of
+`node tools/check_block.mjs` (a lookup's registry date) run against it, by hand. The rest need no server (Node 22.15
+or later), and `npm test` runs them all: `node tools/check_bots.mjs` (bots never spend the budgets),
+`node tools/check_https.mjs` (plain http), `node tools/check_vpnlists.mjs` (the known VPN servers),
+`node tools/check_pages.mjs` (the ports sitemap, the IANA row, titles and descriptions, special-purpose ranges),
+`node tools/check_timeouts.mjs` (silent registries and the terminal's time limit), `node tools/check_corrections.mjs`
+(the corrections line, the issue forms and `/changes`), `node tools/check_resolvers.mjs` (the public DNS resolvers'
+data, pages, sitemap, `/public-dns` and the terminal), the first part of `node tools/check_block.mjs` and
+dnsleak-server's own tests (`npm test` in `dnsleak-server/`).
+
+**`npm test`** (`tools/test.mjs`) runs those one at a time, each in its own Node process (never side by side:
+dnsleak-server's tests open ports, and `check_timeouts.mjs` times real waits), and prints a line for each and a
+total, in about 20 seconds. It exits 1 if any of them fails, crashes or runs over 5 minutes, and prints what that
+one printed, less the lines that passed. `check_block.mjs` gets `http://127.0.0.1:1`, which `fetch` never connects
+to, so its part against a running copy says SKIP even while `wrangler dev` runs. Nothing to install: no check needs
+a package, wrangler included. On older Node it stops at once and says which version it needs. On Windows,
+dnsleak-server's server tests now and then fail with `listen EACCES`: their TCP server takes the port Windows gave
+UDP, which may be in a range Windows keeps from TCP (`netsh int ipv4 show excludedportrange protocol=tcp`) or one
+another program listens on. The tests don't work around that yet, and it isn't a fault in the server: run it again.
+
+**On GitHub**, `.github/workflows/test.yml` runs `npm test` on every push to `master` and every pull request: one job
+on Ubuntu with Node 24, `actions/checkout` and `actions/setup-node` at their current major version (v7), a token
+that can only read, no secrets and no `npm install`. A Linux checkout has LF line endings where a Windows one has
+CRLF, and the checks turn CRLF into LF when they read a file's text, so both pass alike. The checks against a running
+copy (`check_previews.sh`, `check_go.sh`, `check_seo.sh` and the second part of `check_block.mjs`) aren't run there:
+they need `wrangler dev`, and they ask outside services (RIPEstat, the registries, IPinfo's free API).
 
 Under `wrangler dev` the first lookup starts the VPN lists' first download (the Durable Object's alarm), from the
 providers' real lists. To run the cron trigger itself, start it with `npx wrangler dev --test-scheduled` and ask
@@ -2253,22 +2286,23 @@ every port's names and the registry copy against them.
 `node tools/check_timeouts.mjs` (Node 22.15 or later) checks the deadlines and the registry messages (see "When
 something fails"), with no server and no network: the whole Worker in Node with `fetch` stubbed, where a server that
 never answers holds each request until the request's own time limit aborts it, and redirects are followed as the
-platform's `fetch` follows them (unless a request says `redirect: 'manual'`). The deadlines are real, so it takes about
-9 seconds, the slow cases side by side. First the quick failures, each a 502 well within the deadline after one
-retry, naming the registry in its own words: ARIN answering 525 twice ("failed to answer (HTTP 525)", in JSON, as text
-and on the page), the .ng registry 503 twice (and the report card's line), AFRINIC resetting the connection twice
-("couldn't be reached"), APNIC 429 twice, and ARIN's redirect to a RIPE NCC server that answers 503 (RIPE NCC's, the
-server that answered). ARIN's answer cut off after its headers "couldn't be reached" too (at once: the body gets no
-retry), while a maintenance page instead of JSON is one bad record, with the general message. None of them pauses its
-server: ARIN answering 525 and then the record, right after, gives the record through the retry, and AFRINIC is asked
-again. LACNIC's redirect to a NIC.br that answers gives NIC.br's record, and no RDAP request may say
+platform's `fetch` follows them (unless a request says `redirect: 'manual'`). The deadlines and pauses are real, so it
+takes about 11 seconds, the slow cases side by side. First the quick failures, each a 502 well within the deadline
+after one retry 2 seconds later (`RDAP_RETRY_PAUSE`; dig with a resolver that fails each query once still gets its
+retry after 0.4 seconds), naming the registry in its own words: ARIN answering 525 twice ("failed to answer (HTTP
+525)", in JSON, as text and on the page), the .ng registry 503 twice (and the report card's line), AFRINIC resetting
+the connection twice ("couldn't be reached"), APNIC 429 twice, and ARIN's redirect to a RIPE NCC server that answers
+503 (RIPE NCC's, the server that answered). ARIN's answer cut off after its headers "couldn't be reached" too (at
+once: the body gets no retry), while a maintenance page instead of JSON is one bad record, with the general message.
+None of them pauses its server: ARIN answering 525 and then the record, right after, gives the record through the
+retry 2 seconds on, and AFRINIC is asked again. LACNIC's redirect to a NIC.br that answers gives NIC.br's record, and no RDAP request may say
 `redirect: 'manual'`. Then whois of unijos.edu.ng, whose registry server (rdap.nic.net.ng) never answers, must be a 502 within the deadline, well inside the terminal's 9 seconds, after one
 request to that server, naming the .ng registry and its server; then the text answer, the page (and the
 `initial.error` the terminal boots from) and the report card's registration line say the same at once, with no new
 request, since the server is left alone for a minute. A silent ARIN must be named ARIN's, a silent NIC.br behind
 LACNIC's redirect LACNIC's (the server asked, then left alone), a server that sends its headers and then nothing
 "didn't answer" (and is left alone too), and a registry that answers in 2 seconds, or after one 503, still gives its
-record; with IANA's file silent, whois of an AS number gets its record through rdap.org after IANA's 3 seconds. dig and routing with a silent resolver or RIPEstat must be a 502 within the deadline, one try per
+record, while ARIN's 525 after 4 seconds, too late for the pause and a second, gets no retry; with IANA's file silent, whois of an AS number gets its record through rdap.org after IANA's 3 seconds. dig and routing with a silent resolver or RIPEstat must be a 502 within the deadline, one try per
 query. Then the terminal's `getJson()` and `RETRYABLE`, read out of `public/app.js`:
 its own abort says "No answer from ipterm within 9 seconds", with no word about the connection; a `TypeError`, or an
 abort while the browser is offline, "Couldn't reach ipterm"; answers that came pass as before; and these messages and

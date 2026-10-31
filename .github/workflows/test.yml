@@ -1,0 +1,27 @@
+# `npm test` (tools/test.mjs) on every push to master and every pull request: the checks that need no server, one at
+# a time. They need Node alone: no npm install (no check imports a package, and wrangler isn't used), no secrets, and
+# the token can only read. The checks against a running copy (tools/check_previews.sh, check_go.sh, check_seo.sh and
+# the second part of check_block.mjs) stay manual: see "Local development" in docs/handbook.md.
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm test
