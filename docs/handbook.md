@@ -2098,10 +2098,19 @@ out when a record last changed. Only whois itself does this, and not for bots, A
 (RIPEstat's fair use). A lookup's registry date ("Recently registered blocks") never asks RIPEstat, but uses a relayed
 record whois left in the cache like any other.
 
-ARIN's failure stands, in the same words as before, when RIPEstat answers for another registry (a block ARIN passed on
-to RIPE NCC), has no match, fails too, or takes past the deadline. A large network's record that RIPEstat hasn't read
-lately can take it several seconds (five, Level 3's, Amazon's, Microsoft's, a hosting company's and a root
-server's, ran past 6.5 seconds once, and came in about half a second a few minutes later), so trying again a moment later usually works; a fresh
+A block or AS number ARIN passed on to another registry (RIPE NCC, APNIC, LACNIC or AFRINIC), which ARIN's RDAP would
+have redirected to that registry, comes back from RIPEstat in that registry's own words. whois then asks that
+registry's RDAP server for the record (`RIR_RDAP`), with what is left of the deadline if a second is: an ordinary RDAP
+record, kept a day, with no source line (its link that registry's). If that server fails too, whois names it, not ARIN,
+as ARIN's redirect would have; but if it is only silent, with under 3 seconds (`RDAP_FAIR`) to answer, ipterm's
+deadline cut it off, so ARIN's failure stands. Either way it is never left alone for a minute (`rdapFetch()`'s
+`pause`): a registry given only what was left is no silent one, and its own addresses still get the full deadline.
+Before this, on 31 October 2026, whois of 173.249.41.192, a Contabo block ARIN passed on to RIPE NCC, got ARIN's
+failure. Otherwise ARIN's failure stands,
+in the same words as before, when RIPEstat has no match, fails too, or takes past the deadline. A large network's
+record that RIPEstat hasn't read lately can take it several seconds (five, Level 3's, Amazon's, Microsoft's, a hosting
+company's and a root server's, ran past 6.5 seconds once, and came in about half a second a few minutes later), and so
+can a block another registry holds (2.5 to 6.5 seconds for the five asked), so trying again a moment later usually works; a fresh
 address in an ordinary network took 0.8 seconds (the median of 16, none over 1.5). A silent ARIN at the deadline
 leaves no time for it. RIPEstat failing (an error, or no answer while abuse-contact-finder failed too) is left alone
 for a minute (`relayQuiet`, per isolate, like `RDAP_PAUSE`), so while it is down ARIN's failures are reported at once;
@@ -2355,7 +2364,10 @@ placeholder must not hide the holder's own contact (one or two of them), whether
 fails; and two holders sorted out by the email abuse-contact-finder lists (not just its first), or no abuse contact
 when it fails, which is then kept ten minutes. abuse-contact-finder must be waited for only then. Each must carry
 `source` and `registryError`, the source line as text and on the page (and app.js must word it the same), and be kept
-an hour. ARIN's failure must stand when RIPEstat answers for RIPE NCC, has no match, sends more than 1 MB or takes past
+an hour. A block ARIN passed on to RIPE NCC, and an AS number it passed on to APNIC, must come from that registry's own
+RDAP, kept a day, within the one deadline; RIPE NCC answering 503, or silent with 3.5 seconds left, must be named;
+silent with 1.3 seconds left, or under a second left once RIPEstat names it, ARIN's failure must stand; and RIPE NCC
+must not be left alone after either silence (the next whois of a RIPE NCC address asks it). So must it when RIPEstat has no match, sends more than 1 MB or takes past
 the deadline, for a bot, and with no time left after a silent ARIN; the next whois, ARIN left alone, gets RIPEstat's
 copy at once (the slow and the oversized answers paused nothing), and after RIPEstat fails twice the one after that
 gets ARIN's failure at once, RIPEstat left alone. APNIC failing asks RIPEstat nothing, and neither does a lookup's

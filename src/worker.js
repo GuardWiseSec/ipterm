@@ -3879,11 +3879,12 @@ const RDAP_INIT = { headers: { accept: 'application/rdap+json, application/json'
 const RDAP_FAIR = 3000, RDAP_PAUSE = 60_000;
 const rdapQuiet = {};                    // per isolate: RDAP server (origin) -> until when it is taken as silent
 const rdapSilent = u => Date.now() < (rdapQuiet[originOf(u)] || 0);
-async function rdapFetch(url, by, tld = null) {
+// pause: false for a request on what is left of an earlier one's deadline (arinRelay's), which never pauses a server.
+async function rdapFetch(url, by, tld = null, pause = true) {
   if (rdapSilent(url)) throw new RegistryFailed(url, tld);
   const t0 = Date.now();
   const silent = at => {                 // still silent at the deadline: paused if it had RDAP_FAIR or more
-    if (Date.now() - t0 >= RDAP_FAIR) rdapQuiet[originOf(url)] = Date.now() + RDAP_PAUSE;
+    if (pause && Date.now() - t0 >= RDAP_FAIR) rdapQuiet[originOf(url)] = Date.now() + RDAP_PAUSE;
     return new RegistryFailed(at, tld);
   };
   let r;
@@ -3911,6 +3912,7 @@ class RegistryFailed extends Error {
     const host = (() => { try { return new URL(url).hostname; } catch { return String(url); } })();
     super(status ? `rdap ${status} from ${host}` : status === 0 ? `rdap: couldn't reach ${host}` : 'rdap: no answer from ' + host);
     this.origin = originOf(url);
+    this.silent = status === null;
     this.host = host;
     const rir = Object.keys(REGISTRY).find(k => host.includes(k));
     const who = host === 'rdap.org' ? "rdap.org, which ipterm asks while IANA's list of registries can't be read,"
@@ -3975,15 +3977,18 @@ function registryOf(o, host, base) {
   return known(said) || (/^[A-Z][A-Z0-9-]{1,15}$/.test(said) ? said : null) || known(host) || known(o.port43) || known(base);
 }
 
-async function rdapLookup(target, origin, base) {   // base: rdapBase's answer, when the caller already has it
+// base: rdapBase's answer, when the caller already has it; by: what is left of a deadline started earlier (arinRelay's),
+// on which a silent server is never paused (rdapFetch): a slow registry, given only that, is no silent one
+async function rdapLookup(target, origin, base, by) {
   const query = target.asn ? 'AS' + target.asn : target.ip;
   const kind = target.asn ? 'asn' : 'ip';
   const tail = target.asn ? 'autnum/' + target.asn : 'ip/' + target.ip;
-  const by = Date.now() + DEADLINE;
+  const own = by === undefined;
+  if (own) by = Date.now() + DEADLINE;
   if (base === undefined) base = await rdapBase(target, origin, by);
   if (!base) return { query, kind, found: false };
   const url = base + tail;
-  const { r, url: at, json } = await rdapFetch(url, by);   // at: the server that answered (after any redirect)
+  const { r, url: at, json } = await rdapFetch(url, by, null, own);   // at: the server that answered (after any redirect)
   if (r.status === 404) return { query, kind, found: false };
   if (!r.ok) { if (r.body) r.body.cancel(); throw new RegistryFailed(at, null, r.status); }
   const o = await json();
@@ -4029,8 +4034,12 @@ async function rdapLookup(target, origin, base) {   // base: rdapBase's answer, 
    reassigned, in either order. RIPEstat leaves out when a record last changed, and a record it hasn't read lately can
    take it longer than the deadline (a few seconds later it has it). The answer has rdapLookup's shape, with source
    'ripestat' and registryError, ARIN's failure, and is kept an hour, not a day (ten minutes when its abuse contact
-   couldn't be told), so RDAP's fuller record comes back soon. A block ARIN passed on to another registry, which RIPEstat
-   answers for that registry, or an answer that isn't usable gives null: whois then reports ARIN's failure as before.
+   couldn't be told), so RDAP's fuller record comes back soon. A block or AS number ARIN passed on to another registry,
+   which RIPEstat answers for that registry (RIPE NCC, APNIC, LACNIC or AFRINIC), comes from that registry's own RDAP
+   server instead (RIR_RDAP), as ARIN's redirect would have sent it, within what is left of the deadline if a second
+   is: an ordinary RDAP record, kept a day, and a failure there is that registry's, but for silence with under RDAP_FAIR
+   to answer (ipterm's deadline cut it off, so ARIN's failure stands), and it never pauses that registry (rdapFetch's
+   pause). An answer that isn't usable, or no time left, gives null: whois then reports ARIN's failure as before.
    RIPEstat failing (an error, or no answer while abuse-contact-finder failed too) is left alone for RDAP_PAUSE
    (relayQuiet, per isolate), so while it is down ARIN's failures are reported at once; one slow record pauses nothing. */
 const RELAY_MIN = 1500;
@@ -4045,7 +4054,9 @@ const ARIN_TYPES = { reassigned: 'ASSIGNMENT', reallocated: 'ALLOCATION' };   //
 // ARIN's own records, in every answer: the networks it keeps for itself (ARIN) and for the early registrations (VR-ARIN,
 // "Various Registries"), and their contacts, its hostmaster and "No, Contact Known" (nobody@example.com)
 const ARIN_ORGS = new Set(['ARIN', 'VR-ARIN']), ARIN_POCS = new Set(['ARIN-HOSTMASTER', 'CKN23-ARIN']);
-async function arinRelay(target, by) {
+// The other registries' RDAP servers, by RIPEstat's name for them (its whois answer's authorities), as IANA's list has them
+const RIR_RDAP = { ripe: 'https://rdap.db.ripe.net/', apnic: 'https://rdap.apnic.net/', lacnic: 'https://rdap.lacnic.net/rdap/', afrinic: 'https://rdap.afrinic.net/rdap/' };
+async function arinRelay(target, by, origin) {
   const asn = target.asn || null, query = asn ? 'AS' + asn : target.ip;
   const prefix = asn ? query : target.p.v === 4 ? `${target.ip}/32` : target.p.g.slice(0, 4).map(x => x.toString(16)).join(':') + '::/64';
   // abuse-contact-finder is asked at once but waited for only when the whois records leave the contact open
@@ -4057,7 +4068,19 @@ async function arinRelay(target, by) {
     if (!big && (!slow || !(await finder))) relayQuiet = Date.now() + RDAP_PAUSE;
     throw e;
   }
-  if (!Array.isArray(w.authorities) || !w.authorities.includes('arin') || !Array.isArray(w.records)) return null;
+  const auth = Array.isArray(w.authorities) ? w.authorities : [];
+  if (!auth.includes('arin')) {                          // passed on: that registry's own record, a second or more left
+    const base = RIR_RDAP[auth.find(a => Object.hasOwn(RIR_RDAP, a))], left = by - Date.now(), paused = base && rdapSilent(base);
+    if (!base || left < 1000) return null;
+    try { return await rdapLookup(target, origin, base, by); } catch (x) {
+      // silent with under RDAP_FAIR to answer, and not already taken as silent: ipterm's deadline cut it off, so
+      // ARIN's failure stands; anything else is that registry's (whoisLookup)
+      if (x instanceof RegistryFailed && x.silent && left < RDAP_FAIR && !paused) return null;
+      if (x && typeof x === 'object') x.passedOn = true;
+      throw x;
+    }
+  }
+  if (!Array.isArray(w.records)) return null;
   // Each record as { key: first value }, its text cut to 1000 characters and unescaped (RIPEstat sends "AT&amp;T")
   const recs = w.records.filter(Array.isArray).slice(0, 100).map(r => {
     const o = {};
@@ -4131,16 +4154,25 @@ async function relayAbuse(recs, orgs, finder) {
   return { abuse: null, unsure: !f && held.length + net.length > 0 };
 }
 
-// whois of an address or AS number: RDAP, and ARIN's record through RIPEstat when rdap.arin.net fails (arinRelay)
+// whois of an address or AS number: RDAP, and ARIN's record through RIPEstat when rdap.arin.net fails (arinRelay), or
+// the record of the registry ARIN passed it on to; a failure of that registry's server is reported as its own
 async function whoisLookup(io, target) {
   const by = Date.now() + DEADLINE;                      // rdapLookup's deadline, started at the same moment
   try { return await rdapLookup(target, io.url.origin); } catch (e) {
     if (!(e instanceof RegistryFailed) || e.host !== 'rdap.arin.net' || io.bot || by - Date.now() < RELAY_MIN || Date.now() < relayQuiet) throw e;
-    let d = null, why = "it had no usable copy of ARIN's record";
-    try { d = await arinRelay(target, by); } catch (x) { why = 'it failed too: ' + plain(String((x && x.message) || x)); }
-    console.error(`[ipterm] ${e.brief}; ` + (d ? "whois answered from RIPEstat's copy of ARIN's record" : `RIPEstat not used: ${why}`));
+    let d = null, why = 'no usable answer in time';
+    try { d = await arinRelay(target, by, io.url.origin); } catch (x) {
+      if (x && x.passedOn) {                             // the other registry's own failure, as its redirect would have shown it
+        console.error(`[ipterm] ${e.brief}; RIPEstat named another registry, and it failed: ${plain(String(x instanceof RegistryFailed ? x.brief : (x && x.message) || x))}`);
+        throw x;
+      }
+      why = 'it failed too: ' + plain(String((x && x.message) || x));
+    }
+    console.error(`[ipterm] ${e.brief}; ` + (!d ? `RIPEstat not used: ${why}` : d.source === 'ripestat' ? "whois answered from RIPEstat's copy of ARIN's record"
+      : !d.found ? 'RIPEstat named another registry, which has no record of it'
+      : `RIPEstat named another registry, and whois answered from ${d.registry ? d.registry + "'s" : 'its'} RDAP record`));
     if (!d) throw e;
-    return { ...d, registryError: e.brief };
+    return d.source === 'ripestat' ? { ...d, registryError: e.brief } : d;
   }
 }
 

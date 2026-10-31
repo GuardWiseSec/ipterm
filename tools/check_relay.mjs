@@ -14,8 +14,12 @@
 //    abuse-contact-finder is asked beside it but waited for only when the records leave the contact open: two holders,
 //    neither named by the network, take the one whose email it lists (not just its first), or none when it fails, and
 //    that record is kept ten minutes.
-// 2. When ARIN's failure stands, as before: RIPEstat answers for another registry (a block ARIN passed on to RIPE NCC),
-//    has no match, or takes past the deadline; a bot (isBot) asks only RDAP; APNIC failing asks no one else; a lookup's
+// 2. A block or AS number ARIN passed on to another registry, which RIPEstat answers for that registry: that registry's
+//    own RDAP record (RIPE NCC's, APNIC's), kept a day, or its own failure, not ARIN's, within the one deadline; its
+//    silence named when it had 3 seconds or more, ARIN's failure when it had less (ipterm's deadline cut it off) or
+//    under a second was left once RIPEstat named it, and in neither case is it left alone: the next whois of a RIPE
+//    NCC address asks it. And when ARIN's failure stands, as before: RIPEstat has no match or takes past
+//    the deadline; a bot (isBot) asks only RDAP; APNIC failing asks no one else; a lookup's
 //    registry date never asks RIPEstat; and a silent ARIN, at the deadline, leaves no time for it. But once ARIN is
 //    left alone for a minute after that silence, a whois goes to RIPEstat at once, "rdap.arin.net didn't answer", and
 //    the slow record beside the silence didn't make RIPEstat be left alone. Then RIPEstat failing (503, twice) is left
@@ -131,7 +135,8 @@ const LINODE_REV = [LINODE[0], LINODE[2], LINODE[1], ...LINODE.slice(3)];   // t
 const WHOIS = [    // [resource it answers, records, authorities]
   [/^73\.[01]\.\d+\.\d+\/32$/, COMCAST], [/^45\.33\.1\.1\/32$/, LINODE], [/^45\.33\.2\.2\/32$/, LINODE_REV], [/^12\.0\.0\.1\/32$/, ATT],
   [/^52\.95\.110\.[123]\/32$/, AMAZON], [/^2600:1f18:0:0::\/64$/, AWS6], [/^AS701$/, UUNET], [/^99\.1\.\d+\.\d+\/32$/, TWO], [/^192\.3\.50\.\d+\/32$/, LEGACY], [/^192\.3\.60\.1\/32$/, LEGACY2],
-  [/^45\.142\.26\.2\/32$/, [R({ inetnum: '45.142.26.0/24', netname: 'EXAMPLE-RIPE', country: 'AL', 'abuse-c': 'EX1-RIPE', source: 'RIPE' })], ['ripe']],
+  [/^45\.142\.26\.[2-6]\/32$/, [R({ inetnum: '45.142.26.0/24', netname: 'EXAMPLE-RIPE', country: 'AL', 'abuse-c': 'EX1-RIPE', source: 'RIPE' })], ['ripe']],
+  [/^AS4000$/, [R({ 'aut-num': 'AS4000', 'as-name': 'EXAMPLE-AP', country: 'AU', source: 'APNIC' })], ['apnic']],
 ];
 // abuse-contact-finder, [delay, contacts or a failure]: it lists every email of the contacts, in alphabetical order
 const FINDER = { '99.1.2.3': [100, ['abuse-desk@another.example', 'abuse@hosting.example']], '99.1.5.6': [100, null],
@@ -149,8 +154,8 @@ async function serve(u, init) {
     const arin = ['https://rdap.arin.net/registry/'];
     return reply({ services: {
       ipv4: [[['73.0.0.0/8', '45.0.0.0/8', '12.0.0.0/8', '52.0.0.0/8', '63.0.0.0/8', '96.0.0.0/8', '97.0.0.0/8', '98.0.0.0/8', '99.0.0.0/8', '192.0.0.0/8'], arin],
-        [['1.0.0.0/8'], ['https://rdap.apnic.net/']]],
-      ipv6: [[['2600::/12'], arin]], asn: [[['701-705'], arin]], dns: [],
+        [['1.0.0.0/8'], ['https://rdap.apnic.net/']], [['193.0.0.0/8'], ['https://rdap.db.ripe.net/']]],
+      ipv6: [[['2600::/12'], arin]], asn: [[['701-705', '4000'], arin]], dns: [],
     }[m[1]] });
   }
   if ((m = /^https:\/\/rdap\.arin\.net\/registry\/(?:ip|autnum)\/(.+)$/.exec(u))) {
@@ -159,11 +164,24 @@ async function serve(u, init) {
       cidr0_cidrs: [{ v4prefix: '96.1.1.0', length: 24 }], events: [{ eventAction: 'registration', eventDate: '2004-06-01T00:00:00Z' }], entities: [] });
     return new Response('error code: 525', { status: 525 });
   }
+  // The registries ARIN passed blocks on to: RIPE NCC's record of 45.142.26.2, its failure for 45.142.26.3, APNIC's of AS4000
+  if (u === 'https://rdap.db.ripe.net/ip/45.142.26.2') return reply({ objectClassName: 'ip network', handle: '45.142.26.0 - 45.142.26.255', name: 'EXAMPLE-RIPE',
+    country: 'AL', startAddress: '45.142.26.0', endAddress: '45.142.26.255', cidr0_cidrs: [{ v4prefix: '45.142.26.0', length: 24 }],
+    events: [{ eventAction: 'registration', eventDate: '2019-08-16T08:24:37Z' }], entities: [], notices: [{ title: 'Source', description: ['Objects returned came from source', 'RIPE'] }] });
+  if (/^https:\/\/rdap\.db\.ripe\.net\/ip\/45\.142\.26\.[56]$/.test(u)) return never(init);   // RIPE NCC silent for these two
+  if (u === 'https://rdap.db.ripe.net/ip/193.0.6.139') return reply({ objectClassName: 'ip network', handle: '193.0.0.0 - 193.0.7.255', name: 'RIPE-NCC',
+    country: 'NL', startAddress: '193.0.0.0', endAddress: '193.0.7.255', entities: [], notices: [{ title: 'Source', description: ['Objects returned came from source', 'RIPE'] }] });
+  if (u.startsWith('https://rdap.db.ripe.net/')) return reply({ errorCode: 503 }, 503);
+  if (u === 'https://rdap.apnic.net/autnum/4000') return reply({ objectClassName: 'autnum', handle: 'AS4000', name: 'EXAMPLE-AP', startAutnum: 4000, endAutnum: 4000,
+    entities: [], notices: [{ title: 'Source', description: ['Objects returned came from source', 'APNIC'] }] });
   if (u.startsWith('https://rdap.apnic.net/')) return reply({ errorCode: 429 }, 429);
   if ((m = /^https:\/\/stat\.ripe\.net\/data\/whois\/data\.json\?resource=([^&]+)/.exec(u))) {
     const res = decodeURIComponent(m[1]);
     if (res.startsWith('97.')) return reply({ messages: [['error', 'busy']] }, 503);
     if (res === '99.9.9.9/32') return never(init);                 // a record RIPEstat hasn't read lately: past the deadline
+    if (res === '45.142.26.4/32') await sleep(5500);                // RIPE NCC's block, named with too little time left to ask it
+    if (res === '45.142.26.5/32') await sleep(2500);                // named with about 3.5 s left, RIPE NCC then silent
+    if (res === '45.142.26.6/32') await sleep(4800);                // named with about 1.3 s left, RIPE NCC then silent
     const hit = WHOIS.find(([re]) => re.test(res));
     return hit ? reply({ data: { records: hit[1], irr_records: PADDED[res] || [], authorities: hit[2] || ['arin'], resource: res } }) : noMatch(res);
   }
@@ -215,11 +233,12 @@ const viaRipe = (res, n = 1) => asked('https://stat.ripe.net/data/whois/data.jso
 const ARIN525 = "ARIN's whois server (rdap.arin.net) failed to answer (HTTP 525). That's on their side; try again in a moment.";
 const ARIN_SILENT = "ARIN's whois server (rdap.arin.net) didn't answer. That's on their side; try again later.";
 const APNIC429 = "APNIC's whois server (rdap.apnic.net) failed to answer (HTTP 429). That's on their side; try again in a moment.";
+const RIPE503 = "RIPE NCC's whois server (rdap.db.ripe.net) failed to answer (HTTP 503). That's on their side; try again in a moment.";
 const E525 = 'rdap.arin.net failed to answer: HTTP 525';
 const SOURCE = `ARIN's whois data, relayed by RIPEstat (${E525})`;
 
 console.log("-- ARIN's record through RIPEstat, as RDAP gives it (arinRelay, relayAbuse, whoisLookup)");
-const [comcast, linode, linodeRev, att, amazon, big, aws6, uunet, two, twoNoFinder, legacy, legacyNoFinder, legacy2, plainRdap, bot, ripeBlock, noCopy, apnic, lookup] = await Promise.all([
+const [comcast, linode, linodeRev, att, amazon, big, aws6, uunet, two, twoNoFinder, legacy, legacyNoFinder, legacy2, plainRdap, bot, ripeBlock, ripeDown, apnicAs, noCopy, apnic, lookup] = await Promise.all([
   run('/api/whois?q=73.1.2.3', API),
   run('/api/whois?q=45.33.1.1', API),
   run('/api/whois?q=45.33.2.2', API),
@@ -236,6 +255,8 @@ const [comcast, linode, linodeRev, att, amazon, big, aws6, uunet, two, twoNoFind
   run('/api/whois?q=96.1.1.1', API),
   run('/whois/73.1.9.9', { ua: GOOGLEBOT }),
   run('/api/whois?q=45.142.26.2', API),
+  run('/api/whois?q=45.142.26.3', API),
+  run('/api/whois?q=AS4000', API),
   run('/api/whois?q=98.1.1.1', API),
   run('/api/whois?q=1.2.3.4', API),
   run('/api/lookup?ip=73.9.9.9', API),
@@ -295,13 +316,20 @@ ok(legacy.status === 200 && legacy.data.name === 'HOSTPAPA-NET' && legacy.data.o
 ok(legacy2.status === 200 && J(legacy2.data.abuse) === J(HOSTPAPA),
   `whois 192.3.60.1 (the same space, its holder with two abuse contacts, abuse-contact-finder failing): one holder besides ARIN's "Various Registries", so its first: ${J(legacy2.data.abuse)}`);
 
-console.log("-- when ARIN's failure stands");
+console.log("-- blocks ARIN passed on to another registry, and when ARIN's failure stands");
 ok(plainRdap.status === 200 && plainRdap.data.source === 'rdap' && !plainRdap.data.registryError && !asked('https://stat.ripe.net/data/whois/data.json?resource=96.'),
   `whois 96.1.1.1, ARIN answering: RDAP's record, source ${plainRdap.data.source}, and no RIPEstat request`);
 ok(bot.status === 502 && bot.body.includes(esc(ARIN525)) && !asked('https://stat.ripe.net/data/whois/data.json?resource=73.1.9.9'),
   `Googlebot on /whois/73.1.9.9: ${bot.status}, ARIN's failure, and no RIPEstat request (bots start none, as for routing)`);
-ok(ripeBlock.status === 502 && ripeBlock.data.error === ARIN525 && viaRipe('45.142.26.2/32'),
-  `whois 45.142.26.2 (a block ARIN passed on to RIPE NCC: RIPEstat answers for RIPE NCC): ${ripeBlock.status}, ${J(ripeBlock.data.error)}`);
+const rb = ripeBlock.data;
+ok(ripeBlock.status === 200 && rb.found === true && rb.source === 'rdap' && rb.registry === 'RIPE NCC' && rb.name === 'EXAMPLE-RIPE' && !('registryError' in rb) &&
+  rb.rdapUrl === 'https://rdap.db.ripe.net/ip/45.142.26.2' && viaRipe('45.142.26.2/32') && ttl('45.142.26.2') === 'public, max-age=86400',
+  `whois 45.142.26.2 (a block ARIN passed on to RIPE NCC, RIPEstat answering for RIPE NCC): RIPE NCC's own RDAP record, as ARIN's redirect would give it (its link RIPE NCC's), ` +
+  `source ${rb.source}, registry ${rb.registry}, kept a day (${ttl('45.142.26.2')})`);
+ok(ripeDown.status === 502 && ripeDown.data.error === RIPE503 && asked('https://rdap.db.ripe.net/ip/45.142.26.3') === 2,
+  `whois 45.142.26.3 (the same, RIPE NCC's server answering 503 twice): ${ripeDown.status}, RIPE NCC's failure, not ARIN's: ${J(ripeDown.data.error)}`);
+ok(apnicAs.status === 200 && apnicAs.data.registry === 'APNIC' && apnicAs.data.name === 'EXAMPLE-AP' && apnicAs.data.source === 'rdap' && viaRipe('AS4000'),
+  `whois AS4000 (an AS number ARIN passed on to APNIC): APNIC's own record, ${apnicAs.data.name}, registry ${apnicAs.data.registry}`);
 ok(noCopy.status === 502 && noCopy.data.error === ARIN525 && viaRipe('98.1.1.1/32'),
   `whois 98.1.1.1 (RIPEstat has no match): ${noCopy.status}, ARIN's failure`);
 ok(apnic.status === 502 && apnic.data.error === APNIC429 && !asked('https://stat.ripe.net/data/whois/data.json?resource=1.'),
@@ -325,13 +353,24 @@ ok(worker.includes(`"ARIN's whois data, relayed by RIPEstat" + (d.registryError 
 
 console.log("-- a silent ARIN, and a record RIPEstat takes past the deadline for, side by side; then RIPEstat at once while ARIN is left alone");
 const DEADLINE = Number((/^const DEADLINE = (\d+);/m.exec(worker) || [])[1]);
-const [silent, slow, huge] = await Promise.all([run('/api/whois?q=63.1.2.3', API), run('/api/whois?q=99.9.9.9', API), run('/api/whois?q=52.95.110.3', API)]);
+const [silent, slow, huge, late, ripeSilent, ripeShort] = await Promise.all([run('/api/whois?q=63.1.2.3', API), run('/api/whois?q=99.9.9.9', API),
+  run('/api/whois?q=52.95.110.3', API), run('/api/whois?q=45.142.26.4', API), run('/api/whois?q=45.142.26.5', API), run('/api/whois?q=45.142.26.6', API)]);
+const RIPE_SILENT = "RIPE NCC's whois server (rdap.db.ripe.net) didn't answer. That's on their side; try again later.";
+ok(ripeSilent.status === 502 && ripeSilent.data.error === RIPE_SILENT && ripeSilent.ms <= DEADLINE + 800 && asked('https://rdap.db.ripe.net/ip/45.142.26.5') === 1,
+  `whois 45.142.26.5 (RIPEstat names RIPE NCC with about 3.5 s left, and RIPE NCC stays silent): RIPE NCC's silence, named, after ${(ripeSilent.ms / 1000).toFixed(1)} s, within the one deadline`);
+ok(ripeShort.status === 502 && ripeShort.data.error === ARIN525 && ripeShort.ms <= DEADLINE + 800 && asked('https://rdap.db.ripe.net/ip/45.142.26.6') === 1,
+  `whois 45.142.26.6 (the same with about 1.3 s left): ARIN's failure, not RIPE NCC's, which ipterm's deadline cut off: ${J(ripeShort.data.error)}`);
+ok(late.status === 502 && late.data.error === ARIN525 && viaRipe('45.142.26.4/32') && !asked('https://rdap.db.ripe.net/ip/45.142.26.4') && late.ms < DEADLINE,
+  `whois 45.142.26.4 (RIPEstat names RIPE NCC after 5.5 s, under a second before the deadline): ARIN's failure after ${(late.ms / 1000).toFixed(1)} s, RIPE NCC not asked`);
 ok(huge.status === 502 && huge.data.error === ARIN525 && viaRipe('52.95.110.3/32'),
   `whois 52.95.110.3 (RIPEstat's answer about 1.5 MB, past ripestat()'s cap): ${huge.status}, ARIN's failure`);
 ok(silent.status === 502 && silent.data.error === ARIN_SILENT && !asked('https://stat.ripe.net/data/whois/data.json?resource=63.'),
   `whois 63.1.2.3 (ARIN never answers): ${silent.status} after ${(silent.ms / 1000).toFixed(1)} s, ${J(silent.data.error)}, no RIPEstat request (no time left for it)`);
 ok(slow.status === 502 && slow.data.error === ARIN525 && slow.ms >= DEADLINE - 600 && slow.ms <= DEADLINE + 800 && viaRipe('99.9.9.9/32'),
   `whois 99.9.9.9 (ARIN answers 525, RIPEstat's whois never answers): ARIN's failure at the deadline, after ${(slow.ms / 1000).toFixed(1)} s`);
+const ripeAfter = await run('/api/whois?q=193.0.6.139', API);
+ok(ripeAfter.status === 200 && ripeAfter.data.registry === 'RIPE NCC' && asked('https://rdap.db.ripe.net/ip/193.0.6.139') === 1,
+  `whois 193.0.6.139, a RIPE NCC address, right after: RIPE NCC's record, ${ripeAfter.status} (silent on what was left of a deadline, RIPE NCC wasn't left alone)`);
 const paused = await run('/api/whois?q=73.0.0.9', API);
 ok(paused.status === 200 && paused.data.source === 'ripestat' && paused.data.registryError === "rdap.arin.net didn't answer" && paused.ms < 1000 &&
   !asked('https://rdap.arin.net/registry/ip/73.0.0.9') && viaRipe('73.0.0.9/32'),
