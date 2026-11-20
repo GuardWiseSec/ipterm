@@ -9,10 +9,12 @@ node_modules/
 *.pem
 *.key
 
-# Claude Code: worktrees (whole checkouts of other branches) and per-user settings stay on this machine.
-# .claude/launch.json (dev-server configs for the desktop app) is shared on purpose.
+# Claude Code: worktrees (whole checkouts of other branches), per-user settings and the maintainer's private
+# notes stay on this machine. .claude/launch.json (dev-server configs for the desktop app) is shared on purpose.
 .claude/worktrees/
 .claude/settings.local.json
+.claude/SESSION_CONTEXT.md
+.claude/reference-pages-plan.md
 
 # Editors, operating systems and logs
 .vscode/
