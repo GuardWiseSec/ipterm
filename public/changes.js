@@ -5,6 +5,7 @@
    linked on the page; optional)]. */
 (function (root) {
   const LIST = [
+    ['2026-11-20', 'Phones: the terminal keeps its height, the command box stays in view, long values wrap instead of running off the screen, and tapping the command box no longer zooms the page on an iPhone. Pages load faster: each sends only the scripts it uses, your browser keeps the site\'s scripts and stylesheet until they change, and a page that comes with its result shows it at once instead of typing it out again.'],
     ['2026-10-31', 'whois of an ARIN address or AS number answers even when ARIN\'s own server fails, as it often does for Cloudflare: ARIN\'s record comes through RIPEstat instead, marked "relayed by RIPEstat" with how ARIN failed, and a block ARIN passed on to another registry comes from that registry. Before, whois said ARIN\'s server had failed and to try again.',
       ['/whois/8.8.8.8']],
     ['2026-10-29', 'New: public DNS resolver pages. Every address of 11 public DNS services (Google, Cloudflare, Quad9, OpenDNS, AdGuard and more) shows its service, its filtering variant, its other addresses, DoH and DoT, and what the operator documents about DNSSEC, client subnet (ECS) and logging, with the operator\'s pages as sources and the day they were checked. /public-dns lists them all, also as plain text for curl. Their titles, descriptions and summaries no longer name one place (IPinfo\'s location row stays), and an address is called anycast only where its operator says so.',
