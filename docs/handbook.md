@@ -1952,18 +1952,22 @@ asks for, and how rarely:
   | DNS, mail, report card, ASN, `/cidr`, domain whois and non-public address pages, tool pages, the 404 | 438 KB / 147 KB | 272 KB / 87 KB |
 
   (On the wire: brotli at Cloudflare's level, as measured live. `app.js` grew by 1.4 KB on the wire for the loader.)
-- **Kept a year, asked for once.** Every link to `app.css`, `prefs.js` and the six scripts carries the file's version,
+- **Kept a day, asked for once.** Every link to `app.css`, `prefs.js` and the six scripts carries the file's version,
   `?v=` and the start of its ETag (a hash of its content, read once per isolate through the assets binding:
   `assetVersions()` and `assetLinks()`), on terminal pages, on `/changes` and `/public-dns` (`docPage()`), and on the
   privacy policy and the guides (`withOrigin()`). Static files ignore the query, so no new files are needed.
-  `public/_headers` lets browsers keep those files a year (`immutable`): a return visit asks for none of them, where it
-  used to revalidate all eight, a round trip each before the page could paint and boot. A deploy that changes a file
+  `public/_headers` lets browsers keep those files a day: a return visit that day asks for none of them, where it
+  used to revalidate all eight, a round trip each before the page could paint and boot (after a day, a 304 each).
+  Not a year, and not `immutable`: while a deploy spreads, a page from the new version can have its files answered by
+  a place still on the old one (static files ignore the query; Cloudflare's "version skew" docs), and the browser keeps
+  that old file under the new address for as long as `_headers` says. A day bounds that; a year would need the files
+  to go through the Worker, which could check `?v=`, or hashed file names. A deploy that changes a file
   changes its address; the others stay cached. A static page's ETag is the file's plus a hash of the versions, so a
   browser never keeps (and keeps getting 304s for) a copy that links an older `app.css`; the assets binding is asked
   without the request's `If-None-Match`, and the Worker answers it. Without ETags the deployed version's id stands
   in. `sponsors.json` is kept five minutes, like the pages. **A new script or stylesheet** goes in `VERSIONED` in
   `src/worker.js`, `public/_headers` and `run_worker_first`'s exclusions together: linked bare, it would stay in
-  browsers for a year. `tools/check_loading.mjs` fails if any page links one bare.
+  browsers for a day. `tools/check_loading.mjs` fails if any page links one bare.
 - **The fonts on first paint.** IBM Plex Mono 400 (the text) and VT323 (the logo, your IP, the guides' headings) are
   preloaded on every page: the terminal, `docPage()`, the privacy policy, `/guides` and every guide (the template in
   `tools/build_guides.py`). The first paint is then in the right fonts more often, and nothing reflows when VT323
@@ -2003,7 +2007,7 @@ first paint that doesn't reflow when VT323 arrives. A return visit has the fonts
 
 The Worker only runs for pages and the API (`run_worker_first` in `wrangler.toml`). CSS, JavaScript,
 fonts, images and map data are served directly by Cloudflare, which is free and unlimited, and get their
-headers from `public/_headers` (browsers keep the scripts and stylesheet a year: see "How pages load"). A first visit costs 1 Worker request (the homepage carries the visitor's
+headers from `public/_headers` (browsers keep the scripts and stylesheet a day: see "How pages load"). A first visit costs 1 Worker request (the homepage carries the visitor's
 address, so the terminal doesn't call the API) and each further lookup or page 1, so the free plan's 100,000
 requests a day covers up to about 100,000 visits. Every curl call (`/help`, `/asn`, `/8.8.8.8/org`, a
 `?format=text` lookup) is one request too; `/openapi.json`, `/llms.txt` and `/opensearch.xml` are not. A search
@@ -2249,7 +2253,7 @@ or later), and `npm test` runs them all: `node tools/check_bots.mjs` (bots never
 (ARIN's records through RIPEstat when ARIN fails), `node tools/check_corrections.mjs` (the corrections line, the issue
 forms and `/changes`), `node tools/check_resolvers.mjs` (the public DNS resolvers' data, pages, sitemap,
 `/public-dns` and the terminal), `node tools/check_loading.mjs` (which scripts each page sends, versioned links and
-their year-long cache, a static page's ETag, the font preloads, the prompt's fallback to `/go` and what `app.js` loads
+their day-long cache, a static page's ETag, the font preloads, the prompt's fallback to `/go` and what `app.js` loads
 on demand: see "How pages load"), the first part of `node tools/check_block.mjs` and dnsleak-server's own tests
 (`npm test` in `dnsleak-server/`).
 
@@ -2507,7 +2511,7 @@ no network, its assets binding answering from `public/` with an ETag that hashes
 of page (a resolver's address whose lookup failed and an IPinfo bogon included), then the pages themselves: the scripts
 each sends, in `index.html`'s order and versioned, and `#ipterm-libs`. Every link to a versioned file, on every
 terminal page, `/changes`, `/public-dns`, the privacy policy, `/guides` and each guide, carries its file's version and
-none is bare; `public/_headers` keeps exactly those a year and `sponsors.json` five minutes; the pages link no other
+none is bare; `public/_headers` keeps exactly those a day (the fonts a year) and `sponsors.json` five minutes; the pages link no other
 script or stylesheet; and with no ETags the deployed version's id stands in. A static page's ETag and its 304 (and the
 whole page for the file's own ETag, which browsers kept from before), the font preloads, the prompt's form and `/go`.
 Then `public/app.js` against stand-ins: `lib()` loads once from the page's address, falls back to `/<file>.js`, says

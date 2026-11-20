@@ -664,7 +664,7 @@ function notFoundPage(io, path) {
 // <!--FIX--> where its corrections line goes (fixLine(); none on a copy run by someone else), and links to app.css and
 // prefs.js, which get their versions (assetLinks()). So a page's ETag is the file's with a hash of those versions added:
 // a deploy that changes app.css changes it, and a browser never keeps (and gets 304s for) a copy that links an older
-// app.css, which it would keep for a year. The assets binding was asked without the request's conditions (it would
+// app.css. The assets binding was asked without the request's conditions (it would
 // compare the file's own ETag), so they are answered here, for every file that comes this way.
 const unconditional = h => { const x = new Headers(h); x.delete('if-none-match'); x.delete('if-modified-since'); return x; };
 const versionsTag = v => {                               // FNV-1a of the versions, 8 hex digits
@@ -4431,12 +4431,14 @@ function descFit(...tries) {
 const shorter = (parts, sep = ' ', end = '') => parts.filter(Boolean).map((_, i, a) => a.slice(0, a.length - i).join(sep) + end);
 
 // The page's own files (VERSIONED) are linked with their version, ?v= and the start of the file's ETag (a hash of its
-// content), so public/_headers lets browsers keep them for a year without asking again: a changed file gets a new
+// content), so public/_headers lets browsers keep them a day without asking again: a changed file gets a new
 // address with the deploy that changes it, and an unchanged one stays cached across deploys. Static files ignore the
 // query, so no new files are needed. The ETags are read once per isolate through the assets binding (a deploy starts
 // new isolates). A file whose ETag can't be read is linked with the deployed version's id instead, which changes with
 // every deploy, and is asked again on the next request; with neither (the checks' stand-in for the assets) the link
-// stays bare. Every page that links these files goes through assetLinks(): a bare link would be kept for a year.
+// stays bare. Every page that links these files goes through assetLinks(): a bare link would be kept a day. (Not a
+// year: while a deploy spreads, a new page's file can be answered by a place still on the old version, as static files
+// ignore the query, and the browser would keep the old file under the new address that long.)
 const VERSIONED = ['prefs.js', 'app.css', 'land.js', 'cidr.js', 'ports.js', 'resolvers.js', 'leakgrade.js', 'app.js'];
 const VERSIONED_RE = /(src|href)="\/(prefs\.js|app\.css|land\.js|cidr\.js|ports\.js|resolvers\.js|leakgrade\.js|app\.js)"/g;
 let ASSET_V = null;

@@ -55,12 +55,17 @@
     if (/\b(err|warn)\b/.test(cls)) announce(text);   // problems are always spoken
     return d;
   };
-  // Screen readers hear one summary per result (and every problem), not each line as it types out.
+  // Screen readers hear one summary per result (and every problem), not each line as it types out. What is announced
+  // while the last one waits its 60 ms is read with it, not over it: a page that comes with its result draws it at
+  // once, so a lookup's error and its summary, or a subnet and its routing, arrive together. replaceLast takes the
+  // place of the part announced just before (the resolver block's, in place of render()'s, which names a place).
   const srStatus = document.getElementById('sr-status');
-  function announce(text) {
+  let srWaiting = null;
+  function announce(text, replaceLast = false) {
     if (!srStatus || !text) return;
-    srStatus.textContent = '';
-    setTimeout(() => { srStatus.textContent = text; }, 60);
+    if (srWaiting) { if (replaceLast) srWaiting.pop(); srWaiting.push(text); return; }
+    srWaiting = [text]; srStatus.textContent = '';
+    setTimeout(() => { srStatus.textContent = srWaiting.join(' '); srWaiting = null; }, 60);
   }
   async function lines(arr, cls = '') { for (const t of arr) { line(t, cls); await sleep(24); } }
   function echo(cmd) { const d = el('div', 'ln echo'); d.append(el('span', 'ps1', 'guest@ipterm:~$ '), document.createTextNode(cmd)); out.appendChild(d); scroll(); }
@@ -1322,6 +1327,7 @@
   // alone. It never runs the test: that takes a click on "run yours".
   async function leakResult(code) {
     const L = await needLeak(), r = L && L.decode(code);
+    if (!L) return line('The leak test grader did not load. Reload the page and try again.', 'err');
     if (!r) {
       line(`${code ? `"${String(code).slice(0, 20)}" isn't` : 'That is not'} a leak test result. Result links come from share after leaktest, like /leaktest/r/1bjp.`, 'err');
       return next(['leaktest', 'leaktest', 'run the leak test on this browser'], ['man leaktest', 'man leaktest', 'how the grade works']);
@@ -1746,7 +1752,7 @@
       });
     }
     fixLine('/' + r.ip, 'resolver');
-    announce([RESLIB.lead(r), RESLIB.others(r), s.anycast && 'Anycast: answered from many locations.'].filter(Boolean).join(' '));   // in place of render()'s, which names a place
+    announce([RESLIB.lead(r), RESLIB.others(r), s.anycast && 'Anycast: answered from many locations.'].filter(Boolean).join(' '), true);   // in place of render()'s, which names a place
   }
 
   // public-dns [service]: the services, their variants with what they filter, and every address, linked to its page

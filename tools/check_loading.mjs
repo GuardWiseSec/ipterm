@@ -10,8 +10,8 @@
 //    lists all four libraries' versioned addresses in #ipterm-libs for app.js to load the others from.
 // 2. Versions: every link to app.css, prefs.js and the scripts (VERSIONED in src/worker.js), on terminal pages, on
 //    /changes and /public-dns (docPage), and on the privacy policy, /guides and every guide (withOrigin), carries ?v=
-//    and the start of that file's ETag, and no page links one bare. public/_headers keeps exactly those files a year
-//    (immutable), the pages link no other script or stylesheet, wrangler.toml serves each without the Worker, and
+//    and the start of that file's ETag, and no page links one bare. public/_headers keeps exactly those files a day
+//    (not a year, and not immutable: deploy skew), the pages link no other script or stylesheet, wrangler.toml serves each without the Worker, and
 //    sponsors.json is kept five minutes. Without ETags the deployed version's id stands in, and with neither the links
 //    stay bare (only these checks' other stand-ins for the binding have neither).
 // 3. A static page's ETag is the file's plus a hash of the versions: If-None-Match with it gets a 304 with no body;
@@ -145,11 +145,16 @@ for (const path of LINKED) {
   ok(r.status < 500 && bare(r.body).length === 0 && links.length === 2 && links.every(m => m[2] === ver(m[1])),
     `${path}: prefs.js and app.css with their versions, and no bare link${bare(r.body).length ? ': ' + bare(r.body).join(' ') : ''}`);
 }
-// public/_headers: a year for exactly the versioned files (and the fonts, whose names never change), five minutes for sponsors.json
+// public/_headers: a day for exactly the versioned files, a year only for the fonts (whose names never change), five
+// minutes for sponsors.json. Not a year for the versioned files: while a deploy spreads, a new page's file can be
+// answered by a place still on the old version (static files ignore ?v=), and a browser would keep the old file under
+// the new address for as long as _headers says.
 const rules = [...HEADERS.matchAll(/^(\/\S*)\n((?:[ \t]+.*\n?)*)/gm)].map(m => [m[1], m[2]]);
-const year = rules.filter(([, h]) => /Cache-Control: public, max-age=31536000, immutable/.test(h)).map(([p]) => p);
-ok(year.filter(p => p !== '/fonts/*').sort().join() === VERSIONED.map(f => '/' + f).sort().join(),
-  `public/_headers keeps exactly the versioned files a year: ${year.join(' ')}`);
+const cacheOf = p => ((rules.find(([q]) => q === p) || [])[1] || '').match(/^\s+Cache-Control:.*$/gm) || [];
+const year = rules.filter(([, h]) => /max-age=31536000|immutable/.test(h.replace(/Strict-Transport-Security:.*/g, ''))).map(([p]) => p);
+const notDay = VERSIONED.filter(f => cacheOf('/' + f).map(s => s.trim()).join() !== 'Cache-Control: public, max-age=86400');
+ok(!notDay.length, `public/_headers keeps each versioned file a day (public, max-age=86400)${notDay.length ? ': not ' + notDay.join(' ') : ''}`);
+ok(year.join() === '/fonts/*', `... and only the fonts a year, immutable: ${year.join(' ')}`);
 ok(rules.some(([p, h]) => p === '/sponsors.json' && /^\s+Cache-Control: public, max-age=300\s*$/m.test(h)), 'public/_headers keeps /sponsors.json five minutes');
 const skip = [...toml.matchAll(/"!(\/[^"]+)"/g)].map(m => m[1]);
 ok(VERSIONED.every(f => skip.includes('/' + f)), 'wrangler.toml serves every versioned file without the Worker (run_worker_first), so public/_headers applies');
@@ -242,6 +247,21 @@ const kinds = JSON.parse((/const RESULT_KINDS = (\[[^\]]*\]);/.exec(app) || [])[
 ok(kinds.join() === 'ip,asn,whois,dns,mail,grade,cidr' && app.includes("const withResult = selfP || (init && (['port', 'leakshare'].includes(init.kind) || (RESULT_KINDS.includes(init.kind) && init.query)));") &&
   app.includes('fast = hold = !!withResult;') && (app.match(/echo\(cmd\); addHist\(cmd\); settle\(mark\);/g) || []).length === 3 && (app.match(/\n {6}end\(mark\);/g) || []).length === 3,
   'a page that comes with its result (the homepage, a lookup\'s page, a port\'s page, a shared leak test result) draws it at once and stays put meanwhile');
+// Drawn at once, a page's announcements come in the same moment: a failed lookup's error then its summary, a subnet then
+// its routing. announce() against a stand-in live region and timers: those read together, not the last over the others.
+const sr = { textContent: 'before' }, timers = [];
+const announce = Function('document', 'setTimeout', slice(app, '  const srStatus =', '  async function lines(') + 'return announce;')(
+  { getElementById: () => sr }, f => timers.push(f));
+const said = [];
+const flush = () => { while (timers.length) timers.shift()(); said.push(sr.textContent); };
+announce("A data source didn't respond."); announce('74.1.2.3: public.'); const cleared = sr.textContent; flush();
+announce("A data source didn't respond."); announce('9.9.9.9: Zurich, Switzerland.'); announce('Quad9, the recommended variant.', true); flush();
+announce('Theme set to amber'); flush();
+ok(cleared === '' && said.join(' | ') === "A data source didn't respond. 74.1.2.3: public. | A data source didn't respond. Quad9, the recommended variant. | Theme set to amber",
+  `announcements in the same moment are read together, a resolver's in place of render()'s, and a later one on its own: ${said.join(' | ')}`);
+ok(app.includes("s.anycast && 'Anycast: answered from many locations.'].filter(Boolean).join(' '), true);") &&
+  app.includes("if (!L) return line('The leak test grader did not load. Reload the page and try again.', 'err');"),
+  "the resolver block's announcement takes render()'s place; a shared result whose grader didn't load says so, not that the code is wrong");
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
