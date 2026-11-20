@@ -39,11 +39,13 @@
   /* ---------- output helpers ---------- */
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   const scroll = () => { if (!hold) screen.scrollTop = screen.scrollHeight; };
-  // On small screens a whole result doesn't fit; bring a key line (your IP) into view instead of the prompt.
-  const reveal = node => {
+  // On small screens a whole result doesn't fit; bring a key line (your IP) into view instead of the prompt. A touch
+  // screen's prompt sticks over the screen's foot (app.css), so what it covers counts as out of view. slack: px at the
+  // node's foot that may be hidden (the empty leading under the big IP's line).
+  const reveal = (node, slack = 0) => {
     if (!node) return;
-    const s = screen.getBoundingClientRect(), r = node.getBoundingClientRect();
-    if (r.top < s.top || r.bottom > s.bottom) screen.scrollTop += r.top - s.top - 16;
+    const s = screen.getBoundingClientRect(), r = node.getBoundingClientRect(), bottom = Math.min(s.bottom, form.getBoundingClientRect().top);
+    if (r.top < s.top || r.bottom - slack > bottom) screen.scrollTop += r.top - s.top - 16;
   };
   // The start of a result (its command, then the headline: a grade, a verdict), when it is out of view: mark is the
   // line before the command.
@@ -3002,8 +3004,11 @@
   // most). If the one running is a slow one, a note says so; quick ones just finish first.
   let running = 'whoami', startedAt = 0;
   const queued = [];
-  const runQueued = () => { if (queued.length) { const [v, save] = queued.shift(); setTimeout(() => exec(v, save), 0); } };
-  async function exec(v, save = true) {
+  const runQueued = () => { if (queued.length) { const [v, save] = queued.shift(); setTimeout(() => exec(v, save, true), 0); } };
+  async function exec(v, save = true, dequeued = false) {
+    // A touch screen's keyboard closes however a command comes (typed, or a tapped button or link), so the result
+    // shows; not when a queued one starts later, as the visitor may be typing again by then
+    if (!dequeued && document.activeElement === input && !matchMedia('(pointer: fine)').matches) input.blur();
     if (busy) {
       if (!String(v).trim() || queued.length >= 5) return;
       queued.push([v, save]);
@@ -3093,7 +3098,7 @@
   }
   function searchEnd(value) {                      // the prompt keeps value: the match, or the line from before
     search = null;
-    ps1.textContent = PS1; input.placeholder = PLACEHOLDER; input.setAttribute('aria-label', 'Command');
+    ps1.textContent = PS1; input.placeholder = PLACEHOLDER; fitHint(); input.setAttribute('aria-label', 'Command');
     hint.hidden = true; input.value = value;
   }
   function searchKey(e, k, ctrl) {                 // true when the key was the search's
@@ -3131,20 +3136,34 @@
       ['Ctrl+R', 'search your history as you type: Ctrl+R again for an older match, Enter to run it, an arrow key to edit it, Esc to cancel'],
       ['!!', 'the previous command again, also inside a line; !3 runs number 3 in history'],
       ['Ctrl+L', 'clear the screen'],
+      ...(matchMedia('(pointer: fine)').matches ? [] : [['touch', 'a phone keyboard has no arrow or Tab keys: run history and tap a command to run it again; clear clears the screen']]),
     ]);
     announce('Keyboard shortcuts: Tab completes, Control R searches history, two exclamation marks repeat the last command.');
   }
 
   /* ---------- wiring ---------- */
   // Focus the command line only for mouse/trackpad users: on phones and tablets focusing it pops up
-  // the keyboard. After a command is submitted on a touch screen, close the keyboard so the result shows.
+  // the keyboard (exec() closes it again on a touch screen, so the result shows).
   const hasMouse = () => matchMedia('(pointer: fine)').matches;
   const focusInput = () => { if (hasMouse()) input.focus({ preventScroll: true }); };
   form.addEventListener('submit', e => {
     e.preventDefault(); const v = input.value; input.value = '';
-    if (!hasMouse()) input.blur();
     exec(v);
   });
+  // A phone's prompt is too narrow for the whole hint: the longest that fits, again once the fonts load, on rotation and
+  // after a history search (which has a placeholder of its own meanwhile)
+  const HINTS = ['type an IP, domain or help', 'IP, domain or help', 'IP or domain'];
+  let hintCtx = null;
+  const fitHint = () => {
+    if (search || !input.clientWidth) return;
+    hintCtx = hintCtx || document.createElement('canvas').getContext('2d');
+    if (!hintCtx) return;
+    hintCtx.font = getComputedStyle(input).font;
+    input.placeholder = HINTS.find(t => hintCtx.measureText(t).width <= input.clientWidth) || HINTS[HINTS.length - 1];
+  };
+  fitHint();
+  if (document.fonts) document.fonts.ready.then(fitHint);
+  window.addEventListener('resize', fitHint);
   input.addEventListener('keydown', e => {
     const k = e.key || '', ctrl = e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey;   // (autofill sends no key)
     if (search && searchKey(e, k, ctrl)) return;
@@ -3160,7 +3179,11 @@
   });
   input.addEventListener('input', () => { if (search) searchFind(false); else { tabCycle = null; hint.hidden = true; } });
   input.addEventListener('blur', () => { if (search) searchEnd(search.orig); });
-  document.querySelectorAll('button[data-cmd]').forEach(b => b.addEventListener('click', () => { exec(b.dataset.cmd); focusInput(); }));
+  // On a small screen the footer's button sits below the terminal: bring the terminal back into view for its result
+  document.querySelectorAll('button[data-cmd]').forEach(b => b.addEventListener('click', () => {
+    if (screen.getBoundingClientRect().top < 0) window.scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' });
+    exec(b.dataset.cmd); focusInput();
+  }));
   // Links in the section below the terminal are real links for crawlers and new tabs; a plain click
   // runs the lookup right in the terminal instead of reloading the page.
   document.querySelectorAll('a[data-cmd]').forEach(a => a.addEventListener('click', e => {
@@ -3282,7 +3305,7 @@
       await sponsor('whoami');
       flushNext();
       hold = false;
-      reveal(out.querySelector('dt.bigl'));               // only scrolls if your IP is out of view
+      reveal(out.querySelector('dd.big'), 8);             // only scrolls if your IP is out of view (its own top: a long IPv6 wraps)
       return focusInput();
     }
     fast = hold = false;
@@ -3309,7 +3332,7 @@
       await sponsor('whoami');
     }
     flushNext();
-    reveal(out.querySelector('dt.bigl'));
+    reveal(out.querySelector('dd.big'), 8);
     focusInput();
   }
   boot();

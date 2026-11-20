@@ -259,3 +259,41 @@ html,.screen,.doc-pre,.table-wrap{scrollbar-color:var(--sb-thumb) var(--sb-track
   .clock{display:none}
   .intro{font-size:12px}
 }
+
+/* ---------- phones (last, so these win) ---------- */
+/* Long words wrap instead of widening their box: a long key (a resolver variant, a curl line) no longer squeezes its
+   value to nothing, a long name or address in a result's heading wraps, and so does long link text on document pages
+   (the sources on /public-dns); tables keep scrolling inside .table-wrap. */
+.kv dt{overflow-wrap:anywhere}
+.head .hip{min-width:0;overflow-wrap:anywhere}
+.doc-body{overflow-wrap:break-word}
+@media (max-width:760px){ .screen .kv{grid-template-columns:fit-content(45%) minmax(0,1fr)} }
+/* viewport-fit=cover hands the screen edges to the page: keep text clear of the notch in landscape */
+.app,.doc,.below-inner{padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
+/* Small or short screens: the terminal gets a height of its own instead of whatever the header, the RUN buttons and
+   the footer leave over (on a small phone, a sliver), and the footer moves below the fold. 210px is the homepage's
+   header, one row of RUN buttons and the gaps. On a very short screen the intro line gives way to the terminal. */
+@media (max-width:520px), (max-height:500px){
+  .app{height:auto;min-height:100%}
+  .crt{flex:none;height:max(220px,calc(100vh - 210px));height:max(220px,calc(100svh - 210px))}
+}
+@media (max-height:340px){ .intro{display:none} }
+/* ...and on a touch screen there, the RUN buttons in one row that scrolls sideways, its right edge fading out so the
+   row reads as going on (a mouse can't scroll a row without a scrollbar, so there they wrap as before). The padding
+   keeps a button's focus ring inside the scroller; the trailing space lets the last button clear the fade. */
+@media (max-width:520px) and (pointer: coarse), (max-height:500px) and (pointer: coarse){
+  .chips{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;padding-block:3px;margin-block:-3px;
+    -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 28px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 28px),transparent)}
+  .chips::-webkit-scrollbar{display:none}
+  .chips::after{content:"";flex:0 0 20px}
+  .chips button{flex:none}
+}
+/* iOS zooms into any focused text field under 16px, and stays zoomed after the keyboard closes */
+@supports (-webkit-touch-callout:none){ .prompt input,.go-form input{font-size:16px} }
+/* Touch screens: the prompt stays at the terminal's bottom edge, as a real terminal's last line does (results still
+   open at their top), and lines of command links get room between them for a finger. */
+@media (pointer: coarse){
+  .screen{padding-bottom:0}
+  .prompt{position:sticky;bottom:0;padding-block:4px 18px;background:var(--screen)}
+  #out .ln:has(> .cmd),#out .kv dd:has(> .cmd){line-height:2}
+}
