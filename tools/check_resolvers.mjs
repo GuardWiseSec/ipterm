@@ -413,7 +413,7 @@ const ipTitle = Function('RESLIB', slice(app, '  const ipTitle =', '  function l
 ok(ipTitle('2606:1a40:0:0:0:0:0:0', {}) === head(pages.get('2606:1a40::').body).title && ipTitle('9.9.9.9', { org: 'X' }) === sh.title && ipTitle('74.1.2.3', { org: 'X' }) === '74.1.2.3 IP lookup: X | ipterm',
   "ipTitle() titles a resolver as its page does, however it is written, and other addresses as before");
 ok(/\['public-dns \[service\]', '[^']+', 'public-dns'\]/.test(app) && /\n {4}'public-dns': \['public-dns \[service\]', "/.test(app) && app.includes("resolvers: 'public-dns', publicdns: 'public-dns'") &&
-  app.includes("'port', 'public-dns', 'resolvers', 'ping'") && app.includes("case 'public-dns': return publicDns(args);") && app.includes("case 'public-dns': return '/public-dns';") &&
+  app.includes("'port', 'public-dns', 'resolvers', 'ping'") && app.includes("case 'public-dns': await needResolvers(); return publicDns(args);") && app.includes("case 'public-dns': return '/public-dns';") &&
   /const RESULTS = new Set\(\[[^\]]*'public-dns'\]\)/.test(app), 'the command is in help and man, answers to resolvers, is in the did-you-mean list, runs, and links /public-dns');
 
 console.log('-- the wiring and the docs');

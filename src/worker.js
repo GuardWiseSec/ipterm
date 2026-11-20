@@ -278,7 +278,8 @@ async function route(request, env, ctx) {
   if (asWord && !html) return textError(`Unknown format "${asWord[2]}". A network comes as /AS${asWord[1]}/text (aligned lines) or /AS${asWord[1]}/json.`, 404);
   if (path.startsWith('/api/')) return reply(io, { error: 'Unknown API route. Available: /api/lookup, /api/asn, /api/whois, /api/dns, /api/mail, /api/grade, /api/cidr, /api/route, /api/port. See /help.' }, 404);
 
-  const res = await env.ASSETS.fetch(request);
+  // without the request's If-None-Match: withOrigin() answers it, as a page's ETag isn't the file's
+  const res = await env.ASSETS.fetch(new Request(request, { headers: unconditional(request.headers) }));
   if (res.status !== 404) return withOrigin(res, io, path);
   // Someone typed a domain straight after the slash (ipterm.net/github.com): send them to its DNS page.
   // (An address typo that isn't curated, /10.0.0.13l, gets the 404 page and its "did you mean", not DNS.)
@@ -659,13 +660,29 @@ function notFoundPage(io, path) {
     body: staticBlock('Page not found', ['404'], [], `There is no page at ${shown}.`, links) });
 }
 
-// Static pages carry %ORIGIN% placeholders in canonical links, share tags and structured data, and each guide a
-// <!--FIX--> where its corrections line goes (fixLine(); none on a copy run by someone else).
+// Static pages carry %ORIGIN% placeholders in canonical links, share tags and structured data, each guide a
+// <!--FIX--> where its corrections line goes (fixLine(); none on a copy run by someone else), and links to app.css and
+// prefs.js, which get their versions (assetLinks()). So a page's ETag is the file's with a hash of those versions added:
+// a deploy that changes app.css changes it, and a browser never keeps (and gets 304s for) a copy that links an older
+// app.css, which it would keep for a year. The assets binding was asked without the request's conditions (it would
+// compare the file's own ETag), so they are answered here, for every file that comes this way.
+const unconditional = h => { const x = new Headers(h); x.delete('if-none-match'); x.delete('if-modified-since'); return x; };
+const versionsTag = v => {                               // FNV-1a of the versions, 8 hex digits
+  let x = 0x811c9dc5;
+  for (const c of VERSIONED.map(f => v[f] || '').join('.')) x = Math.imul(x ^ c.charCodeAt(0), 16777619) >>> 0;
+  return x.toString(16).padStart(8, '0');
+};
 async function withOrigin(res, io, path) {
-  if (!(res.headers.get('content-type') || '').includes('text/html')) return res;
-  const t = await res.text();
-  if (!t.includes('%ORIGIN%') && !t.includes('<!--FIX-->')) return new Response(t, res);
-  return new Response(t.replaceAll('%ORIGIN%', () => io.url.origin).replace('<!--FIX-->', () => fixLine(io, path, null, 'doc-meta')), res);
+  let out = res;
+  if ((res.headers.get('content-type') || '').includes('text/html')) {
+    const v = await assetVersions(io), t = await res.text(), tag = res.headers.get('etag');
+    out = new Response(assetLinks(t.replaceAll('%ORIGIN%', () => io.url.origin).replace('<!--FIX-->', () => fixLine(io, path, null, 'doc-meta')), v), res);
+    if (tag) out.headers.set('etag', tag.replace(/"$/, `-${versionsTag(v)}"`));
+  }
+  const tag = out.headers.get('etag'), inm = io.request.headers.get('if-none-match'), weak = s => s.trim().replace(/^W\//, '');
+  if (out.status !== 200 || !tag || !inm || !inm.split(',').some(x => weak(x) === weak(tag) || x.trim() === '*')) return out;
+  const h = new Headers(out.headers); h.delete('content-length');
+  return new Response(null, { status: 304, headers: h });
 }
 
 function wantsHtml(request, url, ua) {
@@ -4413,13 +4430,51 @@ function descFit(...tries) {
 }
 const shorter = (parts, sep = ' ', end = '') => parts.filter(Boolean).map((_, i, a) => a.slice(0, a.length - i).join(sep) + end);
 
+// The page's own files (VERSIONED) are linked with their version, ?v= and the start of the file's ETag (a hash of its
+// content), so public/_headers lets browsers keep them for a year without asking again: a changed file gets a new
+// address with the deploy that changes it, and an unchanged one stays cached across deploys. Static files ignore the
+// query, so no new files are needed. The ETags are read once per isolate through the assets binding (a deploy starts
+// new isolates). A file whose ETag can't be read is linked with the deployed version's id instead, which changes with
+// every deploy, and is asked again on the next request; with neither (the checks' stand-in for the assets) the link
+// stays bare. Every page that links these files goes through assetLinks(): a bare link would be kept for a year.
+const VERSIONED = ['prefs.js', 'app.css', 'land.js', 'cidr.js', 'ports.js', 'resolvers.js', 'leakgrade.js', 'app.js'];
+const VERSIONED_RE = /(src|href)="\/(prefs\.js|app\.css|land\.js|cidr\.js|ports\.js|resolvers\.js|leakgrade\.js|app\.js)"/g;
+let ASSET_V = null;
+async function assetVersions(io) {
+  if (ASSET_V) return ASSET_V;
+  const word = s => String(s || '').replace(/^W\//, '').replace(/[^0-9a-z]/gi, '').slice(0, 12);
+  const deploy = word(io.env.CF_VERSION_METADATA && io.env.CF_VERSION_METADATA.id);
+  const tags = await Promise.all(VERSIONED.map(f => io.env.ASSETS.fetch(new Request(new URL('/' + f, io.url), { method: 'HEAD' }))
+    .then(r => (r.ok ? word(r.headers.get('etag')) : ''), () => '')));
+  const v = Object.fromEntries(VERSIONED.map((f, i) => [f, tags[i] || deploy]));
+  if (tags.every(Boolean)) ASSET_V = v;
+  return v;
+}
+const assetLinks = (h, v) => h.replace(VERSIONED_RE, (m, attr, f) => (v[f] ? `${attr}="/${f}?v=${v[f]}"` : m));
+
 let SHELL = null;
 async function loadShell(io) {
   if (SHELL) return SHELL;
-  const r = await io.env.ASSETS.fetch(new Request(new URL('/', io.url)));
-  const t = await r.text();
-  if (r.ok && t.includes('<!--STATIC-->')) SHELL = t;
+  const [r, v] = await Promise.all([io.env.ASSETS.fetch(new Request(new URL('/', io.url))), assetVersions(io)]);
+  const t = assetLinks(await r.text(), v);
+  if (r.ok && t.includes('<!--STATIC-->') && v === ASSET_V) SHELL = t;
   return t;
+}
+
+// The libraries a terminal page draws on as it boots go out with it as scripts (public/index.html lists them all; the
+// others are taken out here): land.js for a map (your whoami, or an address IPinfo places), resolvers.js for a public
+// DNS resolver's address (its block on the IP page, its whois), ports.js for the port checker and a port's page, and
+// leakgrade.js for the leak test and a shared result. Commands typed later load what they need themselves (lib() in
+// public/app.js), from the addresses in #ipterm-libs. cidr.js and app.js go out with every page.
+const LIBS = ['land', 'ports', 'resolvers', 'leakgrade'];
+function libsFor(initial) {
+  const k = initial && initial.kind, d = (initial && initial.data) || null, pub = d && !d.bogon;
+  if (!k || k === 'self') return ['land'];
+  if (k === 'ip') return [pub && ((d.lat != null && d.lon != null) || d.countryCode) && 'land', !(d && d.bogon) && RESOLVERS.get(initial.query) && 'resolvers'].filter(Boolean);
+  if (k === 'whois') return d && d.kind === 'ip' && RESOLVERS.get(d.query) ? ['resolvers'] : [];
+  if (k === 'port' || (k === 'tool' && initial.tool === 'port')) return ['ports'];
+  if (k === 'leakshare' || (k === 'tool' && initial.tool === 'leaktest')) return ['leakgrade'];
+  return [];
 }
 
 // Fills the terminal page with a title, description, share tags, a static summary that works
@@ -4458,7 +4513,12 @@ async function shell(io, { status = 200, title, desc, path = '/', body = '', ini
   if (path === '/') h = h.replace('<div id="out"', () => '<div id="out" data-nosnippet');
   h = h.replace('<!--SEO-->', () => head).replace('<!--STATIC-->', () => body).replace('<!--BUILD-->', () => footBuild(io.env))
     .replaceAll('%ORIGIN%', () => io.url.origin);
-  if (initial) h = h.replace('<!--INITIAL-->', () => `<script type="application/json" id="ipterm-initial">${safeJson(initial)}</script>`);
+  const libs = libsFor(initial), v = await assetVersions(io);
+  h = h.replace(/<script src="\/(land|ports|resolvers|leakgrade)\.js(?:\?v=[0-9a-z]+)?" defer><\/script>\r?\n/gi, (m, f) => (libs.includes(f) ? m : ''));
+  // where app.js loads the others from: the same versioned addresses (a data block, which the CSP doesn't count as a script)
+  const libSrc = Object.fromEntries(LIBS.map(f => [f, `/${f}.js` + (v[f + '.js'] ? '?v=' + v[f + '.js'] : '')]));
+  h = h.replace('<!--INITIAL-->', () => (initial ? `<script type="application/json" id="ipterm-initial">${safeJson(initial)}</script>\n` : '') +
+    `<script type="application/json" id="ipterm-libs">${safeJson(libSrc)}</script>`);
   return new Response(h, {
     status,
     headers: {
@@ -4509,7 +4569,9 @@ function homeStatic(d, p) {
   return `<div class="static" id="static" data-nosnippet>` +
     `<div class="ln sys">ipterm 0.2 · IP address lookup</div><div class="ln sys">type help for commands, or enter any IP address, domain or ASN</div>` +
     `<div class="ln echo"><span class="ps1">guest@ipterm:~$ </span>whoami</div>` +
-    `<div class="head"><span class="hip">whoami</span><span class="tag">IPv${p.v}</span><span class="tag ${pub ? 'pub' : 'priv'}">${pub ? 'public' : 'non-public'}</span><span class="tag">cloudflare edge</span></div>` +
+    `<div class="head"><span class="hip">whoami</span><span class="tag">IPv${p.v}</span><span class="tag ${pub ? 'pub' : 'priv'}">${pub ? 'public' : 'non-public'}</span><span class="tag">cloudflare edge</span>` +
+    // the terminal's [share] [copy] [md] (shareBar() in app.js), which wraps to a line of its own on a phone
+    `<span class="share js-only" aria-hidden="true"><span class="share-btn">share</span><span class="share-btn">copy</span><span class="share-btn">md</span></span></div>` +
     map + `<dl class="kv">` + row('your ip', esc(d.ip), 'big') +
     row('', 'This is your public IP address: the number websites and apps see when you connect. Its location is roughly where your internet provider is, not your home.', 'plain') +
     row(p.v === 4 ? 'IPv6' : 'IPv4', '<span class="ttl">checking…</span>', 'js-only') +
@@ -5245,9 +5307,9 @@ ${days}` });
 // A plain document in the guides' style (.doc in app.css), for /changes and /public-dns: no terminal and no script but
 // the theme's (prefs.js). name: the word in the header and the breadcrumb; cmd: the prompt line above the heading;
 // body: what follows it in <main>, indented by four spaces.
-function docPage(io, { path, name, cmd, title, desc, body }) {
+async function docPage(io, { path, name, cmd, title, desc, body }) {
   const canonical = esc(io.url.origin + encodePath(path));
-  return new Response(`<!doctype html>
+  return new Response(assetLinks(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -5266,6 +5328,8 @@ function docPage(io, { path, name, cmd, title, desc, body }) {
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="theme-color" content="#030805">
+<link rel="preload" href="/fonts/ibm-plex-mono-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/vt323-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
 <script src="/prefs.js"></script>
 <link rel="stylesheet" href="/app.css">
 </head>
@@ -5283,7 +5347,7 @@ ${body}
 </div>
 </body>
 </html>
-`, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=300', vary: 'Accept, User-Agent' } });
+`, await assetVersions(io)), { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=300', vary: 'Accept, User-Agent' } });
 }
 
 // Words wrapped to lines of at most w characters (a word longer than that, a URL, gets a line of its own).

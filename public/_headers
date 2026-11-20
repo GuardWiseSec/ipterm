@@ -18,6 +18,37 @@
 /fonts/*
   Cache-Control: public, max-age=31536000, immutable
 
+# The pages link these with their version (?v=, from the file's ETag: assetVersions() in src/worker.js), so a changed
+# file gets a new address and browsers can keep each one for a year without asking again. Every page that links one
+# goes through the Worker's assetLinks(): a bare link (no ?v=) would keep an old copy for that long.
+/app.css
+  Cache-Control: public, max-age=31536000, immutable
+
+/app.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/prefs.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/cidr.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/land.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/ports.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/resolvers.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/leakgrade.js
+  Cache-Control: public, max-age=31536000, immutable
+
+# The sponsored line's list: fetched by every terminal page as app.js starts. Five minutes, as the pages themselves.
+/sponsors.json
+  Cache-Control: public, max-age=300
+
 /favicon.ico
   Cache-Control: public, max-age=86400
 

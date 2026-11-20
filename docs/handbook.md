@@ -761,6 +761,10 @@ search menu and Chrome lists ipterm under its site search shortcuts. It's writte
 `src/worker.js` and `public/app.js`, kept in step). On `/api` itself the form works without JavaScript too, which is
 why the CSP's `form-action` is `'self'` rather than `'none'`: the form may only submit to this site.
 
+**The terminal's prompt** is a form to `/go` as well (`action="/go"`, the input named `q`, in `public/index.html`), so
+Enter before `app.js` has run, on a slow network or without JavaScript, goes to the page for what was typed rather than
+reloading the page it's on. Once `app.js` runs, its submit handler keeps the form on the page and runs the command.
+
 ### Subnet calculator
 
 `cidr 10.0.0.0/22`, `cidr 192.168.1.10 255.255.255.0`, `cidr 2001:db8::/48`, or just type a range. It shows the
@@ -1571,8 +1575,8 @@ as a static file (`run_worker_first`).
 - `/<ip>` and `/AS<number>` are real pages with their own title, h1, description, canonical link,
   social-share tags and breadcrumbs (BreadcrumbList structured data), plus a plain summary of the
   result in the HTML itself. That summary is what search engines index and what visitors without
-  JavaScript see. On load the terminal redraws the heading line and table, and the summary sentence
-  and links stay, so crawlers that run JavaScript still see them.
+  JavaScript see. On load the terminal redraws the heading line and table, at once and where the server's
+  were (see "How pages load"), and the summary sentence and links stay, so crawlers that run JavaScript still see them.
 - Link previews: chat apps and social sites (Facebook, WhatsApp, Slack, Discord, Telegram, X,
   LinkedIn, iMessage, Reddit, Mastodon, Bluesky, Embedly, Iframely) get the HTML page even when they
   don't ask for `text/html`, so shared links preview with a title and image. So do search engine
@@ -1880,6 +1884,8 @@ Edit `public/sponsors.json` and run `npx wrangler deploy` to change it:
 | `label` | Optional tag text instead of `sponsored`, e.g. `affiliate` |
 
 Nothing the visitor copies or shares (`copy`, `copy md`, `share`) carries the sponsored line.
+Browsers keep `sponsors.json` for five minutes (`public/_headers`), so a change reaches everyone within five minutes
+of the deploy.
 Targeting by result type works without tracking: a VPN offer fits `check`, a hosting offer fits `asn`.
 `whoami` has no VPN signal, so a VPN offer on `whoami` is also shown to visitors who are already on a VPN;
 `check` only appears when leaktest's VPN detection ran and found no VPN, and not after an earlier run in the same
@@ -1918,11 +1924,86 @@ page paints, so there is no flash of the default theme. Settings live in the vis
 `favicon.svg` is the source. `favicon.ico`, `apple-touch-icon.png`, `icon-192.png`, `icon-512.png` and
 `site.webmanifest` cover browsers, iOS home screens and Android installs.
 
+## How pages load
+
+A terminal page is its HTML (with the result in it), `public/prefs.js` (blocking on purpose, so a saved theme applies
+before the first paint), `public/app.css`, two preloaded fonts and the deferred scripts. With no build step, the
+files go out as they are in the commit; what keeps a phone on a slow network from waiting is how few of them a page
+asks for, and how rarely:
+
+- **Only the libraries a page draws on.** `public/index.html` lists all six scripts. `shell()` in `src/worker.js`
+  keeps `cidr.js` and `app.js` on every page and takes out the libraries the page doesn't draw on as it boots
+  (`libsFor()`): `land.js` (the map's outlines, the largest) for the homepage and an address IPinfo places,
+  `resolvers.js` for a public DNS resolver's address (its IP page and its whois), `ports.js` for `/port` and the port
+  pages, and `leakgrade.js` for `/leaktest` and a shared result. A command typed later loads what it needs itself
+  (`lib()` and the `need…()` loaders in `public/app.js`), once, from the versioned addresses the page lists in
+  `<script type="application/json" id="ipterm-libs">`, while it waits for its own answer: `lookup` and `whoami` load
+  the map (and `lookup` the resolver list) during the API call, `whois <address>` the resolver list during the
+  registry's, and `port`, `public-dns`, `leaktest`, `man leaktest` and Tab after `port` what they use. If one doesn't
+  load, the command says so as it always has ("The port list did not load..."), and the next one tries again.
+
+  | Page | Deferred JS before (raw / on the wire) | After |
+  | --- | --- | --- |
+  | `/`, an address IPinfo places | 438 KB / 147 KB | 389 KB / 129 KB |
+  | a public DNS resolver's address | 438 KB / 147 KB | 419 KB / 139 KB |
+  | `/whois/<resolver>` | 438 KB / 147 KB | 301 KB / 97 KB |
+  | `/port`, `/port/<n>` | 438 KB / 147 KB | 290 KB / 95 KB |
+  | `/leaktest`, `/leaktest/r/<code>` | 438 KB / 147 KB | 277 KB / 89 KB |
+  | DNS, mail, report card, ASN, `/cidr`, domain whois and non-public address pages, tool pages, the 404 | 438 KB / 147 KB | 272 KB / 87 KB |
+
+  (On the wire: brotli at Cloudflare's level, as measured live. `app.js` grew by 1.4 KB on the wire for the loader.)
+- **Kept a year, asked for once.** Every link to `app.css`, `prefs.js` and the six scripts carries the file's version,
+  `?v=` and the start of its ETag (a hash of its content, read once per isolate through the assets binding:
+  `assetVersions()` and `assetLinks()`), on terminal pages, on `/changes` and `/public-dns` (`docPage()`), and on the
+  privacy policy and the guides (`withOrigin()`). Static files ignore the query, so no new files are needed.
+  `public/_headers` lets browsers keep those files a year (`immutable`): a return visit asks for none of them, where it
+  used to revalidate all eight, a round trip each before the page could paint and boot. A deploy that changes a file
+  changes its address; the others stay cached. A static page's ETag is the file's plus a hash of the versions, so a
+  browser never keeps (and keeps getting 304s for) a copy that links an older `app.css`; the assets binding is asked
+  without the request's `If-None-Match`, and the Worker answers it. Without ETags the deployed version's id stands
+  in. `sponsors.json` is kept five minutes, like the pages. **A new script or stylesheet** goes in `VERSIONED` in
+  `src/worker.js`, `public/_headers` and `run_worker_first`'s exclusions together: linked bare, it would stay in
+  browsers for a year. `tools/check_loading.mjs` fails if any page links one bare.
+- **The fonts on first paint.** IBM Plex Mono 400 (the text) and VT323 (the logo, your IP, the guides' headings) are
+  preloaded on every page: the terminal, `docPage()`, the privacy policy, `/guides` and every guide (the template in
+  `tools/build_guides.py`). The first paint is then in the right fonts more often, and nothing reflows when VT323
+  arrives (in the fallback font, which is half as wide again, a guide's heading took three lines on a phone where VT323
+  takes two, and your IP two where it takes one).
+- **The result where the server put it.** A page that comes with its result (the homepage, a lookup's page, a port's
+  page, a shared leak test result) swaps the server's copy for the terminal's in one frame, as the homepage always
+  did, instead of typing it out again row by row while the screen follows it and then jumping back up to the command
+  (`fast`, `hold` and `settle()` in `start()` in `public/app.js`). That frame already shows the result where the end
+  of the boot leaves it, so nothing moves when the sponsored line or `next:` arrive. The homepage's server copy has
+  the `[share] [copy] [md]` the terminal draws (`homeStatic()`; on a phone it wraps to a line of its own), so its swap
+  moves nothing. Commands typed afterwards type out as before.
+- **The prompt before the script.** The prompt is a form to `/go` with the command as `q`: Enter before `app.js` runs,
+  or without JavaScript, goes to the page for what was typed (see "Address-bar search") instead of reloading the
+  same page. Once `app.js` runs, it handles the form itself.
+
+**Measured** (2026-11-20, before and after this pass): the Worker run in Node with its upstreams stubbed and the static
+files served as Cloudflare serves them (ETags, `public/_headers`, brotli level 4, over HTTP/2), Chrome emulating a
+phone (375×812) on Lighthouse's slow 4G (1.6 Mbit/s, 150 ms), cold loads, medians of 8 to 10 runs taken in turn.
+
+| | Before | After |
+| --- | --- | --- |
+| `/dns/example.com`: terminal live / result drawn | 1.52 s / 1.97 s | 1.11 s / 1.12 s |
+| `/8.8.8.8`: terminal live / result drawn | 1.54 s / 2.18 s | 1.38 s / 1.38 s |
+| `/`: terminal live / whoami done | 1.49 s / 1.64 s | 1.30 s / 1.48 s |
+| Same, with the CPU slowed 4×: `/8.8.8.8` result drawn | 6.2 s | 2.7 s |
+| A return visit to a terminal page: its 8 files and `sponsors.json` | 9 requests (a 304 each) | none |
+| A return visit to a guide or the privacy policy | the page and 2 304s | one 304 |
+| Layout shift as it boots (CLS, CPU 4×): `/dns/example.com`, a guide | 0.17, 0.21 | 0, 0 |
+
+First paint is about 0.1 s later on a cold visit at that speed (`/privacy` 0.50 → 0.61 s, `/` 0.60 → 0.74 s): that is the
+font preloads, which share the connection with `app.css` (without them, the same pages paint as before). Cloudflare's
+HTTP/2 and HTTP/3 send the stylesheet first, which the local server doesn't, so live it should cost less; it buys a
+first paint that doesn't reflow when VT323 arrives. A return visit has the fonts already.
+
 ## Request limits
 
 The Worker only runs for pages and the API (`run_worker_first` in `wrangler.toml`). CSS, JavaScript,
 fonts, images and map data are served directly by Cloudflare, which is free and unlimited, and get their
-headers from `public/_headers`. A first visit costs 1 Worker request (the homepage carries the visitor's
+headers from `public/_headers` (browsers keep the scripts and stylesheet a year: see "How pages load"). A first visit costs 1 Worker request (the homepage carries the visitor's
 address, so the terminal doesn't call the API) and each further lookup or page 1, so the free plan's 100,000
 requests a day covers up to about 100,000 visits. Every curl call (`/help`, `/asn`, `/8.8.8.8/org`, a
 `?format=text` lookup) is one request too; `/openapi.json`, `/llms.txt` and `/opensearch.xml` are not. A search
@@ -2167,7 +2248,9 @@ or later), and `npm test` runs them all: `node tools/check_bots.mjs` (bots never
 `node tools/check_timeouts.mjs` (silent registries and the terminal's time limit), `node tools/check_relay.mjs`
 (ARIN's records through RIPEstat when ARIN fails), `node tools/check_corrections.mjs` (the corrections line, the issue
 forms and `/changes`), `node tools/check_resolvers.mjs` (the public DNS resolvers' data, pages, sitemap,
-`/public-dns` and the terminal), the first part of `node tools/check_block.mjs` and dnsleak-server's own tests
+`/public-dns` and the terminal), `node tools/check_loading.mjs` (which scripts each page sends, versioned links and
+their year-long cache, a static page's ETag, the font preloads, the prompt's fallback to `/go` and what `app.js` loads
+on demand: see "How pages load"), the first part of `node tools/check_block.mjs` and dnsleak-server's own tests
 (`npm test` in `dnsleak-server/`).
 
 **`npm test`** (`tools/test.mjs`) runs those one at a time, each in its own Node process (never side by side:
@@ -2418,6 +2501,18 @@ and none of them in `/sitemap-pages.xml`, and the curated routing list unchanged
 `public-dns` lists every address and takes a service, and the command is in `help`, `man`, the aliases and the
 did-you-mean list. Last the wiring (`index.html`, `wrangler.toml`), the guides' links, `/help`, `llms.txt`,
 `openapi.json`, `/changes` (its count) and this handbook (its counts).
+
+`node tools/check_loading.mjs` (Node 22.15 or later) checks how pages load (see "How pages load"), with no server and
+no network, its assets binding answering from `public/` with an ETag that hashes the file. `libsFor()` for every kind
+of page (a resolver's address whose lookup failed and an IPinfo bogon included), then the pages themselves: the scripts
+each sends, in `index.html`'s order and versioned, and `#ipterm-libs`. Every link to a versioned file, on every
+terminal page, `/changes`, `/public-dns`, the privacy policy, `/guides` and each guide, carries its file's version and
+none is bare; `public/_headers` keeps exactly those a year and `sponsors.json` five minutes; the pages link no other
+script or stylesheet; and with no ETags the deployed version's id stands in. A static page's ETag and its 304 (and the
+whole page for the file's own ETag, which browsers kept from before), the font preloads, the prompt's form and `/go`.
+Then `public/app.js` against stand-ins: `lib()` loads once from the page's address, falls back to `/<file>.js`, says
+null on a failure and tries again; `hrefFor()` links a port exactly as `PORTS.parse` reads one; and the homepage's
+server copy ends its head line with `shareBar()`'s buttons.
 
 ## License
 

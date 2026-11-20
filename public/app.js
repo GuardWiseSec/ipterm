@@ -76,11 +76,32 @@
     }
   }
 
+  /* ---------- libraries on demand ----------
+     land.js (the map), ports.js, resolvers.js and leakgrade.js are needed by some pages and commands only. A page comes
+     with the ones it draws on as it boots (libsFor() in worker.js); a command that needs another loads it here, once,
+     from the versioned address the page lists in #ipterm-libs, while it waits for its own answer. If one fails to load,
+     its global stays null and the command says so as it always has, and the next command that needs it tries again. */
+  const LIB_SRC = (() => { try { return JSON.parse(document.getElementById('ipterm-libs').textContent) || {}; } catch { return {}; } })();
+  const libLoads = {};
+  function lib(file, name) {
+    if (window[name]) return Promise.resolve(window[name]);
+    return libLoads[file] || (libLoads[file] = new Promise(resolve => {
+      const s = document.createElement('script'), src = LIB_SRC[file];
+      s.src = typeof src === 'string' && src.startsWith(`/${file}.js`) ? src : `/${file}.js`;
+      s.onload = s.onerror = () => {
+        if (!window[name]) { delete libLoads[file]; s.remove(); }
+        resolve(window[name] || null);
+      };
+      document.head.appendChild(s);
+    }));
+  }
+
   /* ---------- dot-matrix map ----------
      Land comes from window.IPTERM_GEO (land.js): delta-encoded rings in 1/20 degree units,
      plus per-country [lat, lon, radius km] for country-level results. Each map rasterizes the
      land into a tiny mask canvas (one pixel per dot), then draws one dot per cell. */
-  const GEO = window.IPTERM_GEO || null;
+  let GEO = window.IPTERM_GEO || null;
+  const needGeo = () => lib('land', 'IPTERM_GEO').then(g => (GEO = g));   // before render() of a result that has a place
   const ASPECT = 2.2, CITY_KM = 50, ZOOM_MS = 1400, PULSE_MS = 20000;
   // Some rings cross the antimeridian by jumping from 180 to -180 (Eurasia at 65°N and 69°N, Wrangel
   // Island at 71°N). Filled as they are, the jumps flip even-odd parity across the whole band, so each
@@ -602,8 +623,8 @@
       case 'public-dns': return '/public-dns';                 // a document page, not the terminal's (the click runs the command)
       case 'port': {                                           // the page explains the port; the link's click runs the check
         if (!a) return '/port';
-        const n = PORTSLIB && PORTSLIB.parse(a);
-        return n ? '/port/' + n : null;
+        const n = /^\d{1,5}$/.test(a) ? Number(a) : 0;           // as PORTS.parse, which may not be loaded yet
+        return n >= 1 && n <= 65535 ? '/port/' + n : null;
       }
       case 'lookup':
         if (!a) return null;
@@ -903,7 +924,8 @@
   const LEAKTEST_TITLE = 'VPN and DNS leak test: DNS, WebRTC and IPv6 leaks | ipterm';
   const LEAKTEST_TITLE_NO_DNS = 'VPN leak test: WebRTC, IPv6 and time zone check | ipterm';   // before the DNS test is set up
   const ZONE_RE = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
-  const LEAKLIB = window.IPTERM_LEAK || null;
+  let LEAKLIB = window.IPTERM_LEAK || null;
+  const needLeak = () => lib('leakgrade', 'IPTERM_LEAK').then(x => (LEAKLIB = x));
   const [NOT_TESTED, PASS, LEAKED] = [0, 1, 2];        // a graded check's flag, as in leakgrade.js
   const GRADED = ['dns', 'webrtc', 'ipv6', 'tz'];
   let lastLeak = null;                                  // the previous run in this tab, for the compare
@@ -997,7 +1019,8 @@
     setUrl('/leaktest', LEAKTEST_TITLE);
     if (!live) return line('The privacy check tests your real connection, so it only runs on the deployed site.', 'warn');
     const ql = line('running privacy check… (nothing is stored)', 'sys'); const t0 = performance.now();
-    const [d, rtc, trace] = await Promise.all([getJson('/api/check'), webrtcIps(), cfTrace()]);
+    // the grade's rules (leakgrade.js) load, if they aren't here yet, while the checks run
+    const [d, rtc, trace] = await Promise.all([getJson('/api/check'), webrtcIps(), cfTrace(), needLeak()]);
     if (d.error) { ql.textContent = d.error; ql.className = 'ln err'; announce(d.error); return; }
     const p = parseIp(d.ip);
     if (!p) { ql.textContent = 'The server returned an address this page cannot read.'; ql.className = 'ln err'; return; }
@@ -1298,7 +1321,7 @@
   // A shared result (/leaktest/r/<code>): the grade and lines someone else's browser got, from the code
   // alone. It never runs the test: that takes a click on "run yours".
   async function leakResult(code) {
-    const L = LEAKLIB, r = L && L.decode(code);
+    const L = await needLeak(), r = L && L.decode(code);
     if (!r) {
       line(`${code ? `"${String(code).slice(0, 20)}" isn't` : 'That is not'} a leak test result. Result links come from share after leaktest, like /leaktest/r/1bjp.`, 'err');
       return next(['leaktest', 'leaktest', 'run the leak test on this browser'], ['man leaktest', 'man leaktest', 'how the grade works']);
@@ -1329,7 +1352,7 @@
     parseIp(d.ip) && classify(parseIp(d.ip))[0] === 'public' && [`whois ${d.ip}`, `whois ${d.ip}`, 'who your address is registered to']);
 
   async function whoami() {
-    const q = line('querying…', 'sys');
+    const q = line('querying…', 'sys'), geo = needGeo();   // the map's data loads (if it isn't here yet) while the API answers
     if (live) {
       const t0 = performance.now(); const d = await api('');
       if (d.error) { q.textContent = d.error; q.className = 'ln err'; announce(q.textContent); return; }
@@ -1337,11 +1360,13 @@
       if (!p) { q.textContent = 'The server returned an address this page cannot read.'; q.className = 'ln err'; announce(q.textContent); return; }
       q.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
       setUrl('/', TITLE_HOME);
+      await geo;
       await render(p, d.ip, d, true);
       whoamiNext(d);
       return sponsor('whoami');
     }
     q.textContent = 'ok · sample data';
+    await geo;
     await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
     whoamiNext(DEMO.self);
     return sponsor('whoami');
@@ -1370,6 +1395,9 @@
         local && ['router guide', null, "how to find your router's IP address", '/guides/find-router-ip']);
       return;
     }
+    // A typed lookup loads the map's data and the resolver list, if they aren't here yet, while the API answers. A page's
+    // own lookup (pre) already has them when it needs them (libsFor() in worker.js).
+    const libs = !pre && Promise.all([needGeo(), needResolvers()]);
     let d = null;
     if (pre) {
       if (pre.error) line(pre.error, 'err'); else d = pre.data;
@@ -1385,6 +1413,7 @@
     // A public DNS resolver's address is a reference page: its resolver block and corrections line, and no sponsored
     // line (resolverAbout), shown from resolvers.js even when the lookup itself failed. The lookup's rows and map are
     // IPinfo's, as on its page (ipPage() in worker.js); the resolver block says it is anycast where the operator does.
+    if (libs) await libs;
     const res = RESLIB && !(d && d.bogon) ? RESLIB.get(ipText) : null;
     if (d) setUrl(ipPath(ipText), ipTitle(ipText, d));
     await render(p, ipText, d, false);
@@ -1576,7 +1605,8 @@
      other) on the one port you name, and says whether it was accepted, turned away or got no answer. It
      only runs when you ask: the /port/<n> pages explain the port and offer a button. What each port is
      for comes from ports.js, shared with the Worker; how a result reads comes from the Worker. */
-  const PORTSLIB = window.IPTERM_PORTS || null;
+  let PORTSLIB = window.IPTERM_PORTS || null;
+  const needPorts = () => lib('ports', 'IPTERM_PORTS').then(x => (PORTSLIB = x));
   const portTitle = (n, s) => (s ? `Port ${n} (${s.name})` : `Port ${n}`) +
     (PORTSLIB && PORTSLIB.untestable(n) ? ": what it's for and why ipterm can't check it" : ": check if it's open on your IP") + ' | ipterm';
   const PORT_STATE = { open: ['st-ok', 'open'], closed: ['st-warn', 'closed'], 'no-answer': ['st-warn', 'no answer'], untestable: ['st-info', 'not tested'] };
@@ -1664,7 +1694,8 @@
     else next(d.state !== 'untestable' && ['check again', `port ${n}`, 'run the check again after a change'], about, ['port', 'port', 'common ports'], ['whoami', 'whoami', 'your IP address and network']);
   }
 
-  function portCmd(args) {
+  async function portCmd(args) {
+    await needPorts();
     if (!args.length) return portIntro();
     if (!PORTSLIB) return line('The port list did not load. Reload the page and try again.', 'err');
     const [a, b] = args, n = PORTSLIB.parse(a);
@@ -1682,7 +1713,8 @@
      Worker's resolverBlock(), but for routing: the page shows it only when cached, the terminal asks for it (route).
      public-dns lists them all, as /public-dns does. The data is resolvers.js, shared with the Worker; it names no
      place for these addresses, and calls one anycast only where its operator says so. No sponsored line after either. */
-  const RESLIB = window.IPTERM_RESOLVERS || null;
+  let RESLIB = window.IPTERM_RESOLVERS || null;
+  const needResolvers = () => lib('resolvers', 'IPTERM_RESOLVERS').then(x => (RESLIB = x));
   const sourceText = u => u.replace(/^https?:\/\//, '').replace(/\/$/, '');
   async function resolverAbout(r) {
     const s = r.service, x = r.variant;
@@ -2172,6 +2204,9 @@
       next([`lookup ${q}`, `lookup ${q}`, 'what this range is for'], ['whoami', 'whoami', 'your public IP address']);
       return announce(`${q} is not a public address, so there is no registry record.`);
     }
+    // An address's record leads to its block unless it's a public DNS resolver's (blockStart): the resolver list loads,
+    // if it isn't here yet, while the registry answers (a page's own record already has it when it needs it)
+    const libs = !pre && p && needResolvers();
     let d = null;
     if (pre) {
       if (pre.error) return line(pre.error, 'err');
@@ -2185,6 +2220,7 @@
       d = DEMO_WHOIS[q];
       if (!d) return line('Preview mode has sample registry records for 8.8.8.8, AS13335 and example.com only. Live records appear once the Worker is deployed.', 'warn');
     }
+    if (libs) await libs;
     if (!d.found) {
       line(d.message || `No registry record was found for ${q}.`, 'warn');
       if (d.kind === 'domain' && d.reason === 'no-rdap') line('DNS still works for it.', 'sys');
@@ -2404,9 +2440,10 @@
   const MAN = {
     whoami: ['whoami', "your public IP address, the network (ISP) it belongs to and its approximate location: what every website you visit sees. The location is usually your provider's nearest hub, not your home.",
       ['whoami'], ['leaktest', 'lookup', 'copy'], ['', '/me', '/json', '/text', '/city', '/line']],
-    // The sixth entry: the grading rubric, from leakgrade.js (also on the /leaktest page and in docs/handbook.md).
+    // The sixth entry: the grading rubric, from leakgrade.js (also on the /leaktest page and in docs/handbook.md), read when
+    // man runs (after it loads leakgrade.js).
     leaktest: ['leaktest   or   leaktest --result <code>', "VPN and DNS leak test, graded A to F: is your IP a known VPN (Cloudflare WARP, Tor and iCloud Private Relay by name), which DNS servers look up sites for you, and does WebRTC, IPv6 or your time zone give away more than your IP? For DNS, your browser looks up a few random names under ipterm's own DNS server (which answers \"no such name\"), and the check shows which resolvers asked: on a VPN, any outside the VPN's network is a DNS leak. Runs in your browser in a few seconds; nothing is stored. --result <code> shows a shared result without testing anything.",
-      ['leaktest'], ['whoami', 'share'], ['/leaktest/r/1bjp', '/leaktest/r/1bjp?format=text'], [
+      ['leaktest'], ['whoami', 'share'], ['/leaktest/r/1bjp', '/leaktest/r/1bjp?format=text'], () => [
         ...(LEAKLIB ? LEAKLIB.GRADES.map(([g, t], i) => [i ? '' : 'GRADE', `${g}: ${t}`]) : []),
         ...(LEAKLIB ? LEAKLIB.RULES.map((t, i) => [i ? '' : 'COUNTS', t]) : []),
         ['SITES SEE', "your IP, and with it your provider and rough location (or your VPN's), on its own line: never graded."],
@@ -2508,6 +2545,7 @@
   async function man(topic) {
     const t = String(topic || '').toLowerCase(), name = ALIASES[t] || t;
     const m = MAN[name], h = HELP.find(r => r[0].split(' ')[0] === name);
+    if (name === 'leaktest') await needLeak();   // its grading rubric
     const topicGuide = GUIDES.find(g => g[2] === t);
     if (!m && !h && topicGuide) {                 // the guide pages head themselves with `man router-ip` and so on
       const d = el('div', 'ln sys'); d.append(`${t} is a guide: `, guideLink(topicGuide[0]));
@@ -2525,7 +2563,7 @@
     const also = Object.keys(ALIASES).filter(a => ALIASES[a] === name && a !== '?');
     const rows = [['NAME', `${name} - ${m ? m[1] : h[1]}`], ['SYNOPSIS', m ? m[0] : h[0]]];
     if (m) rows.push(['EXAMPLES', joined(m[2].map(c => runnable(c, c)))]);
-    if (m && m[5]) rows.push(...m[5]);
+    if (m && m[5]) rows.push(...(typeof m[5] === 'function' ? m[5]() : m[5]));
     if (also.length) rows.push(['ALSO', also.join(', ')]);
     if (m && m[4]) m[4].forEach((p, i) => { const [f, q] = p.startsWith('-') ? p.split(' ') : ['', p]; rows.push([i ? '' : 'CURL', curlLine(q, f)]); });
     if (m && m[3].length) rows.push(['SEE ALSO', joined(m[3].map(c => cmdButton(c, 'man ' + c)))]);
@@ -2941,7 +2979,7 @@
       case 'asn': return args[0] ? asn(args[0]) : line('usage: asn <number>   example: asn AS13335', 'warn');
       case 'route': return route(args.join(' '));
       case 'port': return portCmd(args);
-      case 'public-dns': return publicDns(args);
+      case 'public-dns': await needResolvers(); return publicDns(args);
       case 'ping': return ping(args);
       case 'traceroute': return traceroute(args[0]);
       case 'share': return share();
@@ -3053,7 +3091,7 @@
     return [...seen];
   }
   let tabCycle = null;                             // { lead, list, i } while Tab steps through several matches
-  function complete() {
+  async function complete() {
     const v = input.value;
     if (tabCycle && v === tabCycle.lead + tabCycle.list[tabCycle.i]) {
       tabCycle.i = (tabCycle.i + 1) % tabCycle.list.length;
@@ -3063,6 +3101,10 @@
     tabCycle = null;
     const lead = v.replace(/\S*$/, ''), word = v.slice(lead.length), before = lead.trim() ? lead.trim().split(/\s+/) : [];
     const c = before.length ? ALIASES[before[0].toLowerCase()] || before[0].toLowerCase() : '';
+    if (c === 'port' && before.length === 1 && !PORTSLIB) {   // the port numbers come from ports.js
+      await needPorts();
+      if (input.value !== v) return;
+    }
     const pool = !before.length ? [...COMMANDS, ...histValues()]
       : before.length === 2 && c === 'dig' && !parseIp(before[1]) ? DNS_TYPES
       : before.length === 1 && WORD_ARGS[c] ? WORD_ARGS[c]()
@@ -3209,6 +3251,7 @@
   try { if (localStorage.getItem('ipterm-fx') === 'off') document.documentElement.dataset.fx = 'off'; } catch {}
   try { matchMedia('(prefers-contrast: more)').addEventListener('change', redrawMaps); } catch {}
 
+  const RESULT_KINDS = ['ip', 'asn', 'whois', 'dns', 'mail', 'grade', 'cidr'];   // pages that come with a lookup's result
   function readInitial() {
     const s = document.getElementById('ipterm-initial');
     if (!s) return null;
@@ -3233,7 +3276,15 @@
     // line (.fix), which the terminal prints after the result it belongs to (fixLine, ipinfoFix).
     if (stat && (selfP || (init && (init.kind === 'notfound' || init.kind === 'leakshare')))) stat.remove();
     else if (stat) stat.querySelectorAll('.head, dl, .api-ref, .badge-ref, .fix').forEach(n => n.remove());   // the report card prints its own badge Markdown
-    fast = hold = !!selfP;                                // swap the server's copy for the terminal's in one frame
+    // A page that came with its result (your whoami, a shared /8.8.8.8, a port's page, a shared leak test result) swaps the
+    // server's copy for the terminal's in one frame (fast), instead of typing it out again row by row, and the screen
+    // stays put meanwhile (hold). Commands run afterwards type out as usual.
+    const withResult = selfP || (init && (['port', 'leakshare'].includes(init.kind) || (RESULT_KINDS.includes(init.kind) && init.query)));
+    fast = hold = !!withResult;
+    // That frame shows a result where the end of the boot leaves it (at its command when it is taller than the screen:
+    // revealFrom), so nothing moves when the sponsored line or next: arrive (end()).
+    const settle = mark => requestAnimationFrame(() => { if (hold) { screen.scrollTop = screen.scrollHeight; revealFrom(mark); } });
+    const end = mark => { fast = hold = false; flushNext(); revealFrom(mark); };
     await lines(['ipterm 0.2 · IP address lookup', 'type help for commands, or enter any IP address, domain or ASN'], 'sys');
 
     if (init && init.kind === 'notfound') { setLive(true); notFound(init); return focusInput(); }
@@ -3245,10 +3296,10 @@
     if (init && init.kind === 'leakshare') {
       setLive(true);
       const cmd = running = 'leaktest --result ' + init.code, mark = out.lastChild;
-      echo(cmd); addHist(cmd);
+      echo(cmd); addHist(cmd); settle(mark);
       navPush = false;
       try { await leakResult(init.code); } finally { navPush = true; }
-      flushNext(); revealFrom(mark);
+      end(mark);
       return focusInput();
     }
     if (init && init.kind === 'tool' && (TOOL_INTRO[init.tool] || ['leaktest', 'port', 'api'].includes(init.tool))) {
@@ -3264,16 +3315,17 @@
     // A port's page explains it and offers a button: it never checks on load (crawlers, prefetches, Back).
     if (init && init.kind === 'port') {
       setLive(true);
+      await needPorts();                                  // (the page comes with ports.js: libsFor() in worker.js)
       const n = PORTSLIB ? PORTSLIB.parse(init.query) : null;
       const cmd = running = n && !init.error ? `port ${n} --info` : `port ${init.query}`, mark = out.lastChild;
-      echo(cmd); addHist(cmd);
+      echo(cmd); addHist(cmd); settle(mark);
       navPush = false;
       try { if (n && !init.error) await portAbout(n); else line(init.error || 'Not a port number. Ports run from 1 to 65535: port 22', 'err'); }
       finally { navPush = true; }
-      flushNext(); revealFrom(mark);
+      end(mark);
       return focusInput();
     }
-    if (init && ['ip', 'asn', 'whois', 'dns', 'mail', 'grade', 'cidr'].includes(init.kind) && init.query) {
+    if (init && RESULT_KINDS.includes(init.kind) && init.query) {
       setLive(true);
       const mailCmd = ['mail', init.query, ...(init.dkim ? ['--dkim', init.dkim] : [])];
       const cmd = init.kind === 'cidr' ? 'cidr ' + init.query : init.kind === 'dns' ? 'dig ' + init.query + (init.qtype && init.qtype !== 'PTR' ? ' ' + init.qtype : '')
@@ -3282,7 +3334,7 @@
       if (init.kind === 'ip' && new URLSearchParams(location.search).get('block') === '0') own(init.query);
       running = cmd;
       const mark = out.lastChild;
-      echo(cmd); addHist(cmd);
+      echo(cmd); addHist(cmd); settle(mark);
       navPush = false;
       try {
         await (init.kind === 'asn' ? asn(init.query, init) : init.kind === 'whois' ? whois(init.query, init) : init.kind === 'dns' ? dns(init.query, init.qtype, init)
@@ -3291,7 +3343,7 @@
       }
       finally { navPush = true; }
       if (!nextItems && failedUpstream(mark)) next(['retry', cmd, 'run the same command again']);
-      flushNext(); revealFrom(mark);
+      end(mark);
       return focusInput();
     }
 
@@ -3299,6 +3351,7 @@
     if (selfP) {
       setLive(true);
       const d = init.data;
+      await needGeo();                                    // (the homepage comes with land.js: libsFor() in worker.js)
       await render(selfP, d.ip, d, true);
       fast = false;
       whoamiNext(d);
@@ -3310,12 +3363,13 @@
     }
     fast = hold = false;
     const q = line('querying…', 'sys');
-    const t0 = performance.now();
+    const t0 = performance.now(), geo = needGeo();
     const d = await api('');
     const p = d && !d.error ? parseIp(d.ip) : null;
     if (p) {
       setLive(true);
       q.textContent = `ok · ${Math.round(performance.now() - t0)} ms`;
+      await geo;
       await render(p, d.ip, d, true);
       whoamiNext(d);
       await sponsor('whoami');
@@ -3327,6 +3381,7 @@
       setLive(false);
       q.textContent = 'No lookup API at /api/lookup, so this preview runs on sample data. Deploy the Worker to go live.';
       q.className = 'ln warn'; announce(q.textContent);
+      await geo;
       await render(parseIp(DEMO.self.ip), DEMO.self.ip, { ...DEMO.self }, true);
       whoamiNext(DEMO.self);
       await sponsor('whoami');
